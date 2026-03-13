@@ -8,6 +8,7 @@
 section .data
 
 ; IDT table - 256 entries, 8 bytes each
+global idt_start
 idt_start:
     times 256 dq 0
 idt_end:

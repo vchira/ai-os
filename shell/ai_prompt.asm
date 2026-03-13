@@ -12,7 +12,7 @@ section .data
 ai_prompt_str:  db 10, 'ai> ', 0
 
 ; Welcome message
-ai_welcome:     db 'Welcome to AiOS. Type anything to talk to Claude AI.', 10
+ai_welcome:     db 'Welcome to AiOS. Type anything to talk to AI.', 10
                 db 'Use /help to see available commands.', 10, 0
 
 ; Slash command strings
@@ -28,6 +28,8 @@ slash_color:    db '/color', 0
 slash_uptime:   db '/uptime', 0
 slash_meminfo:  db '/meminfo', 0
 slash_cpuinfo:  db '/cpuinfo', 0
+slash_keyboard: db '/keyboard', 0
+slash_provider: db '/provider', 0
 
 ; Help text
 ai_help_text:
@@ -42,12 +44,14 @@ ai_help_text:
     db '  /color   - Change text color (usage: /color <0-F>)', 10
     db '  /ver     - Show OS version', 10
     db '  /reboot  - Reboot the system', 10
+    db '  /keyboard - Switch keyboard layout', 10
+    db '  /provider - Switch AI provider (Claude/OpenAI/Ollama)', 10
     db '  /halt    - Halt the CPU', 10
     db 10
-    db '  Anything else is sent directly to Claude AI.', 10, 0
+    db '  Anything else is sent directly to the active AI.', 10, 0
 
 ; Thinking indicator
-ai_thinking:    db '[Claude] Thinking...', 10, 0
+ai_thinking:    db '[AI] Thinking...', 10, 0
 ai_err_msg:     db '[Error] Claude API request failed', 10, 0
 
 ; Shell messages
@@ -95,6 +99,24 @@ ai_color_help:  db 'Usage: /color <hex 0-F>', 10
                 db '  E=Yellow F=White', 10, 0
 ai_color_set:   db 'Color set.', 10, 0
 
+; Keyboard layout strings
+ai_kbd_current: db 'Current layout: ', 0
+ai_kbd_avail:   db 'Available layouts:', 10, 0
+ai_kbd_prefix:  db '  ', 0
+ai_kbd_arrow:   db ' <- active', 0
+ai_kbd_set_ok:  db 'Keyboard layout changed to: ', 0
+ai_kbd_invalid: db 'Invalid layout. Use /keyboard to see available layouts.', 10, 0
+ai_kbd_usage:   db 'Usage: /keyboard <number>', 10, 0
+
+; Provider strings
+ai_prov_current: db 'Active provider: ', 0
+ai_prov_model:   db ' (model: ', 0
+ai_prov_model_e: db ')', 10, 0
+ai_prov_avail:   db 'Available providers:', 10, 0
+ai_prov_nokey:   db ' [no API key]', 0
+ai_prov_set_ok:  db 'Switched to: ', 0
+ai_prov_invalid: db 'Invalid provider. Use /provider to see list.', 10, 0
+
 section .bss
 ; Input buffer
 ai_input:       resb 256
@@ -120,12 +142,22 @@ extern vga_color
 extern keyboard_getchar
 extern memory_get_total
 extern timer_get_uptime_secs
-extern claude_ask
+extern llm_ask
+extern llm_get_num_providers
+extern llm_get_active
+extern llm_set_active
+extern llm_get_provider_name
+extern llm_get_provider_model
+extern llm_is_configured
 extern net_is_up
 extern net_get_ip
 extern net_poll
 extern pci_scan
 extern shell_run_interactive
+extern keyboard_set_layout
+extern keyboard_get_layout
+extern keyboard_get_layout_name
+extern keyboard_get_num_layouts
 
 ; =============================================================================
 ; ai_prompt_run - Main AI prompt loop
@@ -229,11 +261,11 @@ ai_send_to_claude:
     mov esi, ai_thinking
     call vga_print
 
-    ; Call claude_ask(question, response_buf, max_len)
+    ; Call llm_ask(question, response_buf, max_len)
     push dword 4095
     push dword ai_resp
     push dword ai_input
-    call claude_ask
+    call llm_ask
     add esp, 12
 
     ; Check return value
@@ -251,10 +283,12 @@ ai_send_to_claude:
     jmp .ask_done
 
 .ask_error:
+    ; ai_resp contains the detailed error message from claude_ask
     mov al, (COLOR_BLACK << 4) | COLOR_LRED
     call vga_set_color
-    mov esi, ai_err_msg
+    mov esi, ai_resp
     call vga_print
+    call vga_newline
     mov al, DEFAULT_COLOR
     call vga_set_color
 
@@ -354,6 +388,20 @@ ai_exec_slash:
     call ai_str_compare
     test eax, eax
     jnz .do_cpuinfo
+
+    ; /keyboard
+    mov esi, ai_input
+    mov edi, slash_keyboard
+    call ai_str_startswith
+    test eax, eax
+    jnz .do_keyboard
+
+    ; /provider
+    mov esi, ai_input
+    mov edi, slash_provider
+    call ai_str_startswith
+    test eax, eax
+    jnz .do_provider
 
     ; Unknown slash command
     mov esi, ai_unknown_cmd
@@ -494,6 +542,256 @@ ai_exec_slash:
     mov esi, ai_cpuinfo_buf
     call vga_print
     call vga_newline
+    jmp .slash_done
+
+.do_keyboard:
+    ; Check if argument provided: "/keyboard " is 10 chars
+    mov esi, ai_input
+    add esi, 9                  ; skip "/keyboard"
+    cmp byte [esi], 0
+    je .kbd_show_layouts        ; No argument — show list
+    cmp byte [esi], ' '
+    jne .kbd_show_layouts
+    inc esi                     ; skip space
+
+    ; Parse layout number (single digit 0-9)
+    mov al, [esi]
+    cmp al, '0'
+    jl .kbd_invalid
+    cmp al, '9'
+    jg .kbd_invalid
+    sub al, '0'
+    movzx eax, al
+
+    ; Call keyboard_set_layout(eax)
+    push eax
+    call keyboard_set_layout
+    add esp, 4
+    cmp eax, 0
+    jl .kbd_invalid
+
+    ; Print success message with layout name
+    mov esi, ai_kbd_set_ok
+    call vga_print
+    call keyboard_get_layout
+    push eax
+    call keyboard_get_layout_name
+    add esp, 4
+    mov esi, eax
+    call vga_print
+    call vga_newline
+    jmp .slash_done
+
+.kbd_show_layouts:
+    ; Show current layout
+    mov esi, ai_kbd_current
+    call vga_print
+    call keyboard_get_layout
+    push eax                    ; save current layout ID
+    push eax
+    call keyboard_get_layout_name
+    add esp, 4
+    mov esi, eax
+    call vga_print
+    call vga_newline
+
+    ; List all layouts
+    mov esi, ai_kbd_avail
+    call vga_print
+
+    call keyboard_get_num_layouts
+    mov ecx, eax               ; num layouts
+    xor ebx, ebx               ; index = 0
+    pop edx                     ; current layout ID
+
+.kbd_list_loop:
+    cmp ebx, ecx
+    jge .slash_done
+
+    ; Print "  "
+    push ecx
+    push edx
+    mov esi, ai_kbd_prefix
+    call vga_print
+
+    ; Print index number
+    mov eax, ebx
+    call vga_print_dec
+
+    ; Print ": "
+    mov al, ':'
+    call vga_putchar
+    mov al, ' '
+    call vga_putchar
+
+    ; Print layout name
+    push ebx
+    call keyboard_get_layout_name
+    add esp, 4
+    mov esi, eax
+    call vga_print
+
+    ; Mark active layout
+    pop edx
+    pop ecx
+    cmp ebx, edx
+    jne .kbd_not_active
+    mov esi, ai_kbd_arrow
+    call vga_print
+.kbd_not_active:
+    call vga_newline
+    inc ebx
+    push ecx
+    push edx
+    pop edx
+    pop ecx
+    jmp .kbd_list_loop
+
+.kbd_invalid:
+    mov esi, ai_kbd_invalid
+    call vga_print
+    jmp .slash_done
+
+.do_provider:
+    ; Check if argument provided: "/provider " is 10 chars
+    mov esi, ai_input
+    add esi, 9                  ; skip "/provider"
+    cmp byte [esi], 0
+    je .prov_show_list
+    cmp byte [esi], ' '
+    jne .prov_show_list
+    inc esi                     ; skip space
+
+    ; Parse provider number (single digit 0-9)
+    mov al, [esi]
+    cmp al, '0'
+    jl .prov_invalid
+    cmp al, '9'
+    jg .prov_invalid
+    sub al, '0'
+    movzx eax, al
+
+    ; Call llm_set_active(eax)
+    push eax
+    call llm_set_active
+    add esp, 4
+    cmp eax, 0
+    jl .prov_invalid
+
+    ; Print success
+    mov esi, ai_prov_set_ok
+    call vga_print
+    call llm_get_active
+    push eax
+    call llm_get_provider_name
+    add esp, 4
+    mov esi, eax
+    call vga_print
+    call vga_newline
+    jmp .slash_done
+
+.prov_show_list:
+    ; Show current provider
+    mov esi, ai_prov_current
+    call vga_print
+    call llm_get_active
+    push eax                    ; save active ID
+    push eax
+    call llm_get_provider_name
+    add esp, 4
+    mov esi, eax
+    call vga_print
+
+    ; Show model
+    mov esi, ai_prov_model
+    call vga_print
+    ; active ID still on stack from saved push
+    mov eax, [esp]              ; peek at saved active ID
+    push eax
+    call llm_get_provider_model
+    add esp, 4
+    mov esi, eax
+    call vga_print
+    mov esi, ai_prov_model_e
+    call vga_print
+
+    ; List all providers
+    mov esi, ai_prov_avail
+    call vga_print
+
+    call llm_get_num_providers
+    mov ecx, eax               ; num providers
+    xor ebx, ebx               ; index = 0
+    pop edx                     ; active provider ID
+
+.prov_list_loop:
+    cmp ebx, ecx
+    jge .slash_done
+
+    push ecx
+    push edx
+
+    ; Print "  "
+    mov esi, ai_kbd_prefix      ; reuse "  " string
+    call vga_print
+
+    ; Print index
+    mov eax, ebx
+    call vga_print_dec
+
+    ; Print ": "
+    mov al, ':'
+    call vga_putchar
+    mov al, ' '
+    call vga_putchar
+
+    ; Print provider name
+    push ebx
+    call llm_get_provider_name
+    add esp, 4
+    mov esi, eax
+    call vga_print
+
+    ; Print model in parens
+    mov esi, ai_prov_model
+    call vga_print
+    push ebx
+    call llm_get_provider_model
+    add esp, 4
+    mov esi, eax
+    call vga_print
+    mov al, ')'
+    call vga_putchar
+
+    ; Check if configured
+    push ebx
+    call llm_is_configured
+    add esp, 4
+    test eax, eax
+    jnz .prov_is_configured
+    mov esi, ai_prov_nokey
+    call vga_print
+.prov_is_configured:
+
+    ; Mark active
+    pop edx
+    pop ecx
+    cmp ebx, edx
+    jne .prov_not_active
+    mov esi, ai_kbd_arrow       ; reuse " <- active"
+    call vga_print
+.prov_not_active:
+    call vga_newline
+    inc ebx
+    push ecx
+    push edx
+    pop edx
+    pop ecx
+    jmp .prov_list_loop
+
+.prov_invalid:
+    mov esi, ai_prov_invalid
+    call vga_print
     jmp .slash_done
 
 .slash_done:

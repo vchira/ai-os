@@ -8,7 +8,8 @@
 #include "include/heap.h"
 
 #define HTTP_BUF_SIZE   8192
-#define HTTP_TIMEOUT    3000  /* 30 seconds (in 10ms ticks) */
+#define HTTP_CONNECT_TIMEOUT_MS  15000  /* 15 seconds */
+#define HTTP_RECV_TIMEOUT_MS     30000  /* 30 seconds */
 
 /* Connection state */
 typedef struct {
@@ -63,6 +64,7 @@ static void http_err_cb(void *arg, err_t err) {
 }
 
 extern void net_poll(void);
+extern u32_t sys_now(void);
 
 /* Low-level HTTP POST — returns response body in resp_buf */
 int http_post(ip_addr_t *server_ip, uint16_t port,
@@ -75,7 +77,7 @@ int http_post(ip_addr_t *server_ip, uint16_t port,
     conn.recv_cap = resp_max;
 
     struct tcp_pcb *pcb = tcp_new();
-    if (!pcb) return -1;
+    if (!pcb) return -10;  /* TCP alloc failed */
     conn.pcb = pcb;
 
     tcp_arg(pcb, &conn);
@@ -86,16 +88,22 @@ int http_post(ip_addr_t *server_ip, uint16_t port,
     err_t err = tcp_connect(pcb, server_ip, port, http_connected_cb);
     if (err != ERR_OK) {
         tcp_abort(pcb);
-        return -1;
+        return -11;  /* TCP connect call failed */
     }
 
-    /* Wait for connection */
-    int timeout = HTTP_TIMEOUT;
-    while (!conn.connected && !conn.error && timeout-- > 0)
+    /* Wait for connection — real-time timeout */
+    u32_t start = sys_now();
+    while (!conn.connected && !conn.error && (sys_now() - start) < HTTP_CONNECT_TIMEOUT_MS) {
         net_poll();
-    if (conn.error || !conn.connected) {
+        __asm__ volatile("hlt");
+    }
+    if (conn.error) {
         if (conn.pcb) tcp_abort(conn.pcb);
-        return -1;
+        return -12;  /* Connection error */
+    }
+    if (!conn.connected) {
+        if (conn.pcb) tcp_abort(conn.pcb);
+        return -13;  /* Connection timeout */
     }
 
     /* Build and send HTTP request */
@@ -131,16 +139,19 @@ int http_post(ip_addr_t *server_ip, uint16_t port,
     tcp_write(pcb, body, body_len, TCP_WRITE_FLAG_COPY);
     tcp_output(pcb);
 
-    /* Wait for response */
-    timeout = HTTP_TIMEOUT;
-    while (!conn.done && !conn.error && timeout-- > 0)
+    /* Wait for response — real-time timeout */
+    start = sys_now();
+    while (!conn.done && !conn.error && (sys_now() - start) < HTTP_RECV_TIMEOUT_MS) {
         net_poll();
+        __asm__ volatile("hlt");
+    }
 
     if (conn.pcb) {
         tcp_close(conn.pcb);
     }
 
-    if (conn.error) return -1;
+    if (conn.error) return -14;  /* Response error */
+    if (conn.recv_len == 0) return -15;  /* Empty response */
 
     /* Find body after \r\n\r\n */
     char *body_start = strstr(resp_buf, "\r\n\r\n");

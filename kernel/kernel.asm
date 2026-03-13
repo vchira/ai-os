@@ -46,6 +46,9 @@ extern paging_init
 extern crt_init
 extern net_init
 extern ai_prompt_run
+extern context_init
+extern syscall_init
+extern llm_init
 
 ; =============================================================================
 ; kernel_main - Kernel entry point
@@ -89,6 +92,15 @@ kernel_main:
 
     ; Initialize C runtime (heap)
     call crt_init
+
+    ; Initialize Intent Syscall gate (INT 0x80)
+    call syscall_init
+
+    ; Initialize Context Frame
+    call context_init
+
+    ; Initialize LLM provider system
+    call llm_init
 
     ; Initialize network stack (RTL8139 + lwIP + DHCP)
     mov esi, boot_net_msg

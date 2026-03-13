@@ -1,27 +1,28 @@
 ; =============================================================================
 ; AsmOS - PS/2 Keyboard Driver
 ; Scancode Set 1, with shift/caps lock support
+; Switchable keyboard layouts (US QWERTY, German QWERTZ, etc.)
 ; =============================================================================
 
 %include "include/constants.inc"
 
 section .data
 
-; Scancode to ASCII lookup table (US QWERTY, lowercase)
-scancode_table:
+; --- Layout 0: US QWERTY (lowercase) ---
+layout_us_lower:
     db 0, 27                                    ; 0x00-0x01: none, ESC
     db '1234567890-='                            ; 0x02-0x0D
     db 8, 9                                      ; 0x0E-0x0F: backspace, tab
     db 'qwertyuiop[]'                            ; 0x10-0x1B
     db 10, 0                                     ; 0x1C-0x1D: enter, left ctrl
-    db 'asdfghjkl', 0x3B, 0x27                   ; 0x1E-0x28: ;'
+    db 'asdfghjkl', 0x3B, 0x27                   ; 0x1E-0x28
     db '`', 0                                    ; 0x29-0x2A: `, left shift
-    db 0x5C, 'zxcvbnm,./'                        ; 0x2B-0x35: \, z..
+    db 0x5C, 'zxcvbnm,./'                        ; 0x2B-0x35
     db 0, '*', 0, ' '                            ; 0x36-0x39: rshift, *, lalt, space
-    times (128 - 58) db 0                        ; Fill rest
+    times (128 - 58) db 0
 
-; Shifted scancode table
-scancode_shift_table:
+; --- Layout 0: US QWERTY (shifted) ---
+layout_us_upper:
     db 0, 27                                     ; 0x00-0x01
     db '!@#$%^&*()_+'                            ; 0x02-0x0D
     db 8, 9                                      ; 0x0E-0x0F
@@ -33,11 +34,61 @@ scancode_shift_table:
     db 0, '*', 0, ' '                            ; 0x36-0x39
     times (128 - 58) db 0
 
+; --- Layout 1: German QWERTZ (lowercase) ---
+layout_de_lower:
+    db 0, 27                                    ; 0x00-0x01: none, ESC
+    db '1234567890-='                            ; 0x02-0x0D
+    db 8, 9                                      ; 0x0E-0x0F: backspace, tab
+    db 'qwertzuiop[]'                            ; 0x10-0x1B: z swapped with y
+    db 10, 0                                     ; 0x1C-0x1D: enter, left ctrl
+    db 'asdfghjkl', 0x3B, 0x27                   ; 0x1E-0x28
+    db '`', 0                                    ; 0x29-0x2A: `, left shift
+    db 0x5C, 'yxcvbnm,./'                        ; 0x2B-0x35: y swapped with z
+    db 0, '*', 0, ' '                            ; 0x36-0x39: rshift, *, lalt, space
+    times (128 - 58) db 0
+
+; --- Layout 1: German QWERTZ (shifted) ---
+layout_de_upper:
+    db 0, 27                                     ; 0x00-0x01
+    db '!"#$%&/()=?+'                            ; 0x02-0x0D: German shifted numbers
+    db 8, 9                                      ; 0x0E-0x0F
+    db 'QWERTZUIOP{}'                            ; 0x10-0x1B
+    db 10, 0                                     ; 0x1C-0x1D
+    db 'ASDFGHJKL:"'                             ; 0x1E-0x28
+    db '~', 0                                    ; 0x29-0x2A
+    db '|YXCVBNM<>?'                             ; 0x2B-0x35
+    db 0, '*', 0, ' '                            ; 0x36-0x39
+    times (128 - 58) db 0
+
+; Layout table pointers: [lower_ptr, upper_ptr] for each layout
+; Layout IDs: 0 = US QWERTY, 1 = German QWERTZ
+layout_table:
+    dd layout_us_lower, layout_us_upper     ; Layout 0: US
+    dd layout_de_lower, layout_de_upper     ; Layout 1: DE
+
+; Layout name strings (for display)
+layout_names:
+    dd layout_name_us
+    dd layout_name_de
+
+layout_name_us: db 'US QWERTY', 0
+layout_name_de: db 'German QWERTZ', 0
+
+; Number of available layouts
+NUM_LAYOUTS equ 2
+
 section .bss
 ; Keyboard state
 kbd_shift:      resb 1
 kbd_caps:       resb 1
 kbd_ctrl:       resb 1
+
+; Current layout ID (0 = US, 1 = DE, ...)
+kbd_layout:     resd 1
+
+; Active layout table pointers (set by keyboard_set_layout)
+kbd_lower_ptr:  resd 1          ; Pointer to current lowercase table
+kbd_upper_ptr:  resd 1          ; Pointer to current uppercase/shift table
 
 ; Circular input buffer
 kbd_buffer:     resb KBD_BUF_SIZE
@@ -50,6 +101,10 @@ global keyboard_init
 global keyboard_handler
 global keyboard_getchar
 global keyboard_has_input
+global keyboard_set_layout
+global keyboard_get_layout
+global keyboard_get_layout_name
+global keyboard_get_num_layouts
 
 extern net_poll
 
@@ -64,14 +119,101 @@ keyboard_init:
     mov dword [kbd_buf_tail], 0
     mov dword [kbd_buf_count], 0
 
+    ; Default to layout 0 (US QWERTY)
+    mov dword [kbd_layout], 0
+    mov dword [kbd_lower_ptr], layout_us_lower
+    mov dword [kbd_upper_ptr], layout_us_upper
+
     ; Flush keyboard buffer
     in al, KBD_DATA
     in al, KBD_DATA
     ret
 
 ; =============================================================================
+; keyboard_set_layout - Switch keyboard layout at runtime
+; Called from C: void keyboard_set_layout(int layout_id)
+; Input: layout_id on stack (cdecl)
+; Returns: 0 on success, -1 on invalid layout
+; =============================================================================
+keyboard_set_layout:
+    push ebp
+    mov ebp, esp
+    push ebx
+
+    mov eax, [ebp+8]               ; layout_id argument
+
+    ; Validate range
+    cmp eax, NUM_LAYOUTS
+    jge .invalid_layout
+    cmp eax, 0
+    jl .invalid_layout
+
+    ; Store layout ID
+    mov [kbd_layout], eax
+
+    ; Calculate offset into layout_table: eax * 8 (two dwords per layout)
+    shl eax, 3
+    mov ebx, [layout_table + eax]       ; lower table pointer
+    mov [kbd_lower_ptr], ebx
+    mov ebx, [layout_table + eax + 4]   ; upper table pointer
+    mov [kbd_upper_ptr], ebx
+
+    xor eax, eax                    ; return 0 (success)
+    pop ebx
+    pop ebp
+    ret
+
+.invalid_layout:
+    mov eax, -1
+    pop ebx
+    pop ebp
+    ret
+
+; =============================================================================
+; keyboard_get_layout - Get current layout ID
+; Called from C: int keyboard_get_layout(void)
+; Returns: layout ID in eax
+; =============================================================================
+keyboard_get_layout:
+    mov eax, [kbd_layout]
+    ret
+
+; =============================================================================
+; keyboard_get_layout_name - Get name string for a layout
+; Called from C: const char* keyboard_get_layout_name(int layout_id)
+; Returns: pointer to name string, or NULL if invalid
+; =============================================================================
+keyboard_get_layout_name:
+    push ebp
+    mov ebp, esp
+
+    mov eax, [ebp+8]
+    cmp eax, NUM_LAYOUTS
+    jge .name_invalid
+    cmp eax, 0
+    jl .name_invalid
+
+    mov eax, [layout_names + eax*4]
+    pop ebp
+    ret
+
+.name_invalid:
+    xor eax, eax
+    pop ebp
+    ret
+
+; =============================================================================
+; keyboard_get_num_layouts - Get number of available layouts
+; Called from C: int keyboard_get_num_layouts(void)
+; Returns: number of layouts
+; =============================================================================
+keyboard_get_num_layouts:
+    mov eax, NUM_LAYOUTS
+    ret
+
+; =============================================================================
 ; keyboard_handler - Called from IRQ1 interrupt
-; Reads scancode, translates to ASCII, stores in buffer
+; Reads scancode, translates to ASCII using active layout, stores in buffer
 ; =============================================================================
 keyboard_handler:
     push eax
@@ -114,8 +256,9 @@ keyboard_handler:
     jmp .use_normal_table
 
 .check_caps_alpha:
-    ; Caps lock only affects letters
-    mov al, [scancode_table + ebx]
+    ; Caps lock only affects letters — use lower table to check
+    mov ecx, [kbd_lower_ptr]
+    mov al, [ecx + ebx]
     cmp al, 'a'
     jl .use_normal_table
     cmp al, 'z'
@@ -123,11 +266,13 @@ keyboard_handler:
     jmp .use_shift_table
 
 .use_shift_table:
-    mov al, [scancode_shift_table + ebx]
+    mov ecx, [kbd_upper_ptr]
+    mov al, [ecx + ebx]
     jmp .check_valid
 
 .use_normal_table:
-    mov al, [scancode_table + ebx]
+    mov ecx, [kbd_lower_ptr]
+    mov al, [ecx + ebx]
 
 .check_valid:
     test al, al

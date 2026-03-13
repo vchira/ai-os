@@ -6,11 +6,21 @@ GRUB_MKRESCUE = grub2-mkrescue
 
 NASM_FLAGS = -f elf32 -I ./
 GCC_INCLUDES = $(shell $(CC) -m32 -print-file-name=include)
+
+# Load .env file if it exists (for API keys etc.)
+-include .env
+
+# LLM API keys — set in .env or pass on command line
+CLAUDE_API_KEY ?= your-api-key-here
+OPENAI_API_KEY ?= your-api-key-here
+
 CC_FLAGS = -m32 -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector \
            -fno-pic -O2 -Wall -Wextra -Wno-unused-parameter \
            -isystem $(GCC_INCLUDES) \
            -I . -I lib/lwip/src/include -I include \
-           -DMBEDTLS_CONFIG_FILE='"include/mbedtls_config.h"'
+           -DMBEDTLS_CONFIG_FILE='"include/mbedtls_config.h"' \
+           -DCLAUDE_API_KEY='"$(CLAUDE_API_KEY)"' \
+           -DOPENAI_API_KEY='"$(OPENAI_API_KEY)"'
 LD_FLAGS = -m elf_i386 -T linker.ld -nostdlib
 
 BUILD_DIR = build
@@ -28,6 +38,8 @@ ASM_SOURCES = boot/boot.asm \
               kernel/paging.asm \
               kernel/crt.asm \
               kernel/c_api.asm \
+              kernel/context.asm \
+              kernel/syscall.asm \
               drivers/vga.asm \
               drivers/keyboard.asm \
               drivers/timer.asm \
@@ -41,6 +53,7 @@ C_SOURCES = lib/string.c \
             lib/netif_rtl.c \
             lib/http_client.c \
             lib/claude_api.c \
+            lib/llm_provider.c \
             drivers/pci.c \
             drivers/rtl8139.c
 

@@ -7,6 +7,7 @@
 #include "lib/lwip/src/include/lwip/init.h"
 #include "lib/lwip/src/include/lwip/timeouts.h"
 #include "lib/lwip/src/include/lwip/ip4_addr.h"
+#include "lib/lwip/src/include/lwip/dns.h"
 #include "lib/lwip/src/include/netif/ethernet.h"
 #include "include/rtl8139.h"
 #include "include/string.h"
@@ -103,7 +104,16 @@ int net_init(void) {
     netif_set_default(&aios_netif);
     netif_set_up(&aios_netif);
 
-    /* Start DHCP */
+    /* Set fallback DNS server (SLIRP default: 10.0.2.3, also try Google 8.8.8.8) */
+    {
+        ip_addr_t dns0, dns1;
+        IP4_ADDR(&dns0, 10, 0, 2, 3);   /* QEMU/libvirt SLIRP DNS */
+        IP4_ADDR(&dns1, 8, 8, 8, 8);    /* Google DNS fallback */
+        dns_setserver(0, &dns0);
+        dns_setserver(1, &dns1);
+    }
+
+    /* Start DHCP (may override DNS servers above) */
     dhcp_start(&aios_netif);
     vga_print("[OK] DHCP request sent\n");
 
@@ -127,10 +137,9 @@ void net_get_ip(char *buf, int max_len) {
     char *p = buf;
     for (int i = 0; i < 4; i++) {
         uint8_t octet = (addr >> (i * 8)) & 0xFF;
-        /* Simple decimal conversion */
-        if (octet >= 100) { *p++ = '0' + octet / 100; octet %= 100; }
-        if (octet >= 10 || p > buf + (i > 0 ? 1 : 0))  { *p++ = '0' + octet / 10; octet %= 10; }
-        *p++ = '0' + octet;
+        if (octet >= 100) { *p++ = '0' + octet / 100; }
+        if (octet >= 10) { *p++ = '0' + (octet / 10) % 10; }
+        *p++ = '0' + octet % 10;
         if (i < 3) *p++ = '.';
     }
     *p = '\0';
