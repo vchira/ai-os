@@ -17,7 +17,7 @@ banner_line5: db ' /_/   \_\_|\___/|____/ ', 10, 0
 banner_line6: db '                         ', 10, 0
 banner_ver:   db 'AiOS v0.1 - AI-Native Operating System', 10, 0
 banner_sub:   db 'The Deterministic Substrate', 10, 0
-banner_info:  db 'Type "help" for available commands.', 10, 10, 0
+banner_info:  db 10, 0
 
 boot_gdt_msg:   db '[OK] GDT initialized', 10, 0
 boot_idt_msg:   db '[OK] IDT initialized', 10, 0
@@ -45,7 +45,7 @@ extern memory_init
 extern paging_init
 extern crt_init
 extern net_init
-extern shell_run
+extern ai_prompt_run
 
 ; =============================================================================
 ; kernel_main - Kernel entry point
@@ -135,8 +135,8 @@ kernel_main:
     mov esi, banner_info
     call vga_print
 
-    ; Launch the shell
-    call shell_run
+    ; Launch the AI prompt
+    call ai_prompt_run
 
     ; Should never reach here
 .idle:

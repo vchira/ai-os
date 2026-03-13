@@ -31,7 +31,8 @@ ASM_SOURCES = boot/boot.asm \
               drivers/vga.asm \
               drivers/keyboard.asm \
               drivers/timer.asm \
-              shell/shell.asm
+              shell/shell.asm \
+              shell/ai_prompt.asm
 
 # C source files — AiOS core
 C_SOURCES = lib/string.c \

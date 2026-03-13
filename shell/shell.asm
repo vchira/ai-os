@@ -28,6 +28,7 @@ cmd_ask:        db 'ask', 0
 cmd_ai:         db 'ai', 0
 cmd_net:        db 'net', 0
 cmd_pci:        db 'pci', 0
+cmd_exit:       db 'exit', 0
 
 ; Help text
 help_text:
@@ -100,6 +101,7 @@ net_resp:       resb 4096
 
 section .text
 global shell_run
+global shell_run_interactive
 
 extern vga_print
 extern vga_putchar
@@ -119,7 +121,7 @@ extern net_poll
 extern pci_scan
 
 ; =============================================================================
-; shell_run - Main shell loop
+; shell_run - Main shell loop (never returns)
 ; =============================================================================
 shell_run:
 .loop:
@@ -138,6 +140,37 @@ shell_run:
     call shell_execute
 
     jmp .loop
+
+; =============================================================================
+; shell_run_interactive - Shell loop that returns on "exit" command
+; =============================================================================
+shell_run_interactive:
+.loop:
+    ; Print prompt
+    mov esi, shell_prompt
+    call vga_print
+
+    ; Read a line of input
+    call shell_readline
+
+    ; Skip empty lines
+    cmp byte [input_buffer], 0
+    je .loop
+
+    ; Check for "exit" command
+    mov esi, input_buffer
+    mov edi, cmd_exit
+    call str_compare
+    test eax, eax
+    jnz .exit_shell
+
+    ; Parse and execute command
+    call shell_execute
+
+    jmp .loop
+
+.exit_shell:
+    ret
 
 ; =============================================================================
 ; shell_readline - Read a line from keyboard into input_buffer
