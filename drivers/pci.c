@@ -1,6 +1,9 @@
 #include "include/pci.h"
 #include "include/io.h"
 
+extern void fb_print(const char *str);
+extern void fb_newline(void);
+
 static uint32_t pci_addr(uint8_t bus, uint8_t dev, uint8_t func, uint8_t offset) {
     return (1u << 31) | ((uint32_t)bus << 16) | ((uint32_t)dev << 11)
          | ((uint32_t)func << 8) | (offset & 0xFC);
@@ -78,7 +81,7 @@ static void print_hex16(uint16_t val) {
     buf[2] = hex[(val >> 4) & 0xF];
     buf[3] = hex[val & 0xF];
     buf[4] = '\0';
-    vga_print(buf);
+    fb_print(buf);
 }
 
 static void print_hex8(uint8_t val) {
@@ -87,11 +90,11 @@ static void print_hex8(uint8_t val) {
     buf[0] = hex[(val >> 4) & 0xF];
     buf[1] = hex[val & 0xF];
     buf[2] = '\0';
-    vga_print(buf);
+    fb_print(buf);
 }
 
 void pci_scan(void) {
-    vga_print("PCI devices:\n");
+    fb_print("PCI devices:\n");
     for (int bus = 0; bus < 8; bus++) {
         for (int dev = 0; dev < 32; dev++) {
             uint32_t reg0 = pci_read32(bus, dev, 0, 0);
@@ -103,21 +106,71 @@ void pci_scan(void) {
             uint8_t cls = (reg2 >> 24) & 0xFF;
             uint8_t sub = (reg2 >> 16) & 0xFF;
 
-            vga_print("  ");
+            fb_print("  ");
             print_hex8(bus);
-            vga_print(":");
+            fb_print(":");
             print_hex8(dev);
-            vga_print(" ");
+            fb_print(" ");
             print_hex16(vid);
-            vga_print(":");
+            fb_print(":");
             print_hex16(did);
-            vga_print(" class ");
+            fb_print(" class ");
             print_hex8(cls);
-            vga_print(".");
+            fb_print(".");
             print_hex8(sub);
-            vga_newline();
+            fb_newline();
         }
     }
+}
+
+uint8_t pci_get_progif(uint8_t bus, uint8_t dev, uint8_t func) {
+    uint32_t reg2 = pci_read32(bus, dev, func, 0x08);
+    return (reg2 >> 8) & 0xFF;
+}
+
+int pci_find_class(uint8_t cls, uint8_t sub, int progif,
+                   int start_bus, int start_dev, int start_func,
+                   pci_device_t *out) {
+    for (int bus = start_bus; bus < 8; bus++) {
+        int d0 = (bus == start_bus) ? start_dev : 0;
+        for (int dev = d0; dev < 32; dev++) {
+            uint32_t reg0 = pci_read32(bus, dev, 0, 0);
+            if ((reg0 & 0xFFFF) == 0xFFFF) continue;
+
+            int f0 = (bus == start_bus && dev == start_dev) ? start_func : 0;
+            for (int func = f0; func < 8; func++) {
+                reg0 = pci_read32(bus, dev, func, 0);
+                uint16_t vid = reg0 & 0xFFFF;
+                if (vid == 0xFFFF) continue;
+
+                uint32_t reg2 = pci_read32(bus, dev, func, 0x08);
+                uint8_t c = (reg2 >> 24) & 0xFF;
+                uint8_t s = (reg2 >> 16) & 0xFF;
+                uint8_t pi = (reg2 >> 8) & 0xFF;
+
+                if (c == cls && s == sub && (progif < 0 || pi == (uint8_t)progif)) {
+                    out->bus = bus;
+                    out->dev = dev;
+                    out->func = func;
+                    out->vendor_id = vid;
+                    out->device_id = reg0 >> 16;
+                    out->class_code = c;
+                    out->subclass = s;
+                    uint32_t reg3C = pci_read32(bus, dev, func, 0x3C);
+                    out->irq = reg3C & 0xFF;
+                    pci_read_bars(out);
+                    return 1;
+                }
+
+                /* If not multifunction, skip remaining funcs */
+                if (func == 0) {
+                    uint32_t reg3 = pci_read32(bus, dev, 0, 0x0C);
+                    if (!((reg3 >> 16) & 0x80)) break;
+                }
+            }
+        }
+    }
+    return 0;
 }
 
 void pci_enable_bus_mastering(pci_device_t *dev) {

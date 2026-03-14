@@ -4,13 +4,15 @@
 #include "include/string.h"
 #include "include/stdio.h"
 
+#include "include/debug_log.h"
+
 #if AIOS_DEBUG
 #include "include/types.h"
 extern uint32_t sys_now(void);
 #define TX_DBG(fmt, ...) do { \
     char _d[100]; \
     snprintf(_d, sizeof(_d), "[%lu] rtl_tx: " fmt, (unsigned long)sys_now(), ##__VA_ARGS__); \
-    vga_print(_d); \
+    dbg_log(_d); \
 } while(0)
 #else
 #define TX_DBG(fmt, ...) ((void)0)

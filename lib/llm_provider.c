@@ -31,7 +31,7 @@ static int  runtime_openai_set = 0;
 static const char *get_claude_key(void) {
     return runtime_claude_set ? runtime_claude_key : CLAUDE_API_KEY;
 }
-static const char *get_openai_key(void) {
+const char *get_openai_key(void) {
     return runtime_openai_set ? runtime_openai_key : OPENAI_API_KEY;
 }
 
@@ -46,9 +46,11 @@ extern int http_post(ip_addr_t *server_ip, uint16_t port,
                      char *resp_buf, int resp_max);
 extern void net_poll(void);
 extern u32_t sys_now(void);
-extern void vga_print(const char *str);
-extern void vga_set_color(unsigned char color);
-extern void vga_newline(void);
+extern void fb_print(const char *str);
+extern void fb_set_color(int attr);
+#include "include/debug_log.h"
+extern void fb_newline(void);
+extern int selftest_active;
 
 /* ========================================================================= */
 /* Provider definitions                                                      */
@@ -198,7 +200,58 @@ static int build_system_prompt(char *buf, int max) {
         "Input: {\\\"key\\\":\\\"...\\\"}\\n"
         "- set_api_key: Set an API key at runtime. "
         "Input: {\\\"provider\\\":\\\"claude\\\",\\\"key\\\":\\\"sk-...\\\"}\\n"
-        "Memory persists until reboot. You decide how to organize data.\\n\\n";
+        "- create_tool: Create a new dynamic tool. "
+        "Input: {\\\"name\\\":\\\"...\\\",\\\"description\\\":\\\"...\\\","
+        "\\\"implementation\\\":\\\"instructions for executing this tool\\\"}\\n"
+        "- delete_tool: Remove a dynamic tool. "
+        "Input: {\\\"name\\\":\\\"...\\\"}\\n"
+        "- list_tools: List all built-in and dynamic tools. Input: {}\\n"
+        "- http_request: Make HTTPS request. "
+        "Input: {\\\"host\\\":\\\"...\\\",\\\"path\\\":\\\"...\\\","
+        "\\\"method\\\":\\\"GET\\\",\\\"body\\\":\\\"...\\\","
+        "\\\"headers\\\":\\\"...\\\"}\\n"
+        "- set_reminder: Set a timed notification. "
+        "Input: {\\\"message\\\":\\\"...\\\",\\\"minutes\\\":60} for relative, "
+        "or {\\\"message\\\":\\\"...\\\",\\\"hour\\\":14,\\\"minute\\\":30} for absolute time.\\n"
+        "- cancel_reminder: Cancel a pending reminder. "
+        "Input: {\\\"id\\\":0}\\n"
+        "- list_reminders: Show all pending reminders. Input: {}\\n"
+        "- ask_input: Show input dialog to the user. Returns their text. "
+        "Input: {\\\"title\\\":\\\"...\\\",\\\"prompt\\\":\\\"...\\\","
+        "\\\"placeholder\\\":\\\"...\\\"}\\n"
+        "- ask_confirm: Show yes/no dialog. "
+        "Input: {\\\"title\\\":\\\"...\\\",\\\"prompt\\\":\\\"...\\\","
+        "\\\"yes_label\\\":\\\"...\\\",\\\"no_label\\\":\\\"...\\\"}\\n"
+        "- ask_choice: Show selection dialog with radio buttons. "
+        "Input: {\\\"title\\\":\\\"...\\\",\\\"prompt\\\":\\\"...\\\","
+        "\\\"choices\\\":\\\"Option A,Option B,Option C\\\","
+        "\\\"default\\\":0}\\n"
+        "- show_notification: Show popup message. "
+        "Input: {\\\"title\\\":\\\"...\\\",\\\"message\\\":\\\"...\\\","
+        "\\\"type\\\":\\\"info|success|warning|error\\\"}\\n"
+        "- display_text: Show text in a GUI window. "
+        "Input: {\\\"title\\\":\\\"...\\\",\\\"content\\\":\\\"text to display\\\"}\\n"
+        "- display_image: Show a BMP image from URL in a GUI window. "
+        "Input: {\\\"url\\\":\\\"https://...\\\",\\\"title\\\":\\\"...\\\"}\\n"
+        "- set_theme: Change UI color theme. "
+        "Input: {\\\"theme\\\":\\\"Dark|Nord|Solarized|Light|Retro\\\"} "
+        "or {} to list themes.\\n"
+        "- show_debug_log: Show debug log in a window. "
+        "Input: {} to display, or {\\\"action\\\":\\\"clear\\\"} to clear.\\n"
+        "- configure: Get/set persistent OS settings. "
+        "Input: {} to list all, "
+        "{\\\"action\\\":\\\"get\\\",\\\"key\\\":\\\"theme\\\"} to read, "
+        "{\\\"action\\\":\\\"set\\\",\\\"key\\\":\\\"theme\\\",\\\"value\\\":\\\"2\\\"} to write, "
+        "{\\\"action\\\":\\\"delete\\\",\\\"key\\\":\\\"...\\\"}. "
+        "Known keys: theme (0-4), keyboard_layout (0-N), "
+        "mouse_sensitivity (0=low,1=normal,2=high). "
+        "Settings persist across reboots.\\n"
+        "Memory and reminders persist across reboots.\\n"
+        "IMPORTANT: Use ask_input/ask_confirm/ask_choice to collect info "
+        "from the user when needed. These show interactive GUI dialogs.\\n"
+        "When you need a capability that no tool provides, use create_tool "
+        "to define it. The implementation field is a prompt that will be "
+        "sent to you with the tool input when the tool is called.\\n\\n";
     memcpy(buf + sp, t, strlen(t)); sp += strlen(t);
 
     t = "CURRENT STATE:\\n"
@@ -284,7 +337,7 @@ static int claude_ask_impl(const char *question, char *response, int max_len,
 
     json_escape(question, escaped, 2048);
 
-    char sys_prompt[2048];
+    char sys_prompt[4096];
     int sp = build_system_prompt(sys_prompt, sizeof(sys_prompt));
 
     /* Build Claude API body */
@@ -320,13 +373,13 @@ static int claude_ask_impl(const char *question, char *response, int max_len,
     if (ret <= 0) { free(body); free(escaped); free(resp_buf); return decode_http_error(ret, response, max_len); }
 
 #if AIOS_DEBUG
-    { char dbg[80]; snprintf(dbg, sizeof(dbg), "[%lu] claude: body=%d bytes\n", (unsigned long)sys_now(), ret); vga_print(dbg); }
+    if (!selftest_active) { char dbg[80]; snprintf(dbg, sizeof(dbg), "[%lu] claude: body=%d bytes\n", (unsigned long)sys_now(), ret); dbg_log(dbg); }
 #endif
 
     int text_len = extract_json_string(resp_buf, "\"text\":", response, max_len);
 
 #if AIOS_DEBUG
-    { char dbg[80]; snprintf(dbg, sizeof(dbg), "[%lu] claude: text=%d chars\n", (unsigned long)sys_now(), text_len); vga_print(dbg); }
+    if (!selftest_active) { char dbg[80]; snprintf(dbg, sizeof(dbg), "[%lu] claude: text=%d chars\n", (unsigned long)sys_now(), text_len); dbg_log(dbg); }
 #endif
 
     if (text_len < 0) {
@@ -366,7 +419,7 @@ static int openai_ask_impl(const char *question, char *response, int max_len,
 
     json_escape(question, escaped, 2048);
 
-    char sys_prompt[2048];
+    char sys_prompt[4096];
     int sp = build_system_prompt(sys_prompt, sizeof(sys_prompt));
 
     /* OpenAI chat completion body */
@@ -438,7 +491,7 @@ static int ollama_ask_impl(const char *question, char *response, int max_len,
 
     json_escape(question, escaped, 1024);
 
-    char sys_prompt[2048];
+    char sys_prompt[4096];
     int sp = build_system_prompt(sys_prompt, sizeof(sys_prompt));
 
     /* Ollama /api/chat body (OpenAI-compatible chat format) */
@@ -492,6 +545,9 @@ static int ollama_ask_impl(const char *question, char *response, int max_len,
     return text_len;
 }
 
+/* Forward declaration for dynamic tool callback */
+static int llm_ask_provider(const char *question, char *response, int max_len);
+
 /* ========================================================================= */
 /* Provider registry — public API                                            */
 /* ========================================================================= */
@@ -543,6 +599,9 @@ void llm_init(void) {
             break;
         }
     }
+
+    /* Wire up LLM callback for dynamic tool execution */
+    tool_set_llm_callback(llm_ask_provider);
 }
 
 int llm_get_num_providers(void) {
@@ -716,13 +775,15 @@ int llm_ask(const char *question, char *response, int max_len) {
         if (!parse_tool_call(response, tool_name, 64, tool_input, 512))
             break;  /* Not a tool call — we're done */
 
-        /* Visual feedback */
-        vga_set_color(0x08); /* dark gray */
-        vga_print("[AI] Using tool: ");
-        vga_print(tool_name);
-        vga_print("...");
-        vga_newline();
-        vga_set_color(0x07); /* light gray */
+        /* Visual feedback (suppressed during selftest) */
+        if (!selftest_active) {
+            fb_set_color(0x08); /* dark gray */
+            fb_print("[AI] Using tool: ");
+            fb_print(tool_name);
+            fb_print("...");
+            fb_newline();
+            fb_set_color(0x07); /* light gray */
+        }
 
         /* Execute the tool */
         tool_execute(tool_name, tool_input, tool_result, sizeof(tool_result));

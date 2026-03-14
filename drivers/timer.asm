@@ -41,9 +41,25 @@ timer_init:
 
 ; =============================================================================
 ; timer_handler - Called from IRQ0 interrupt
+; Sets scheduler_due flag once per second for main loop to act on.
 ; =============================================================================
+global scheduler_due
+section .bss
+scheduler_due: resd 1
+
+section .text
 timer_handler:
     inc dword [timer_ticks]
+
+    ; Every 100 ticks (1 second), set scheduler_due flag
+    mov eax, [timer_ticks]
+    xor edx, edx
+    mov ecx, PIT_HZ
+    div ecx
+    test edx, edx
+    jnz .no_flag
+    mov dword [scheduler_due], 1
+.no_flag:
     ret
 
 ; =============================================================================

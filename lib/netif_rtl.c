@@ -13,6 +13,9 @@
 #include "include/string.h"
 #include "include/io.h"
 
+extern void fb_print(const char *str);
+extern void fb_newline(void);
+
 static struct netif aios_netif;
 static uint8_t rx_frame[1536];
 
@@ -73,7 +76,7 @@ static int net_initialized = 0;
 int net_init(void) {
     /* Initialize RTL8139 hardware */
     if (rtl8139_init() != 0) {
-        vga_print("[FAIL] RTL8139 NIC not found\n");
+        fb_print("[FAIL] RTL8139 NIC not found\n");
         return -1;
     }
 
@@ -88,9 +91,9 @@ int net_init(void) {
             mac_str[i * 3 + 1] = hex[mac[i] & 0xF];
             mac_str[i * 3 + 2] = (i < 5) ? ':' : '\0';
         }
-        vga_print("[OK] NIC found, MAC: ");
-        vga_print(mac_str);
-        vga_newline();
+        fb_print("[OK] NIC found, MAC: ");
+        fb_print(mac_str);
+        fb_newline();
     }
 
     /* Initialize lwIP */
@@ -117,7 +120,7 @@ int net_init(void) {
 
     /* Start DHCP (may override DNS servers above) */
     dhcp_start(&aios_netif);
-    vga_print("[OK] DHCP request sent\n");
+    fb_print("[OK] DHCP request sent\n");
 
     net_initialized = 1;
     return 0;

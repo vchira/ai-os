@@ -1,0 +1,27 @@
+# AiOS Raspberry Pi boot configuration
+# Place this file on the SD card boot partition (FAT32)
+
+# Boot in 32-bit ARMv7 mode
+arm_64bit=0
+
+# Kernel filename
+kernel=kernel7.img
+
+# Disable splash screen
+disable_splash=1
+
+# GPU memory allocation (minimum needed for framebuffer)
+gpu_mem=64
+
+# Enable UART
+enable_uart=1
+
+# Disable Bluetooth on UART (use mini UART for console)
+dtoverlay=miniuart-bt
+
+# HDMI settings
+hdmi_force_hotplug=1
+hdmi_group=2
+hdmi_mode=82
+# Mode 82 = 1920x1080 @ 60Hz
+# For 1024x768: hdmi_group=2, hdmi_mode=16

@@ -23,6 +23,7 @@ global idt_init
 global idt_set_gate
 extern keyboard_handler
 extern timer_handler
+extern mouse_handler
 
 ; =============================================================================
 ; idt_init - Set up IDT, remap PIC, install handlers
@@ -61,13 +62,20 @@ idt_init:
     mov ecx, 34
 .install_remaining_irqs:
     cmp ecx, 48
-    jge .load_idt
+    jge .install_mouse
     push ecx
     push dword irq_default
     call idt_set_gate
     add esp, 8
     inc ecx
     jmp .install_remaining_irqs
+
+.install_mouse:
+    ; IRQ12 - Mouse (interrupt 44) — overrides the default handler
+    push dword 44
+    push dword irq12_handler
+    call idt_set_gate
+    add esp, 8
 
 .load_idt:
     lidt [idt_descriptor]
@@ -174,6 +182,16 @@ irq1_handler:
     call keyboard_handler
     mov al, 0x20
     out PIC1_CMD, al        ; Send EOI to master PIC
+    popad
+    iret
+
+; IRQ12 - Mouse interrupt
+irq12_handler:
+    pushad
+    call mouse_handler
+    mov al, 0x20
+    out PIC2_CMD, al            ; Send EOI to slave PIC
+    out PIC1_CMD, al            ; Send EOI to master PIC
     popad
     iret
 

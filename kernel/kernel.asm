@@ -53,7 +53,15 @@ extern syscall_init
 extern llm_init
 extern rtc_init
 extern tool_executor_init
+extern settings_init
 extern tls_init
+extern ac97_init
+extern ata_init
+extern scheduler_init
+extern prompt_system_init
+extern mouse_init
+extern usb_init
+extern bt_init
 
 ; =============================================================================
 ; kernel_main - Kernel entry point
@@ -88,6 +96,9 @@ kernel_main:
     mov esi, boot_kbd_msg
     call debug_print
 
+    ; Initialize PS/2 mouse
+    call mouse_init
+
     ; Initialize C runtime (heap)
     call crt_init
 
@@ -100,8 +111,17 @@ kernel_main:
     ; Initialize Real-Time Clock
     call rtc_init
 
-    ; Initialize Tool Executor (in-memory task store)
+    ; Initialize ATA disk (for persistent storage)
+    call ata_init
+
+    ; Initialize scheduler (before tool_executor, which loads persisted events)
+    call scheduler_init
+
+    ; Initialize Tool Executor (loads persisted data from disk)
     call tool_executor_init
+
+    ; Initialize persistent settings (theme, keyboard, mouse, etc.)
+    call settings_init
 
     ; Initialize LLM provider system
     call llm_init
@@ -113,6 +133,18 @@ kernel_main:
 
     ; Initialize TLS subsystem (mbedTLS entropy + RNG)
     call tls_init
+
+    ; Initialize USB subsystem (UHCI + device enumeration)
+    call usb_init
+
+    ; Initialize Bluetooth (HCI over USB — requires USB first)
+    call bt_init
+
+    ; Initialize AC97 audio (optional — no failure if absent)
+    call ac97_init
+
+    ; Initialize prompt provider system (text + voice)
+    call prompt_system_init
 
     ; Print boot complete separator
     mov esi, boot_done_msg

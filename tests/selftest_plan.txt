@@ -1,0 +1,152 @@
+=== AiOS Self-Test Plan ===
+
+Triggered by: /selftest
+Purpose: Test all OS subsystems with simulated AI conversations.
+         No API tokens used. Hooks at the HTTPS layer so the full
+         pipeline runs: system prompt → JSON body → HTTP POST →
+         response parse → tool call detect → tool execute →
+         follow-up prompt → final response → assertions.
+
+=== Test Cases ===
+
+--- TEST 01: Memorize a Value ---
+  Description: AI stores a key-value pair in the memory store
+  User says:   "Remember that my favorite color is blue"
+  AI response: TOOL_CALL:memorize
+               TOOL_INPUT:{"key":"fav_color","value":"blue"}
+  (tool executes, follow-up sent)
+  AI response: "Got it! I've memorized that your favorite color is blue."
+  Assert:      memory["fav_color"] == "blue"
+
+--- TEST 02: Recall a Specific Value ---
+  Description: AI retrieves a previously stored value by key
+  Setup:       memorize fav_color = blue
+  User says:   "What is my favorite color?"
+  AI response: TOOL_CALL:recall
+               TOOL_INPUT:{"key":"fav_color"}
+  (tool executes, result contains blue)
+  AI response: "Your favorite color is blue."
+  Assert:      final response contains "blue"
+
+--- TEST 03: Recall All Entries ---
+  Description: AI lists all stored memory entries
+  Setup:       memorize name=Alice, city=Paris
+  User says:   "What do you remember about me?"
+  AI response: TOOL_CALL:recall
+               TOOL_INPUT:{}
+  (tool returns all entries)
+  AI response: "I remember: name=Alice, city=Paris"
+  Assert:      final response mentions "Alice" and "Paris"
+
+--- TEST 04: Forget a Value ---
+  Description: AI deletes a stored memory entry
+  Setup:       memorize temp_note = "delete me"
+  User says:   "Forget the temp note"
+  AI response: TOOL_CALL:forget
+               TOOL_INPUT:{"key":"temp_note"}
+  (tool executes, entry removed)
+  AI response: "Done, I've forgotten the temp note."
+  Assert:      memory["temp_note"] does NOT exist
+
+--- TEST 05: Get Date/Time ---
+  Description: AI reads the hardware RTC clock
+  User says:   "What time is it?"
+  AI response: TOOL_CALL:get_datetime
+               TOOL_INPUT:{}
+  (tool executes, returns RTC data)
+  AI response: "The current date and time is 2026-03-14 12:00:00."
+  Assert:      tool executed without error (response not empty)
+
+--- TEST 06: Set Reminder (Relative) ---
+  Description: AI schedules a future notification using relative time
+  User says:   "Remind me in 30 minutes to check email"
+  AI response: TOOL_CALL:set_reminder
+               TOOL_INPUT:{"minutes":"30","message":"check email"}
+  (tool executes, scheduler entry created)
+  AI response: "Reminder set for 30 minutes from now."
+  Assert:      scheduler has event with message containing "check email"
+
+--- TEST 07: Set Reminder (Absolute) ---
+  Description: AI schedules a notification at a specific time
+  User says:   "Remind me at 14:30 to call mom"
+  AI response: TOOL_CALL:set_reminder
+               TOOL_INPUT:{"hour":"14","minute":"30","message":"call mom"}
+  (tool executes, scheduler entry created)
+  AI response: "Reminder set for 2:30 PM."
+  Assert:      scheduler has event at hour=14, minute=30
+
+--- TEST 08: Cancel Reminder ---
+  Description: AI cancels a pending reminder by ID
+  Setup:       add scheduler event "test reminder"
+  User says:   "Cancel reminder 0"
+  AI response: TOOL_CALL:cancel_reminder
+               TOOL_INPUT:{"id":"0"}
+  (tool executes, event deactivated)
+  AI response: "Reminder cancelled."
+  Assert:      scheduler event 0 is not active
+
+--- TEST 09: Create Dynamic Tool ---
+  Description: AI creates a new tool at runtime
+  User says:   "Create a tool called greet that says hello to people"
+  AI response: TOOL_CALL:create_tool
+               TOOL_INPUT:{"name":"greet","description":"Greets people",
+                           "implementation":"Say hello to the person named in the input"}
+  (tool created and registered)
+  AI response: "I've created the 'greet' tool."
+  Assert:      dynamic tool "greet" exists in registry
+
+--- TEST 10: Delete Dynamic Tool ---
+  Description: AI removes a dynamic tool
+  Setup:       create dynamic tool "greet"
+  User says:   "Delete the greet tool"
+  AI response: TOOL_CALL:delete_tool
+               TOOL_INPUT:{"name":"greet"}
+  (tool removed from registry)
+  AI response: "The greet tool has been deleted."
+  Assert:      dynamic tool "greet" does NOT exist
+
+--- TEST 11: List Tools ---
+  Description: AI lists all available tools
+  User says:   "What tools do you have?"
+  AI response: TOOL_CALL:list_tools
+               TOOL_INPUT:{}
+  (tool returns list of all built-in + dynamic tools)
+  AI response: "I have these tools: memorize, recall, forget, ..."
+  Assert:      response contains "memorize" and "set_reminder"
+
+--- TEST 12: HTTP Request ---
+  Description: AI makes an HTTPS request (intercepted during test)
+  User says:   "Fetch the homepage of example.com"
+  AI response: TOOL_CALL:http_request
+               TOOL_INPUT:{"host":"example.com","path":"/","method":"GET"}
+  (tool calls https_post, intercepted with fake response)
+  AI response: "Here's what I got from example.com: ..."
+  Assert:      response indicates the request was processed
+
+--- TEST 13: Multi-Step (Memorize + Reminder) ---
+  Description: AI performs two tool calls in one conversation
+  User says:   "Remember to buy milk and remind me in 1 hour"
+  AI response: TOOL_CALL:memorize
+               TOOL_INPUT:{"key":"todo_milk","value":"buy milk"}
+  (tool executes, follow-up sent)
+  AI response: TOOL_CALL:set_reminder
+               TOOL_INPUT:{"minutes":"60","message":"buy milk"}
+  (tool executes, follow-up sent)
+  AI response: "Done! Saved the note and set a 1-hour reminder."
+  Assert:      memory["todo_milk"] == "buy milk"
+               AND scheduler has event with "buy milk"
+
+--- TEST 14: Persistence (Save/Load Cycle) ---
+  Description: Verify data survives a simulated save/load cycle
+  Setup:       memorize persist_test = "survives reboot"
+  Action:      force save to disk, clear RAM, force load from disk
+  Assert:      memory["persist_test"] == "survives reboot"
+
+--- TEST 15: Error Handling (Missing Field) ---
+  Description: AI sends a tool call with missing required field
+  User says:   "Store something for me"
+  AI response: TOOL_CALL:memorize
+               TOOL_INPUT:{"value":"orphan data"}
+  (tool returns error: missing key)
+  AI response: "Sorry, I need a key name to store that."
+  Assert:      memory count unchanged (no new entries created)

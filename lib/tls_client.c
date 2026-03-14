@@ -25,13 +25,13 @@ extern u32_t sys_now(void);
 
 /* Debug helpers */
 #include "include/stdio.h"
-extern void vga_print(const char *str);
+#include "include/debug_log.h"
 
 #if AIOS_DEBUG
 #define DBG(fmt, ...) do { \
     char _dbg[140]; \
     snprintf(_dbg, sizeof(_dbg), "[%lu] " fmt, (unsigned long)sys_now(), ##__VA_ARGS__); \
-    vga_print(_dbg); \
+    dbg_log(_dbg); \
 } while(0)
 #else
 #define DBG(fmt, ...) ((void)0)
@@ -453,9 +453,10 @@ fail:
 /* https_post — HTTPS POST with persistent connection                        */
 /* ========================================================================= */
 
-static int https_post_once(const char *hostname, const char *path,
-                           const char *headers, const char *body,
-                           char *resp_buf, int resp_max) {
+static int https_request_once(const char *method, const char *hostname,
+                               const char *path, const char *headers,
+                               const char *body, int body_len,
+                               char *resp_buf, int resp_max) {
     int ret;
     u32_t t0 = sys_now();
 
@@ -474,9 +475,8 @@ static int https_post_once(const char *hostname, const char *path,
     }
 
     /* --- Build HTTP request (keep-alive) --- */
-    int body_len = strlen(body);
-    char len_str[16];
-    {
+    char len_str[16] = "";
+    if (body_len > 0) {
         int tmp = body_len, i = 0;
         char rev[16];
         if (tmp == 0) rev[i++] = '0';
@@ -490,19 +490,24 @@ static int https_post_once(const char *hostname, const char *path,
 
     int pos = 0;
     const char *s;
-    s = "POST "; memcpy(req_hdr + pos, s, strlen(s)); pos += strlen(s);
+    memcpy(req_hdr + pos, method, strlen(method)); pos += strlen(method);
+    s = " "; memcpy(req_hdr + pos, s, 1); pos += 1;
     memcpy(req_hdr + pos, path, strlen(path)); pos += strlen(path);
     s = " HTTP/1.1\r\nHost: "; memcpy(req_hdr + pos, s, strlen(s)); pos += strlen(s);
     memcpy(req_hdr + pos, hostname, strlen(hostname)); pos += strlen(hostname);
-    s = "\r\nContent-Length: "; memcpy(req_hdr + pos, s, strlen(s)); pos += strlen(s);
-    memcpy(req_hdr + pos, len_str, strlen(len_str)); pos += strlen(len_str);
+    if (body_len > 0) {
+        s = "\r\nContent-Length: "; memcpy(req_hdr + pos, s, strlen(s)); pos += strlen(s);
+        memcpy(req_hdr + pos, len_str, strlen(len_str)); pos += strlen(len_str);
+    }
     s = "\r\nConnection: keep-alive\r\n"; memcpy(req_hdr + pos, s, strlen(s)); pos += strlen(s);
-    memcpy(req_hdr + pos, headers, strlen(headers)); pos += strlen(headers);
+    if (headers && *headers) {
+        memcpy(req_hdr + pos, headers, strlen(headers)); pos += strlen(headers);
+    }
     s = "\r\n"; memcpy(req_hdr + pos, s, strlen(s)); pos += strlen(s);
     req_hdr[pos] = '\0';
 
     /* Send header */
-    DBG("http: sending %d-byte header + %d-byte body\n", pos, body_len);
+    DBG("http: sending %s %d-byte header + %d-byte body\n", method, pos, body_len);
     ret = mbedtls_ssl_write(&g_ssl, (const unsigned char *)req_hdr, pos);
     free(req_hdr);
     if (ret < 0) {
@@ -511,8 +516,8 @@ static int https_post_once(const char *hostname, const char *path,
         return ret;
     }
 
-    /* Send body */
-    if (body_len > 0) {
+    /* Send body (POST only) */
+    if (body_len > 0 && body) {
         int sent = 0;
         while (sent < body_len) {
             ret = mbedtls_ssl_write(&g_ssl, (const unsigned char *)body + sent,
@@ -720,31 +725,75 @@ static int https_post_once(const char *hostname, const char *path,
     return body_sz;
 }
 
-int https_post(const char *hostname, const char *path,
-               const char *headers, const char *body,
-               char *resp_buf, int resp_max) {
+int https_post_bin(const char *hostname, const char *path,
+                   const char *headers, const char *body, int body_len,
+                   char *resp_buf, int resp_max) {
+
+    /* Selftest hook — intercept before touching the network */
+    {
+        extern int selftest_active;
+        extern int selftest_get_response(const char *host, char *buf, int max);
+        if (selftest_active) {
+            return selftest_get_response(hostname, resp_buf, resp_max);
+        }
+    }
 
     if (!g_tls_ready) {
         DBG("https_post: TLS not ready!\n");
         return -1;
     }
 
-    /* Remember if we have a pre-existing connection (for retry decision).
-       https_post_once() calls tls_disconnect() on failure, which clears
-       g_conn_active, so we must snapshot this BEFORE the attempt. */
     int had_conn = g_conn_active;
+    DBG("https_post: %s%s (existing=%d, body=%d)\n", hostname, path, had_conn, body_len);
 
-    DBG("https_post: %s%s (existing=%d)\n", hostname, path, had_conn);
+    int ret = https_request_once("POST", hostname, path, headers, body, body_len, resp_buf, resp_max);
 
-    int ret = https_post_once(hostname, path, headers, body, resp_buf, resp_max);
-
-    /* If failed and we had a stale connection, retry with a fresh one */
     if (ret < 0 && had_conn) {
         DBG("https_post: retry (stale conn), ret was %d\n", ret);
-        tls_disconnect();   /* ensure fully torn down */
-        ret = https_post_once(hostname, path, headers, body, resp_buf, resp_max);
+        tls_disconnect();
+        ret = https_request_once("POST", hostname, path, headers, body, body_len, resp_buf, resp_max);
     }
 
     DBG("https_post: final ret=%d\n", ret);
+    return ret;
+}
+
+int https_post(const char *hostname, const char *path,
+               const char *headers, const char *body,
+               char *resp_buf, int resp_max) {
+    return https_post_bin(hostname, path, headers, body, strlen(body),
+                          resp_buf, resp_max);
+}
+
+int https_get(const char *hostname, const char *path,
+              const char *extra_headers, char *resp_buf, int resp_max) {
+    /* Selftest hook */
+    {
+        extern int selftest_active;
+        extern int selftest_get_response(const char *host, char *buf, int max);
+        if (selftest_active) {
+            return selftest_get_response(hostname, resp_buf, resp_max);
+        }
+    }
+
+    if (!g_tls_ready) {
+        DBG("https_get: TLS not ready!\n");
+        return -1;
+    }
+
+    int had_conn = g_conn_active;
+    DBG("https_get: %s%s (existing=%d)\n", hostname, path, had_conn);
+
+    int ret = https_request_once("GET", hostname, path, extra_headers,
+                                  NULL, 0, resp_buf, resp_max);
+
+    if (ret < 0 && had_conn) {
+        DBG("https_get: retry (stale conn), ret was %d\n", ret);
+        tls_disconnect();
+        ret = https_request_once("GET", hostname, path, extra_headers,
+                                  NULL, 0, resp_buf, resp_max);
+    }
+
+    DBG("https_get: final ret=%d\n", ret);
     return ret;
 }

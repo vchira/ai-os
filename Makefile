@@ -64,7 +64,28 @@ C_SOURCES = lib/snprintf.c \
             drivers/pci.c \
             drivers/rtl8139.c \
             drivers/rtc.c \
-            drivers/framebuffer.c
+            drivers/ac97.c \
+            drivers/ata.c \
+            drivers/framebuffer.c \
+            lib/audio_api.c \
+            lib/prompt_provider.c \
+            lib/scheduler.c \
+            lib/system_poll.c \
+            lib/selftest.c \
+            lib/updater.c \
+            drivers/mouse.c \
+            lib/window.c \
+            lib/bmp.c \
+            drivers/uhci.c \
+            drivers/usb.c \
+            drivers/usb_hid.c \
+            drivers/usb_storage.c \
+            drivers/bluetooth.c \
+            lib/theme.c \
+            lib/widget.c \
+            lib/debug_log.c \
+            lib/settings.c \
+            lib/prompt_window.c
 
 # mbedTLS — TLS 1.2 client with ECDHE-RSA-AES256-GCM-SHA384
 MBEDTLS_SOURCES = \
@@ -144,7 +165,7 @@ LWIP_OBJ = $(patsubst %.c,$(BUILD_DIR)/%.o,$(LWIP_CORE))
 MBEDTLS_OBJ = $(patsubst %.c,$(BUILD_DIR)/%.o,$(MBEDTLS_SOURCES))
 ALL_OBJ = $(ASM_OBJ) $(C_OBJ) $(LWIP_OBJ) $(MBEDTLS_OBJ)
 
-.PHONY: all clean iso run
+.PHONY: all clean iso run disk run-disk arm-sd run-arm
 
 all: iso
 
@@ -170,10 +191,35 @@ iso: $(BUILD_DIR)/aios.bin
 		--directory=$(GRUB_MODULES) \
 		-o $(BUILD_DIR)/aios.iso $(ISO_DIR)
 
-# Run in QEMU with RTL8139 NIC
-run: iso
+# Create persistent disk image if it doesn't exist
+$(BUILD_DIR)/aios-disk.img:
+	qemu-img create -f raw $(BUILD_DIR)/aios-disk.img 4M
+
+# Run in QEMU with RTL8139 NIC + AC97 audio + persistent disk
+run: iso $(BUILD_DIR)/aios-disk.img
 	qemu-system-i386 -cdrom $(BUILD_DIR)/aios.iso -m 64M \
-		-netdev user,id=net0 -device rtl8139,netdev=net0
+		-drive file=$(BUILD_DIR)/aios-disk.img,format=raw,if=ide \
+		-netdev user,id=net0 -device rtl8139,netdev=net0 \
+		-audiodev pa,id=audio0 -device AC97,audiodev=audio0
+
+# Create bootable disk image (dd-able to HDD/SSD/SD card)
+disk: $(BUILD_DIR)/aios.bin
+	bash tools/make-disk.sh
+
+# Run from bootable disk in QEMU
+run-disk: disk
+	qemu-system-i386 -drive file=$(BUILD_DIR)/aios-boot.img,format=raw,if=ide -m 64M \
+		-netdev user,id=net0 -device rtl8139,netdev=net0 \
+		-audiodev pa,id=audio0 -device AC97,audiodev=audio0
+
+# Build ARM kernel for Raspberry Pi (requires arm-none-eabi toolchain)
+arm-sd:
+	bash tools/make-arm-sd.sh
+
+# Run ARM kernel in QEMU (for testing without real hardware)
+run-arm: arm-sd
+	qemu-system-arm -M raspi2b -kernel $(BUILD_DIR)/kernel7.img \
+		-serial stdio -display none
 
 clean:
 	rm -rf $(BUILD_DIR)

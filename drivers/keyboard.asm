@@ -35,47 +35,109 @@ layout_us_upper:
     times (128 - 58) db 0
 
 ; --- Layout 1: German QWERTZ (lowercase) ---
+; CP437 codes: ä=0x84, ö=0x94, ü=0x81, ß=0xE1
 layout_de_lower:
     db 0, 27                                    ; 0x00-0x01: none, ESC
-    db '1234567890-='                            ; 0x02-0x0D
+    db '1234567890', 0xE1, 0x27                 ; 0x02-0x0D: ...ß ´
     db 8, 9                                      ; 0x0E-0x0F: backspace, tab
-    db 'qwertzuiop[]'                            ; 0x10-0x1B: z swapped with y
+    db 'qwertzuiop', 0x81, '+'                  ; 0x10-0x1B: ...ü +
     db 10, 0                                     ; 0x1C-0x1D: enter, left ctrl
-    db 'asdfghjkl', 0x3B, 0x27                   ; 0x1E-0x28
-    db '`', 0                                    ; 0x29-0x2A: `, left shift
-    db 0x5C, 'yxcvbnm,./'                        ; 0x2B-0x35: y swapped with z
+    db 'asdfghjkl', 0x94, 0x84                  ; 0x1E-0x28: ...ö ä
+    db '^', 0                                    ; 0x29-0x2A: ^, left shift
+    db '#yxcvbnm,.-'                             ; 0x2B-0x35: # yxcvbnm,.-
     db 0, '*', 0, ' '                            ; 0x36-0x39: rshift, *, lalt, space
     times (128 - 58) db 0
 
 ; --- Layout 1: German QWERTZ (shifted) ---
+; CP437 codes: Ä=0x8E, Ö=0x99, Ü=0x9A, §=0x15
 layout_de_upper:
     db 0, 27                                     ; 0x00-0x01
-    db '!"#$%&/()=?+'                            ; 0x02-0x0D: German shifted numbers
+    db '!"', 0x15, '$%&/()=?`'                  ; 0x02-0x0D: !"§$%&/()=?`
     db 8, 9                                      ; 0x0E-0x0F
-    db 'QWERTZUIOP{}'                            ; 0x10-0x1B
+    db 'QWERTZUIOP', 0x9A, '*'                  ; 0x10-0x1B: ...Ü *
     db 10, 0                                     ; 0x1C-0x1D
-    db 'ASDFGHJKL:"'                             ; 0x1E-0x28
-    db '~', 0                                    ; 0x29-0x2A
-    db '|YXCVBNM<>?'                             ; 0x2B-0x35
+    db 'ASDFGHJKL', 0x99, 0x8E                  ; 0x1E-0x28: ...Ö Ä
+    db 0xF8, 0                                   ; 0x29-0x2A: ° (0xF8 in CP437), lshift
+    db 0x27, 'YXCVBNM;:_'                       ; 0x2B-0x35: ' YXCVBNM;:_
+    db 0, '*', 0, ' '                            ; 0x36-0x39
+    times (128 - 58) db 0
+
+; --- Layout 2: French AZERTY (lowercase) ---
+; CP437 codes: é=0x82, è=0x8A, ù=0x97, ç=0x87
+layout_fr_lower:
+    db 0, 27                                    ; 0x00-0x01
+    db '&', 0x82, '"', 0x27, '(', '-', 0x8A, '_', 0x87, 0x85, ')', '='  ; 0x02-0x0D
+    db 8, 9                                      ; 0x0E-0x0F
+    db 'azertyuiop^$'                            ; 0x10-0x1B
+    db 10, 0                                     ; 0x1C-0x1D
+    db 'qsdfghjklm', 0x97                       ; 0x1E-0x28: ...m ù
+    db 0, 0                                      ; 0x29-0x2A
+    db '*wxcvbn,;:!'                             ; 0x2B-0x35
+    db 0, '*', 0, ' '                            ; 0x36-0x39
+    times (128 - 58) db 0
+
+; --- Layout 2: French AZERTY (shifted) ---
+layout_fr_upper:
+    db 0, 27                                     ; 0x00-0x01
+    db '1234567890', 0xF8, '+'                   ; 0x02-0x0D: ...° +
+    db 8, 9                                      ; 0x0E-0x0F
+    db 'AZERTYUIOP', 0x22, 0x9C                 ; 0x10-0x1B: ..." £
+    db 10, 0                                     ; 0x1C-0x1D
+    db 'QSDFGHJKLM%'                             ; 0x1E-0x28
+    db 0, 0                                      ; 0x29-0x2A
+    db 0xE6, 'WXCVBN?./+'                       ; 0x2B-0x35: µ WXCVBN?./+
+    db 0, '*', 0, ' '                            ; 0x36-0x39
+    times (128 - 58) db 0
+
+; --- Layout 3: Spanish QWERTY (lowercase) ---
+; CP437 codes: ñ=0xA4, ¡=0xAD, ¿=0xA8
+layout_es_lower:
+    db 0, 27                                    ; 0x00-0x01
+    db '1234567890', 0x27, 0xAD                 ; 0x02-0x0D: ...' ¡
+    db 8, 9                                      ; 0x0E-0x0F
+    db 'qwertyuiop`+'                            ; 0x10-0x1B
+    db 10, 0                                     ; 0x1C-0x1D
+    db 'asdfghjkl', 0xA4, 0x27                  ; 0x1E-0x28: ...ñ '
+    db 0, 0                                      ; 0x29-0x2A
+    db 0x5C, 'zxcvbnm,./'                       ; 0x2B-0x35
+    db 0, '*', 0, ' '                            ; 0x36-0x39
+    times (128 - 58) db 0
+
+; --- Layout 3: Spanish QWERTY (shifted) ---
+layout_es_upper:
+    db 0, 27                                     ; 0x00-0x01
+    db '!"#$%&/()=', 0xA8, 0x22                 ; 0x02-0x0D: ...¿ "
+    db 8, 9                                      ; 0x0E-0x0F
+    db 'QWERTYUIOP^*'                            ; 0x10-0x1B
+    db 10, 0                                     ; 0x1C-0x1D
+    db 'ASDFGHJKL', 0xA5, '"'                   ; 0x1E-0x28: ...Ñ "
+    db 0, 0                                      ; 0x29-0x2A
+    db '|ZXCVBNM<>?'                             ; 0x2B-0x35
     db 0, '*', 0, ' '                            ; 0x36-0x39
     times (128 - 58) db 0
 
 ; Layout table pointers: [lower_ptr, upper_ptr] for each layout
-; Layout IDs: 0 = US QWERTY, 1 = German QWERTZ
+; Layout IDs: 0 = US, 1 = DE, 2 = FR, 3 = ES
 layout_table:
     dd layout_us_lower, layout_us_upper     ; Layout 0: US
     dd layout_de_lower, layout_de_upper     ; Layout 1: DE
+    dd layout_fr_lower, layout_fr_upper     ; Layout 2: FR
+    dd layout_es_lower, layout_es_upper     ; Layout 3: ES
 
 ; Layout name strings (for display)
 layout_names:
     dd layout_name_us
     dd layout_name_de
+    dd layout_name_fr
+    dd layout_name_es
 
 layout_name_us: db 'US QWERTY', 0
 layout_name_de: db 'German QWERTZ', 0
+layout_name_fr: db 'French AZERTY', 0
+layout_name_es: db 'Spanish QWERTY', 0
 
 ; Number of available layouts
-NUM_LAYOUTS equ 2
+NUM_LAYOUTS equ 4
 
 section .bss
 ; Keyboard state
@@ -89,6 +151,9 @@ kbd_layout:     resd 1
 ; Active layout table pointers (set by keyboard_set_layout)
 kbd_lower_ptr:  resd 1          ; Pointer to current lowercase table
 kbd_upper_ptr:  resd 1          ; Pointer to current uppercase/shift table
+
+; Extended key state (0xE0 prefix)
+kbd_extended:   resb 1
 
 ; Circular input buffer
 kbd_buffer:     resb KBD_BUF_SIZE
@@ -105,8 +170,12 @@ global keyboard_set_layout
 global keyboard_get_layout
 global keyboard_get_layout_name
 global keyboard_get_num_layouts
+global keyboard_inject_char
 
-extern net_poll
+extern system_poll
+extern fb_page_up
+extern fb_page_down
+extern win_poll
 
 ; =============================================================================
 ; keyboard_init - Initialize keyboard driver
@@ -118,6 +187,7 @@ keyboard_init:
     mov dword [kbd_buf_head], 0
     mov dword [kbd_buf_tail], 0
     mov dword [kbd_buf_count], 0
+    mov byte [kbd_extended], 0
 
     ; Default to layout 0 (US QWERTY)
     mov dword [kbd_layout], 0
@@ -223,6 +293,14 @@ keyboard_handler:
     ; Read scancode
     in al, KBD_DATA
     mov bl, al
+
+    ; Check for extended key prefix (0xE0)
+    cmp bl, 0xE0
+    je .set_extended
+
+    ; Check if this is the second byte of an extended key
+    cmp byte [kbd_extended], 1
+    je .handle_extended
 
     ; Check for key release (bit 7 set)
     test bl, 0x80
@@ -336,6 +414,34 @@ keyboard_handler:
     xor byte [kbd_caps], 1
     jmp .done
 
+.set_extended:
+    mov byte [kbd_extended], 1
+    jmp .done
+
+.handle_extended:
+    mov byte [kbd_extended], 0
+    ; Ignore extended key releases (bit 7 set)
+    test bl, 0x80
+    jnz .done
+    ; Page Up = 0x49, Page Down = 0x51
+    cmp bl, 0x49
+    je .do_page_up
+    cmp bl, 0x51
+    je .do_page_down
+    jmp .done
+
+.do_page_up:
+    push edx
+    call fb_page_up
+    pop edx
+    jmp .done
+
+.do_page_down:
+    push edx
+    call fb_page_down
+    pop edx
+    jmp .done
+
 .done:
     pop ecx
     pop ebx
@@ -348,7 +454,8 @@ keyboard_handler:
 ; =============================================================================
 keyboard_getchar:
 .wait:
-    call net_poll               ; Process network packets while idle
+    call system_poll            ; Network + scheduler + periodic tasks
+    call win_poll               ; Update window manager (mouse, rendering)
     hlt                         ; Wait for interrupt
     cmp dword [kbd_buf_count], 0
     je .wait
@@ -365,6 +472,36 @@ keyboard_getchar:
     dec dword [kbd_buf_count]
 
     pop ebx
+    ret
+
+; =============================================================================
+; keyboard_inject_char - Inject a character into the keyboard buffer (from USB)
+; Called from C: void keyboard_inject_char(char c)
+; =============================================================================
+keyboard_inject_char:
+    push ebp
+    mov ebp, esp
+    push ebx
+
+    mov al, [ebp+8]            ; character to inject
+    test al, al
+    jz .inject_done
+
+    ; Store in circular buffer if not full
+    cmp dword [kbd_buf_count], KBD_BUF_SIZE
+    jge .inject_done
+
+    mov ebx, [kbd_buf_head]
+    mov [kbd_buffer + ebx], al
+
+    inc ebx
+    and ebx, KBD_BUF_SIZE - 1
+    mov [kbd_buf_head], ebx
+    inc dword [kbd_buf_count]
+
+.inject_done:
+    pop ebx
+    pop ebp
     ret
 
 ; =============================================================================
