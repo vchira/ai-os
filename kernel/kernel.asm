@@ -19,18 +19,20 @@ banner_ver:   db 'AiOS v0.1 - AI-Native Operating System', 10, 0
 banner_sub:   db 'The Deterministic Substrate', 10, 0
 banner_info:  db 10, 0
 
-boot_gdt_msg:   db '[OK] GDT initialized', 10, 0
-boot_idt_msg:   db '[OK] IDT initialized', 10, 0
+boot_core_msg:  db '[OK] GDT + Memory + IDT + Paging initialized', 10, 0
+boot_fb_msg:    db '[OK] Framebuffer initialized', 10, 0
 boot_pit_msg:   db '[OK] PIT timer initialized (100 Hz)', 10, 0
 boot_kbd_msg:   db '[OK] Keyboard driver initialized', 10, 0
-boot_vga_msg:   db '[OK] VGA text mode initialized', 10, 0
-boot_mem_msg:   db '[OK] Memory manager initialized', 10, 0
-boot_pg_msg:    db '[OK] Paging enabled (identity-mapped 16 MB)', 10, 0
 boot_net_msg:   db 'Initializing network...', 10, 0
 boot_done_msg:  db 10, 0
 
+section .bss
+global saved_mbi
+saved_mbi: resd 1               ; multiboot info pointer, used by vga_init shim
+
 section .text
 global kernel_main
+global debug_print
 
 extern gdt_init
 extern idt_init
@@ -49,46 +51,42 @@ extern ai_prompt_run
 extern context_init
 extern syscall_init
 extern llm_init
+extern rtc_init
+extern tool_executor_init
+extern tls_init
 
 ; =============================================================================
 ; kernel_main - Kernel entry point
-; Called from boot.asm with multiboot magic and info on stack
+; Called from boot.asm: stack has [ret_addr][magic][mbi_ptr]
 ; =============================================================================
 kernel_main:
-    ; Initialize VGA
-    call vga_init
-    mov esi, boot_vga_msg
-    call vga_print
+    ; Save multiboot info pointer for framebuffer init
+    mov eax, [esp+8]           ; mbi pointer (pushed first by _start)
+    mov [saved_mbi], eax
 
-    ; Initialize GDT
+    ; --- Phase 1: Core init (no display — VESA mode, VGA text buffer inactive) ---
     call gdt_init
-    mov esi, boot_gdt_msg
-    call vga_print
-
-    ; Initialize memory manager
     call memory_init
-    mov esi, boot_mem_msg
-    call vga_print
-
-    ; Initialize IDT (sets up interrupts)
     call idt_init
-    mov esi, boot_idt_msg
-    call vga_print
+    call paging_init            ; enables paging + PSE (needed for FB mapping)
 
-    ; Initialize paging (identity-map first 16MB, enable CR0.PG)
-    call paging_init
-    mov esi, boot_pg_msg
-    call vga_print
+    ; --- Phase 2: Initialize framebuffer (now we can see output) ---
+    call vga_init               ; shim calls fb_init(saved_mbi)
 
-    ; Initialize PIT timer
+    ; Print retroactive boot status
+    mov esi, boot_core_msg
+    call debug_print
+    mov esi, boot_fb_msg
+    call debug_print
+
+    ; --- Phase 3: Rest of initialization ---
     call timer_init
     mov esi, boot_pit_msg
-    call vga_print
+    call debug_print
 
-    ; Initialize keyboard
     call keyboard_init
     mov esi, boot_kbd_msg
-    call vga_print
+    call debug_print
 
     ; Initialize C runtime (heap)
     call crt_init
@@ -99,17 +97,26 @@ kernel_main:
     ; Initialize Context Frame
     call context_init
 
+    ; Initialize Real-Time Clock
+    call rtc_init
+
+    ; Initialize Tool Executor (in-memory task store)
+    call tool_executor_init
+
     ; Initialize LLM provider system
     call llm_init
 
     ; Initialize network stack (RTL8139 + lwIP + DHCP)
     mov esi, boot_net_msg
-    call vga_print
+    call debug_print
     call net_init
+
+    ; Initialize TLS subsystem (mbedTLS entropy + RNG)
+    call tls_init
 
     ; Print boot complete separator
     mov esi, boot_done_msg
-    call vga_print
+    call debug_print
 
     ; Set banner color (light cyan)
     mov al, (COLOR_BLACK << 4) | COLOR_LCYAN
@@ -154,3 +161,15 @@ kernel_main:
 .idle:
     hlt
     jmp .idle
+
+; =============================================================================
+; debug_print — Conditional print gated by AIOS_DEBUG
+; Input: esi = pointer to null-terminated string
+; When AIOS_DEBUG=1, prints via vga_print. When 0, no-op.
+; =============================================================================
+debug_print:
+%if AIOS_DEBUG
+    jmp vga_print       ; tail call — vga_print's ret returns to our caller
+%else
+    ret
+%endif

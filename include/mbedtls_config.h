@@ -12,9 +12,9 @@
 /* Platform abstraction */
 #define MBEDTLS_PLATFORM_C
 #define MBEDTLS_PLATFORM_MEMORY
-#define MBEDTLS_PLATFORM_NO_STD_FUNCTIONS
 
-/* We provide our own calloc/free */
+/* We provide our own calloc/free and standard headers */
+#include "include/types.h"
 #include "include/heap.h"
 #include "include/string.h"
 #define MBEDTLS_PLATFORM_STD_CALLOC   calloc
@@ -24,6 +24,7 @@
 #define MBEDTLS_SSL_CLI_C
 #define MBEDTLS_SSL_TLS_C
 #define MBEDTLS_SSL_PROTO_TLS1_2
+#define MBEDTLS_SSL_SERVER_NAME_INDICATION
 
 /* Ciphersuites — just the ones Claude API needs */
 #define MBEDTLS_AES_C
@@ -55,6 +56,7 @@
 #define MBEDTLS_ASN1_PARSE_C
 #define MBEDTLS_ASN1_WRITE_C
 #define MBEDTLS_BASE64_C
+#define MBEDTLS_PEM_PARSE_C
 
 /* CTR-DRBG for random */
 #define MBEDTLS_CTR_DRBG_C
@@ -63,6 +65,8 @@
 /* Network (we provide our own net callbacks) */
 /* Do NOT define MBEDTLS_NET_C — we use custom callbacks */
 
-#define MBEDTLS_SSL_MAX_CONTENT_LEN  8192
+/* Standard TLS max record size — must be 16384 since we don't negotiate
+   max_fragment_length and servers may send full-size records. */
+#define MBEDTLS_SSL_MAX_CONTENT_LEN  16384
 
 #endif

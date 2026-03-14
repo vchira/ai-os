@@ -5,5 +5,7 @@
 #include "heap.h"
 
 #define abs(x) ((x) < 0 ? -(x) : (x))
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE 1
 
 #endif

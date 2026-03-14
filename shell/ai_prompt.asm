@@ -30,6 +30,9 @@ slash_meminfo:  db '/meminfo', 0
 slash_cpuinfo:  db '/cpuinfo', 0
 slash_keyboard: db '/keyboard', 0
 slash_provider: db '/provider', 0
+slash_time:     db '/time', 0
+slash_memory:   db '/memory', 0
+slash_key:      db '/key', 0
 
 ; Help text
 ai_help_text:
@@ -46,6 +49,9 @@ ai_help_text:
     db '  /reboot  - Reboot the system', 10
     db '  /keyboard - Switch keyboard layout', 10
     db '  /provider - Switch AI provider (Claude/OpenAI/Ollama)', 10
+    db '  /time    - Show current date and time', 10
+    db '  /memory  - Dump AI memory store', 10
+    db '  /key     - Set API key (usage: /key claude <key>)', 10
     db '  /halt    - Halt the CPU', 10
     db 10
     db '  Anything else is sent directly to the active AI.', 10, 0
@@ -73,6 +79,26 @@ ai_ver_text:    db 'AiOS v0.1 - AI-Native Operating System', 10
 
 ; Halt message
 ai_halt_msg:    db 'System halted. You can safely power off.', 10, 0
+
+; Time/Memory strings
+ai_time_label:  db 'Date/Time: ', 0
+ai_mem_label:   db 'AI Memory:', 10, 0
+
+; Key management strings
+ai_key_usage:   db 'Usage: /key <provider> <api-key>', 10
+                db '  /key claude sk-ant-api03-...', 10
+                db '  /key openai sk-...', 10, 0
+ai_key_set_ok:  db 'API key set for: ', 0
+ai_key_invalid: db 'Unknown provider. Use: claude, openai', 10, 0
+ai_key_claude:  db 'claude', 0
+ai_key_openai:  db 'openai', 0
+
+; Network wait strings
+ai_net_wait:    db 'Waiting for network... ', 0
+ai_net_ready:   db '[OK] Network ready - IP: ', 0
+ai_net_fail:    db '[!!] Network timeout - AI needs network to work', 10
+                db '     Try /net to check status later', 10, 0
+spinner_chars:  db '|/-', 0x5C    ; | / - backslash
 
 ; Reboot message
 ai_reboot_msg:  db 'Rebooting...', 10, 0
@@ -128,6 +154,10 @@ ai_resp:        resb 4096
 ; Temp buffer for net_get_ip
 ai_net_buf:     resb 32
 
+; Buffers for /time and /memory
+ai_time_buf:    resb 32
+ai_mem_buf:     resb 2048
+
 section .text
 global ai_prompt_run
 
@@ -158,11 +188,18 @@ extern keyboard_set_layout
 extern keyboard_get_layout
 extern keyboard_get_layout_name
 extern keyboard_get_num_layouts
+extern rtc_get_datetime_str
+extern tool_memory_dump
+extern llm_set_api_key
+extern sys_now
 
 ; =============================================================================
 ; ai_prompt_run - Main AI prompt loop
 ; =============================================================================
 ai_prompt_run:
+    ; Wait for network before showing prompt
+    call ai_wait_for_network
+
     ; Print welcome
     mov al, (COLOR_BLACK << 4) | COLOR_LGREEN
     call vga_set_color
@@ -198,6 +235,122 @@ ai_prompt_run:
 .slash_command:
     call ai_exec_slash
     jmp .loop
+
+; =============================================================================
+; ai_wait_for_network - Wait for DHCP with spinner animation
+; =============================================================================
+ai_wait_for_network:
+    push ebx
+    push esi
+    push edi
+    push ebp
+
+    ; Check if already up
+    call net_is_up
+    test eax, eax
+    jnz .nw_already_up
+
+    ; Print waiting message in yellow
+    mov al, (COLOR_BLACK << 4) | COLOR_YELLOW
+    call vga_set_color
+    mov esi, ai_net_wait
+    call vga_print
+
+    ; Print initial spinner character
+    mov al, [spinner_chars]
+    call vga_putchar
+    mov al, 8                       ; backspace to overwrite next time
+    call vga_putchar
+
+    ; Get start time for timeout
+    call timer_get_uptime_secs
+    mov ebp, eax                    ; ebp = start time (callee-saved)
+    xor ebx, ebx                    ; ebx = tick counter (callee-saved)
+
+.nw_loop:
+    ; Poll network stack
+    call net_poll
+
+    ; Check if network is up
+    call net_is_up
+    test eax, eax
+    jnz .nw_ready
+
+    ; Timeout after 30 seconds
+    call timer_get_uptime_secs
+    sub eax, ebp
+    cmp eax, 30
+    jge .nw_timeout
+
+    ; Wait for next interrupt (~10ms at 100Hz PIT)
+    hlt
+
+    ; Update spinner every 16 ticks (~160ms)
+    inc ebx
+    test ebx, 15
+    jnz .nw_loop
+
+    ; Rotate spinner character
+    mov eax, ebx
+    shr eax, 4
+    and eax, 3
+    movzx eax, byte [spinner_chars + eax]
+    call vga_putchar
+    mov al, 8                       ; backspace
+    call vga_putchar
+
+    jmp .nw_loop
+
+.nw_already_up:
+.nw_ready:
+    ; Clear spinner with space
+    mov al, ' '
+    call vga_putchar
+    call vga_newline
+
+    ; Print success in green
+    mov al, (COLOR_BLACK << 4) | COLOR_LGREEN
+    call vga_set_color
+    mov esi, ai_net_ready
+    call vga_print
+
+    ; Print IP address
+    push dword 32
+    push dword ai_net_buf
+    call net_get_ip
+    add esp, 8
+    mov esi, ai_net_buf
+    call vga_print
+    call vga_newline
+
+    ; Reset color
+    mov al, DEFAULT_COLOR
+    call vga_set_color
+
+    pop ebp
+    pop edi
+    pop esi
+    pop ebx
+    ret
+
+.nw_timeout:
+    call vga_newline
+
+    ; Print timeout warning in red
+    mov al, (COLOR_BLACK << 4) | COLOR_LRED
+    call vga_set_color
+    mov esi, ai_net_fail
+    call vga_print
+
+    ; Reset color
+    mov al, DEFAULT_COLOR
+    call vga_set_color
+
+    pop ebp
+    pop edi
+    pop esi
+    pop ebx
+    ret
 
 ; =============================================================================
 ; ai_readline - Read a line of input
@@ -402,6 +555,27 @@ ai_exec_slash:
     call ai_str_startswith
     test eax, eax
     jnz .do_provider
+
+    ; /time
+    mov esi, ai_input
+    mov edi, slash_time
+    call ai_str_compare
+    test eax, eax
+    jnz .do_time
+
+    ; /memory
+    mov esi, ai_input
+    mov edi, slash_memory
+    call ai_str_compare
+    test eax, eax
+    jnz .do_memory
+
+    ; /key
+    mov esi, ai_input
+    mov edi, slash_key
+    call ai_str_startswith
+    test eax, eax
+    jnz .do_key
 
     ; Unknown slash command
     mov esi, ai_unknown_cmd
@@ -793,6 +967,133 @@ ai_exec_slash:
     mov esi, ai_prov_invalid
     call vga_print
     jmp .slash_done
+
+.do_time:
+    mov esi, ai_time_label
+    call vga_print
+    push dword 32
+    push dword ai_time_buf
+    call rtc_get_datetime_str
+    add esp, 8
+    mov esi, ai_time_buf
+    call vga_print
+    call vga_newline
+    jmp .slash_done
+
+.do_memory:
+    mov esi, ai_mem_label
+    call vga_print
+    push dword 2048
+    push dword ai_mem_buf
+    call tool_memory_dump
+    add esp, 8
+    mov esi, ai_mem_buf
+    call vga_print
+    jmp .slash_done
+
+.do_key:
+    ; Parse "/key " — need at least "/key " (4 chars + space)
+    mov esi, ai_input
+    add esi, 4                  ; skip "/key"
+    cmp byte [esi], 0
+    je .key_show_usage
+    cmp byte [esi], ' '
+    jne .key_show_usage
+    inc esi                     ; skip space
+
+    ; Now esi points to provider name. Check "claude" or "openai"
+    ; Compare first word against "claude"
+    push esi                    ; save start of provider
+    mov edi, ai_key_claude
+    call .key_match_word
+    test eax, eax
+    jnz .key_is_claude
+
+    pop esi
+    push esi
+    mov edi, ai_key_openai
+    call .key_match_word
+    test eax, eax
+    jnz .key_is_openai
+
+    pop esi
+    mov esi, ai_key_invalid
+    call vga_print
+    jmp .slash_done
+
+.key_is_claude:
+    pop esi
+    add esi, 7                  ; skip "claude " (6 chars + space)
+    mov eax, 0                  ; provider_id = 0 (Claude)
+    jmp .key_set
+
+.key_is_openai:
+    pop esi
+    add esi, 7                  ; skip "openai " (6 chars + space)
+    mov eax, 1                  ; provider_id = 1 (OpenAI)
+    jmp .key_set
+
+.key_set:
+    ; esi = pointer to API key string, eax = provider_id
+    ; Check key is not empty
+    cmp byte [esi], 0
+    je .key_show_usage
+
+    push esi                    ; key string
+    push eax                    ; provider_id
+    call llm_set_api_key
+    add esp, 8
+    cmp eax, 0
+    jl .key_show_usage
+
+    mov esi, ai_key_set_ok
+    call vga_print
+    ; Print provider name
+    call llm_get_active
+    push eax
+    call llm_get_provider_name
+    add esp, 4
+    mov esi, eax
+    call vga_print
+    call vga_newline
+    jmp .slash_done
+
+.key_show_usage:
+    mov esi, ai_key_usage
+    call vga_print
+    jmp .slash_done
+
+; Helper: check if string at esi starts with word at edi (until null/space)
+; Returns eax=1 if match, 0 if not
+.key_match_word:
+    push esi
+    push edi
+.kmw_loop:
+    mov al, [edi]
+    test al, al
+    jz .kmw_check_end
+    cmp al, [esi]
+    jne .kmw_fail
+    inc esi
+    inc edi
+    jmp .kmw_loop
+.kmw_check_end:
+    ; Word matched — esi should be at space or null
+    mov al, [esi]
+    cmp al, ' '
+    je .kmw_ok
+    cmp al, 0
+    je .kmw_ok
+.kmw_fail:
+    xor eax, eax
+    pop edi
+    pop esi
+    ret
+.kmw_ok:
+    mov eax, 1
+    pop edi
+    pop esi
+    ret
 
 .slash_done:
     pop edi

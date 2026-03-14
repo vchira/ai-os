@@ -1,15 +1,17 @@
 ; =============================================================================
-; AsmOS - VGA Text Mode Driver
-; 80x25 text mode, color support, scrolling, hardware cursor
+; AiOS — VGA API Shims
+; Preserves the existing vga_print/vga_putchar/etc. calling convention
+; (register-based) and forwards to the C framebuffer driver (cdecl).
+;
+; All existing asm code (kernel.asm, ai_prompt.asm, shell.asm, paging.asm)
+; continues to work unchanged — same function names, same registers.
 ; =============================================================================
 
 %include "include/constants.inc"
 
 section .data
 global vga_color
-vga_row:    dd 0
-vga_col:    dd 0
-vga_color:  db DEFAULT_COLOR
+vga_color: db DEFAULT_COLOR
 
 section .text
 global vga_init
@@ -23,107 +25,60 @@ global vga_set_color
 global vga_get_cursor_row
 global vga_get_cursor_col
 
+; C framebuffer functions (cdecl)
+extern fb_init
+extern fb_clear
+extern fb_putchar
+extern fb_print
+extern fb_newline
+extern fb_set_color
+extern fb_get_cursor_row
+extern fb_get_cursor_col
+
+; Saved multiboot info pointer (set by kernel_main)
+extern saved_mbi
+
 ; =============================================================================
-; vga_init - Initialize VGA text mode
+; vga_init — Initialize framebuffer using saved multiboot info
 ; =============================================================================
 vga_init:
-    mov byte [vga_color], DEFAULT_COLOR
-    call vga_clear
-    ret
-
-; =============================================================================
-; vga_clear - Clear the entire screen
-; =============================================================================
-vga_clear:
     push eax
     push ecx
-    push edi
-
-    mov edi, VGA_BUFFER
-    mov ah, [vga_color]
-    mov al, ' '
-    mov ecx, VGA_SIZE
-    rep stosw
-
-    mov dword [vga_row], 0
-    mov dword [vga_col], 0
-    call vga_update_cursor
-
-    pop edi
+    push edx
+    push dword [saved_mbi]
+    call fb_init
+    add esp, 4
+    pop edx
     pop ecx
     pop eax
     ret
 
 ; =============================================================================
-; vga_putchar - Print a single character
-; Input: al = character
+; vga_clear — Clear the framebuffer screen
+; =============================================================================
+vga_clear:
+    push eax
+    push ecx
+    push edx
+    call fb_clear
+    pop edx
+    pop ecx
+    pop eax
+    ret
+
+; =============================================================================
+; vga_putchar — Print one character
+; Input: al = character (register-based convention)
 ; =============================================================================
 vga_putchar:
     push ebx
     push ecx
     push edx
     push edi
-
-    cmp al, 10                  ; Newline?
-    je .newline
-    cmp al, 13                  ; Carriage return?
-    je .carriage_return
-    cmp al, 8                   ; Backspace?
-    je .backspace
-
-    ; Calculate offset: (row * 80 + col) * 2
-    mov ecx, [vga_row]
-    imul ecx, VGA_WIDTH
-    add ecx, [vga_col]
-    shl ecx, 1
-
-    ; Write character + attribute
-    mov edi, VGA_BUFFER
-    add edi, ecx
-    mov ah, [vga_color]
-    mov [edi], ax
-
-    ; Advance cursor
-    inc dword [vga_col]
-    cmp dword [vga_col], VGA_WIDTH
-    jl .done
-    ; Wrap to next line
-    mov dword [vga_col], 0
-    inc dword [vga_row]
-    jmp .check_scroll
-
-.newline:
-    mov dword [vga_col], 0
-    inc dword [vga_row]
-    jmp .check_scroll
-
-.carriage_return:
-    mov dword [vga_col], 0
-    jmp .done
-
-.backspace:
-    cmp dword [vga_col], 0
-    je .done
-    dec dword [vga_col]
-    ; Clear the character at cursor
-    mov ecx, [vga_row]
-    imul ecx, VGA_WIDTH
-    add ecx, [vga_col]
-    shl ecx, 1
-    mov edi, VGA_BUFFER
-    add edi, ecx
-    mov byte [edi], ' '
-    mov byte [edi+1], DEFAULT_COLOR
-    jmp .done
-
-.check_scroll:
-    cmp dword [vga_row], VGA_HEIGHT
-    jl .done
-    call vga_scroll
-    mov dword [vga_row], VGA_HEIGHT - 1
-
-.done:
-    call vga_update_cursor
+    movzx eax, al
+    push eax
+    call fb_putchar
+    add esp, 4
     pop edi
     pop edx
     pop ecx
@@ -131,65 +86,77 @@ vga_putchar:
     ret
 
 ; =============================================================================
-; vga_scroll - Scroll screen up by one line
+; vga_print — Print null-terminated string
+; Input: esi = pointer to string (register-based convention)
 ; =============================================================================
-vga_scroll:
+vga_print:
     push eax
     push ecx
-    push esi
-    push edi
-
-    ; Copy lines 1-24 to lines 0-23
-    mov edi, VGA_BUFFER
-    mov esi, VGA_BUFFER + (VGA_WIDTH * 2)
-    mov ecx, VGA_WIDTH * (VGA_HEIGHT - 1)
-    rep movsw
-
-    ; Clear the last line
-    mov ah, [vga_color]
-    mov al, ' '
-    mov ecx, VGA_WIDTH
-    rep stosw
-
-    pop edi
+    push edx
+    push esi            ; preserve esi for caller
+    push esi            ; argument to fb_print
+    call fb_print
+    add esp, 4
     pop esi
+    pop edx
     pop ecx
     pop eax
     ret
 
 ; =============================================================================
-; vga_print - Print a null-terminated string
-; Input: esi = pointer to string
-; =============================================================================
-vga_print:
-    push eax
-    push esi
-
-.loop:
-    lodsb
-    test al, al
-    jz .done
-    call vga_putchar
-    jmp .loop
-
-.done:
-    pop esi
-    pop eax
-    ret
-
-; =============================================================================
-; vga_newline - Print a newline
+; vga_newline — Print a newline character
 ; =============================================================================
 vga_newline:
     push eax
-    mov al, 10
-    call vga_putchar
+    push ecx
+    push edx
+    call fb_newline
+    pop edx
+    pop ecx
     pop eax
     ret
 
 ; =============================================================================
-; vga_print_hex - Print a 32-bit value in hexadecimal
-; Input: eax = value to print
+; vga_set_color — Set VGA-style color attribute
+; Input: al = color (bg << 4 | fg)
+; =============================================================================
+vga_set_color:
+    mov [vga_color], al         ; keep local copy for backward compat
+    push eax
+    push ecx
+    push edx
+    movzx eax, al
+    push eax
+    call fb_set_color
+    add esp, 4
+    pop edx
+    pop ecx
+    pop eax
+    ret
+
+; =============================================================================
+; vga_get_cursor_row / vga_get_cursor_col
+; Returns: eax = row or column
+; =============================================================================
+vga_get_cursor_row:
+    push ecx
+    push edx
+    call fb_get_cursor_row
+    pop edx
+    pop ecx
+    ret
+
+vga_get_cursor_col:
+    push ecx
+    push edx
+    call fb_get_cursor_col
+    pop edx
+    pop ecx
+    ret
+
+; =============================================================================
+; vga_print_hex — Print 32-bit value in hex (keeps pure asm, calls vga_putchar)
+; Input: eax = value
 ; =============================================================================
 vga_print_hex:
     push eax
@@ -205,9 +172,9 @@ vga_print_hex:
     call vga_putchar
     pop eax
 
-    mov ecx, 8                  ; 8 hex digits
+    mov ecx, 8
 .hex_loop:
-    rol ebx, 4                  ; Rotate left to get next nibble
+    rol ebx, 4
     mov eax, ebx
     and eax, 0x0F
     cmp eax, 10
@@ -228,8 +195,8 @@ vga_print_hex:
     ret
 
 ; =============================================================================
-; vga_print_dec - Print a 32-bit unsigned value in decimal
-; Input: eax = value to print
+; vga_print_dec — Print 32-bit unsigned decimal (keeps pure asm, calls vga_putchar)
+; Input: eax = value
 ; =============================================================================
 vga_print_dec:
     push eax
@@ -238,11 +205,10 @@ vga_print_dec:
     push edx
 
     mov ebx, eax
-    mov ecx, 0                  ; Digit counter
+    mov ecx, 0
 
     test ebx, ebx
     jnz .push_digits
-    ; Handle zero
     mov al, '0'
     call vga_putchar
     jmp .dec_done
@@ -253,9 +219,9 @@ vga_print_dec:
     mov eax, ebx
     xor edx, edx
     mov ebx, 10
-    div ebx                     ; eax = quotient, edx = remainder
+    div ebx
     mov ebx, eax
-    push edx                    ; Push digit
+    push edx
     inc ecx
     jmp .push_digits
 
@@ -273,58 +239,4 @@ vga_print_dec:
     pop ecx
     pop ebx
     pop eax
-    ret
-
-; =============================================================================
-; vga_set_color - Set the current text color
-; Input: al = color attribute (bg << 4 | fg)
-; =============================================================================
-vga_set_color:
-    mov [vga_color], al
-    ret
-
-; =============================================================================
-; vga_update_cursor - Update hardware cursor position
-; =============================================================================
-vga_update_cursor:
-    push eax
-    push ebx
-    push edx
-
-    ; Calculate linear position
-    mov eax, [vga_row]
-    imul eax, VGA_WIDTH
-    add eax, [vga_col]
-    mov ebx, eax
-
-    ; Set low byte
-    mov dx, 0x3D4
-    mov al, 0x0F
-    out dx, al
-    mov dx, 0x3D5
-    mov al, bl
-    out dx, al
-
-    ; Set high byte
-    mov dx, 0x3D4
-    mov al, 0x0E
-    out dx, al
-    mov dx, 0x3D5
-    mov al, bh
-    out dx, al
-
-    pop edx
-    pop ebx
-    pop eax
-    ret
-
-; =============================================================================
-; vga_get_cursor_row / vga_get_cursor_col
-; =============================================================================
-vga_get_cursor_row:
-    mov eax, [vga_row]
-    ret
-
-vga_get_cursor_col:
-    mov eax, [vga_col]
     ret

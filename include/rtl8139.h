@@ -37,8 +37,11 @@
 #define RTL_ISR_TOK         0x0004
 
 /* TX status bits */
-#define RTL_TX_OWN          0x2000
-#define RTL_TX_STATUS_OK    0x8000
+#define RTL_TX_OWN          0x2000   /* bit 13: DMA completed */
+#define RTL_TX_TUN          0x4000   /* bit 14: TX FIFO underrun */
+#define RTL_TX_STATUS_OK    0x8000   /* bit 15: TX completed OK */
+#define RTL_TX_ABORT        0x40000000  /* bit 30: TX aborted */
+#define RTL_TX_CARRIER_LOST 0x20000000  /* bit 29: carrier sense lost */
 
 #define RTL_RX_BUF_SIZE     (8192 + 16 + 1500) /* 8K + header + max frame */
 #define RTL_TX_BUF_SIZE     1536

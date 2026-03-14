@@ -158,8 +158,14 @@ paging_init:
     add esp, 8
 
     ; -----------------------------------------------------------------
-    ; Step 6: Load CR3 and enable paging
+    ; Step 6: Enable PSE (4MB pages) and load CR3 and enable paging
     ; -----------------------------------------------------------------
+
+    ; Enable Page Size Extension in CR4 (needed for 4MB framebuffer pages)
+    mov eax, cr4
+    or eax, 0x10            ; CR4.PSE = bit 4
+    mov cr4, eax
+
     mov eax, page_directory
     mov cr3, eax
 

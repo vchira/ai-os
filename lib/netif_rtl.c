@@ -54,8 +54,10 @@ static err_t rtl_init_cb(struct netif *netif) {
 
 /* Called periodically from main loop to receive packets */
 void net_poll(void) {
-    int len = rtl8139_poll(rx_frame, sizeof(rx_frame));
-    if (len > 0) {
+    /* Drain all available RX packets (not just one) for better responsiveness */
+    for (int pkts = 0; pkts < 16; pkts++) {
+        int len = rtl8139_poll(rx_frame, sizeof(rx_frame));
+        if (len <= 0) break;
         struct pbuf *p = pbuf_alloc(PBUF_RAW, len, PBUF_POOL);
         if (p) {
             pbuf_take(p, rx_frame, len);

@@ -2,6 +2,19 @@
 #include "include/pci.h"
 #include "include/io.h"
 #include "include/string.h"
+#include "include/stdio.h"
+
+#if AIOS_DEBUG
+#include "include/types.h"
+extern uint32_t sys_now(void);
+#define TX_DBG(fmt, ...) do { \
+    char _d[100]; \
+    snprintf(_d, sizeof(_d), "[%lu] rtl_tx: " fmt, (unsigned long)sys_now(), ##__VA_ARGS__); \
+    vga_print(_d); \
+} while(0)
+#else
+#define TX_DBG(fmt, ...) ((void)0)
+#endif
 
 static uint16_t io_base;
 static uint8_t  mac_addr[6];
@@ -42,6 +55,9 @@ int rtl8139_init(void) {
     outl(io_base + RTL_RXCONFIG,
          RTL_RX_ACCEPT_ALL | RTL_RX_WRAP | RTL_RX_BUF_8K);
 
+    /* TX config: IFG=11 (standard 96-bit gap), MXDMA=111 (unlimited burst) */
+    outl(io_base + RTL_TXCONFIG, 0x03000700);
+
     /* Enable RX and TX */
     outb(io_base + RTL_CMD, RTL_CMD_RX_ENABLE | RTL_CMD_TX_ENABLE);
 
@@ -65,22 +81,49 @@ void rtl8139_get_mac(uint8_t mac[6]) {
 int rtl8139_send(const void *data, uint16_t len) {
     if (len > RTL_TX_BUF_SIZE) return -1;
 
+    /* Wait for this descriptor to be free from any previous TX.
+       After reset: status=0 (host owns). After successful TX: OWN + TOK set. */
+    uint32_t status;
+    for (int i = 0; i < 500000; i++) {
+        status = inl(io_base + RTL_TXSTATUS0 + tx_cur * 4);
+        /* Descriptor is free if OWN is set (DMA done) or STATUS_OK is set,
+           or if it was never used (status has OWN already set after reset) */
+        if (status & (RTL_TX_OWN | RTL_TX_STATUS_OK)) break;
+    }
+
     memcpy(tx_buffers[tx_cur], data, len);
 
-    /* Set TX address */
+    /* Set TX address (physical address — identity mapped) */
     outl(io_base + RTL_TXADDR0 + tx_cur * 4, (uint32_t)tx_buffers[tx_cur]);
 
-    /* Set TX status: size (clears OWN bit, starts TX) */
+    /* Clear any pending TX OK interrupt */
+    outw(io_base + RTL_ISR, RTL_ISR_TOK);
+
+    /* Write TX status: packet size only (clears OWN bit → starts DMA + TX) */
     outl(io_base + RTL_TXSTATUS0 + tx_cur * 4, len);
 
-    /* Brief wait for TX — don't block if slow */
-    for (int i = 0; i < 1000; i++) {
-        uint32_t status = inl(io_base + RTL_TXSTATUS0 + tx_cur * 4);
-        if (status & (RTL_TX_STATUS_OK | RTL_TX_OWN)) break;
+    /* Wait for TX to complete — STATUS_OK means packet was sent on the wire */
+    int ok = 0;
+    for (int i = 0; i < 500000; i++) {
+        status = inl(io_base + RTL_TXSTATUS0 + tx_cur * 4);
+        if (status & RTL_TX_STATUS_OK) {
+            ok = 1;
+            break;
+        }
+        if (status & RTL_TX_ABORT) {
+            TX_DBG("ABORT desc=%d status=0x%lx\n", tx_cur, (unsigned long)status);
+            tx_cur = (tx_cur + 1) % RTL_NUM_TX_DESC;
+            return -1;
+        }
+    }
+
+    if (!ok) {
+        TX_DBG("TIMEOUT desc=%d status=0x%lx len=%d\n",
+               tx_cur, (unsigned long)status, len);
     }
 
     tx_cur = (tx_cur + 1) % RTL_NUM_TX_DESC;
-    return 0;
+    return ok ? 0 : -1;
 }
 
 int rtl8139_poll(void *buf, uint16_t max_len) {
@@ -100,11 +143,14 @@ int rtl8139_poll(void *buf, uint16_t max_len) {
 
     memcpy(buf, rx_buffer + rx_offset + 4, data_len);
 
-    /* Update read pointer (aligned to 4 bytes) */
+    /* Update read pointer (aligned to 4 bytes).
+       CRITICAL: wrap at the actual ring buffer size (8K), NOT the allocated
+       buffer size. The allocated buffer has extra space for WRAP mode overflow,
+       but the ring pointer arithmetic must use the hardware ring size. */
     rx_offset = (rx_offset + length + 4 + 3) & ~3u;
-    rx_offset %= RTL_RX_BUF_SIZE;
+    rx_offset %= 8192;
 
-    /* Update CAPR (read pointer) */
+    /* Update CAPR (read pointer) — RTL8139 quirk: must subtract 16 */
     outw(io_base + RTL_CAPR, rx_offset - 16);
 
     return data_len;
