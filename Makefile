@@ -1,226 +1,66 @@
-NASM = $(HOME)/.local/bin/nasm
-LD = ld
-CC = gcc
-XORRISO = xorriso
-GRUB_MKRESCUE = grub-mkrescue
+# AiOS — AI-Native Linux Distribution
+# ====================================
+#
+# AiOS v2.0: Linux-based AI-native operating system
+# Built on Debian Bookworm with Wayland (labwc) and GTK4
+#
+# Targets:
+#   make app       — Install the AiOS application locally
+#   make run       — Run the AiOS app (development mode)
+#   make selftest  — Run the self-test suite (/selftest)
+#   make test      — Run unit tests
+#   make iso       — Build the bootable/installable ISO
+#   make qemu      — Build ISO and launch in QEMU
+#   make clean     — Clean build artifacts
 
-NASM_FLAGS = -f elf32 -I ./ -DAIOS_DEBUG=$(AIOS_DEBUG)
-GCC_INCLUDES = $(shell $(CC) -m32 -print-file-name=include)
+.PHONY: app run selftest test iso qemu clean help
 
-# Load .env file if it exists (for API keys etc.)
--include .env
+PYTHON ?= python3
+PIP ?= $(PYTHON) -m pip
 
-# LLM API keys — set in .env or pass on command line
-CLAUDE_API_KEY ?= your-api-key-here
-OPENAI_API_KEY ?= your-api-key-here
+help:
+	@echo "AiOS — AI-Native Linux Distribution v2.0"
+	@echo ""
+	@echo "Application:"
+	@echo "  make app       Install AiOS app and dependencies"
+	@echo "  make run       Run AiOS in development mode"
+	@echo "  make selftest  Run /selftest (simulated conversation test)"
+	@echo "  make test      Run unit tests with pytest"
+	@echo ""
+	@echo "Distribution:"
+	@echo "  make iso       Build the AiOS Linux ISO (requires sudo + live-build)"
+	@echo "  make qemu      Build ISO and test in QEMU"
+	@echo ""
+	@echo "Other:"
+	@echo "  make clean     Clean all build artifacts"
+	@echo "  make help      Show this help"
 
-# Debug mode: 1 = show debug messages, 0 = hide (set in .env)
-AIOS_DEBUG ?= 0
+# ─── Application ──────────────────────────────────────────────────
 
-CC_FLAGS = -m32 -std=c11 -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector \
-           -fno-pic -O2 -Wall -Wextra -Wno-unused-parameter \
-           -isystem $(GCC_INCLUDES) \
-           -I . -I lib/lwip/src/include -I include -I lib/mbedtls/include \
-           -DMBEDTLS_CONFIG_FILE='"include/mbedtls_config.h"' \
-           -DCLAUDE_API_KEY='"$(CLAUDE_API_KEY)"' \
-           -DOPENAI_API_KEY='"$(OPENAI_API_KEY)"' \
-           -DAIOS_DEBUG=$(AIOS_DEBUG)
-LD_FLAGS = -m elf_i386 -T linker.ld -nostdlib
+app:
+	cd aios-app && $(PIP) install -e ".[dev]"
 
-BUILD_DIR = build
-ISO_DIR = iso
+run:
+	cd aios-app && $(PYTHON) -m aios
 
-# Local GRUB i386-pc modules (extracted from RPM)
-GRUB_MODULES = /usr/lib/grub/i386-pc
+selftest:
+	cd aios-app && $(PYTHON) -c "from aios.config.manager import ConfigManager; from aios.selftest.runner import SelfTestRunner; c = ConfigManager(); r = SelfTestRunner(c, None); print(r.run_all())"
 
-# Assembly source files
-ASM_SOURCES = boot/boot.asm \
-              kernel/kernel.asm \
-              kernel/gdt.asm \
-              kernel/idt.asm \
-              kernel/memory.asm \
-              kernel/paging.asm \
-              kernel/crt.asm \
-              kernel/c_api.asm \
-              kernel/context.asm \
-              kernel/syscall.asm \
-              drivers/vga.asm \
-              drivers/keyboard.asm \
-              drivers/timer.asm \
-              shell/shell.asm \
-              shell/ai_prompt.asm
+test:
+	cd aios-app && $(PYTHON) -m pytest tests/ -v
 
-# C source files — AiOS core
-C_SOURCES = lib/snprintf.c \
-            lib/string.c \
-            lib/heap.c \
-            lib/sys_arch.c \
-            lib/netif_rtl.c \
-            lib/http_client.c \
-            lib/claude_api.c \
-            lib/llm_provider.c \
-            lib/tool_executor.c \
-            lib/tls_client.c \
-            drivers/pci.c \
-            drivers/rtl8139.c \
-            drivers/rtc.c \
-            drivers/ac97.c \
-            drivers/ata.c \
-            drivers/framebuffer.c \
-            lib/audio_api.c \
-            lib/prompt_provider.c \
-            lib/scheduler.c \
-            lib/system_poll.c \
-            lib/selftest.c \
-            lib/updater.c \
-            drivers/mouse.c \
-            lib/window.c \
-            lib/bmp.c \
-            drivers/uhci.c \
-            drivers/usb.c \
-            drivers/usb_hid.c \
-            drivers/usb_storage.c \
-            drivers/bluetooth.c \
-            lib/theme.c \
-            lib/widget.c \
-            lib/debug_log.c \
-            lib/settings.c \
-            lib/prompt_window.c
+# ─── Distribution ────────────────────────────────────────────────
 
-# mbedTLS — TLS 1.2 client with ECDHE-RSA-AES256-GCM-SHA384
-MBEDTLS_SOURCES = \
-    lib/mbedtls/library/aes.c \
-    lib/mbedtls/library/asn1parse.c \
-    lib/mbedtls/library/asn1write.c \
-    lib/mbedtls/library/base64.c \
-    lib/mbedtls/library/bignum.c \
-    lib/mbedtls/library/bignum_core.c \
-    lib/mbedtls/library/bignum_mod.c \
-    lib/mbedtls/library/bignum_mod_raw.c \
-    lib/mbedtls/library/cipher.c \
-    lib/mbedtls/library/cipher_wrap.c \
-    lib/mbedtls/library/constant_time.c \
-    lib/mbedtls/library/ctr_drbg.c \
-    lib/mbedtls/library/ecdh.c \
-    lib/mbedtls/library/ecp.c \
-    lib/mbedtls/library/ecp_curves.c \
-    lib/mbedtls/library/ecp_curves_new.c \
-    lib/mbedtls/library/entropy.c \
-    lib/mbedtls/library/gcm.c \
-    lib/mbedtls/library/md.c \
-    lib/mbedtls/library/oid.c \
-    lib/mbedtls/library/pem.c \
-    lib/mbedtls/library/pk.c \
-    lib/mbedtls/library/pk_ecc.c \
-    lib/mbedtls/library/pk_wrap.c \
-    lib/mbedtls/library/pkparse.c \
-    lib/mbedtls/library/platform.c \
-    lib/mbedtls/library/platform_util.c \
-    lib/mbedtls/library/rsa.c \
-    lib/mbedtls/library/rsa_alt_helpers.c \
-    lib/mbedtls/library/sha256.c \
-    lib/mbedtls/library/sha512.c \
-    lib/mbedtls/library/ssl_ciphersuites.c \
-    lib/mbedtls/library/ssl_client.c \
-    lib/mbedtls/library/ssl_debug_helpers_generated.c \
-    lib/mbedtls/library/ssl_msg.c \
-    lib/mbedtls/library/ssl_tls.c \
-    lib/mbedtls/library/ssl_tls12_client.c \
-    lib/mbedtls/library/x509.c \
-    lib/mbedtls/library/x509_crt.c
+iso:
+	cd distro && sudo ./build.sh
 
-# lwIP core sources (TCP/IP stack)
-LWIP_CORE = lib/lwip/src/core/init.c \
-            lib/lwip/src/core/def.c \
-            lib/lwip/src/core/dns.c \
-            lib/lwip/src/core/inet_chksum.c \
-            lib/lwip/src/core/ip.c \
-            lib/lwip/src/core/mem.c \
-            lib/lwip/src/core/memp.c \
-            lib/lwip/src/core/netif.c \
-            lib/lwip/src/core/pbuf.c \
-            lib/lwip/src/core/raw.c \
-            lib/lwip/src/core/stats.c \
-            lib/lwip/src/core/sys.c \
-            lib/lwip/src/core/tcp.c \
-            lib/lwip/src/core/tcp_in.c \
-            lib/lwip/src/core/tcp_out.c \
-            lib/lwip/src/core/timeouts.c \
-            lib/lwip/src/core/udp.c \
-            lib/lwip/src/core/ipv4/autoip.c \
-            lib/lwip/src/core/ipv4/dhcp.c \
-            lib/lwip/src/core/ipv4/etharp.c \
-            lib/lwip/src/core/ipv4/icmp.c \
-            lib/lwip/src/core/ipv4/igmp.c \
-            lib/lwip/src/core/ipv4/ip4.c \
-            lib/lwip/src/core/ipv4/ip4_addr.c \
-            lib/lwip/src/core/ipv4/ip4_frag.c \
-            lib/lwip/src/core/ipv4/acd.c \
-            lib/lwip/src/netif/ethernet.c
+qemu:
+	cd distro && ./run-qemu.sh
 
-# Object files
-ASM_OBJ = $(patsubst %.asm,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
-C_OBJ = $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_SOURCES))
-LWIP_OBJ = $(patsubst %.c,$(BUILD_DIR)/%.o,$(LWIP_CORE))
-MBEDTLS_OBJ = $(patsubst %.c,$(BUILD_DIR)/%.o,$(MBEDTLS_SOURCES))
-ALL_OBJ = $(ASM_OBJ) $(C_OBJ) $(LWIP_OBJ) $(MBEDTLS_OBJ)
-
-.PHONY: all clean iso run disk run-disk arm-sd run-arm
-
-all: iso
-
-# Assemble each .asm file to .o
-$(BUILD_DIR)/%.o: %.asm
-	@mkdir -p $(dir $@)
-	$(NASM) $(NASM_FLAGS) $< -o $@
-
-# Compile each .c file to .o
-$(BUILD_DIR)/%.o: %.c
-	@mkdir -p $(dir $@)
-	$(CC) $(CC_FLAGS) -c $< -o $@
-
-# Link all object files into kernel binary
-$(BUILD_DIR)/aios.bin: $(ALL_OBJ)
-	$(LD) $(LD_FLAGS) -o $@ $^
-
-# Create bootable ISO using GRUB2
-iso: $(BUILD_DIR)/aios.bin
-	@mkdir -p $(ISO_DIR)/boot/grub
-	cp $(BUILD_DIR)/aios.bin $(ISO_DIR)/boot/aios.bin
-	$(GRUB_MKRESCUE) --xorriso=$(XORRISO) \
-		--directory=$(GRUB_MODULES) \
-		-o $(BUILD_DIR)/aios.iso $(ISO_DIR)
-
-# Create persistent disk image if it doesn't exist
-$(BUILD_DIR)/aios-disk.img:
-	qemu-img create -f raw $(BUILD_DIR)/aios-disk.img 4M
-
-# Run in QEMU with RTL8139 NIC + AC97 audio + persistent disk
-run: iso $(BUILD_DIR)/aios-disk.img
-	qemu-system-i386 -cdrom $(BUILD_DIR)/aios.iso -m 64M \
-		-drive file=$(BUILD_DIR)/aios-disk.img,format=raw,if=ide \
-		-netdev user,id=net0 -device rtl8139,netdev=net0 \
-		-audiodev pa,id=audio0 -device AC97,audiodev=audio0
-
-# Create bootable disk image (dd-able to HDD/SSD/SD card)
-disk: $(BUILD_DIR)/aios.bin
-	bash tools/make-disk.sh
-
-# Run from bootable disk in QEMU
-run-disk: disk
-	qemu-system-i386 -drive file=$(BUILD_DIR)/aios-boot.img,format=raw,if=ide -m 64M \
-		-netdev user,id=net0 -device rtl8139,netdev=net0 \
-		-audiodev pa,id=audio0 -device AC97,audiodev=audio0
-
-# Build ARM kernel for Raspberry Pi (requires arm-none-eabi toolchain)
-arm-sd:
-	bash tools/make-arm-sd.sh
-
-# Run ARM kernel in QEMU (for testing without real hardware)
-run-arm: arm-sd
-	qemu-system-arm -M raspi2b -kernel $(BUILD_DIR)/kernel7.img \
-		-serial stdio -display none
+# ─── Cleanup ─────────────────────────────────────────────────────
 
 clean:
-	rm -rf $(BUILD_DIR)
-	rm -f $(ISO_DIR)/boot/aios.bin
+	rm -rf distro/build
+	rm -rf aios-app/build aios-app/dist aios-app/*.egg-info
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete 2>/dev/null || true

@@ -1,6 +1,30 @@
-build/
-*.o
+# Build artifacts
+distro/build/
+aios-app/build/
+aios-app/dist/
+aios-app/*.egg-info/
 *.iso
-*.bin
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg
+.venv/
+
+# IDE
 .idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment / secrets
 .env
+
+# AiOS runtime data (local to each machine)
+.aios/
+
+# OS files
+.DS_Store
+Thumbs.db

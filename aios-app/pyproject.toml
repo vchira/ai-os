@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aios"
+version = "2.0.0"
+description = "AiOS — AI-Native Operating System Interface"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "requests>=2.31",
+    "Pillow>=10.0",
+    "markdown>=3.5",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PyGObject>=3.44",
+]
+llm = [
+    "anthropic>=0.40",
+    "openai>=1.50",
+]
+voice = [
+    "faster-whisper>=1.0",
+    "piper-tts>=1.2",
+    "sounddevice>=0.4",
+    "numpy>=1.26",
+]
+all = [
+    "aios[gui,llm,voice]",
+]
+dev = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+aios = "aios.app:main"
+
+[project.entry-points."aios.tools"]
+memory = "aios.tools.builtin.memory:MemoryTool"
+display = "aios.tools.builtin.display:DisplayTool"
+system = "aios.tools.builtin.system_tools:SystemTool"
+files = "aios.tools.builtin.files:FilesTool"
+web = "aios.tools.builtin.web:WebTool"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aios*"]
