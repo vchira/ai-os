@@ -114,6 +114,7 @@ pub fn build_main_window(
 ) -> adw::ApplicationWindow {
     // Load CSS.
     let css_provider = gtk::CssProvider::new();
+    #[allow(deprecated)]
     css_provider.load_from_data(APP_CSS);
     gtk::style_context_add_provider_for_display(
         &gtk::gdk::Display::default().expect("Could not get default display"),

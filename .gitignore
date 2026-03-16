@@ -5,6 +5,11 @@ aios-app/dist/
 aios-app/*.egg-info/
 *.iso
 
+# Rust
+aios-app-rs/target/
+*.rlib
+*.rmeta
+
 # Python
 __pycache__/
 *.pyc
@@ -24,6 +29,9 @@ __pycache__/
 
 # AiOS runtime data (local to each machine)
 .aios/
+
+# Generated build scripts
+distro/_inner_build.sh
 
 # OS files
 .DS_Store
