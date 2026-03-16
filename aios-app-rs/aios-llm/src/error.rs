@@ -39,6 +39,10 @@ pub enum LlmError {
     /// JSON serialization / deserialization failures.
     #[error("json error: {0}")]
     JsonError(#[from] serde_json::Error),
+
+    /// Filesystem I/O error (fingerprint save/load, etc.).
+    #[error("io error: {0}")]
+    IoError(#[from] std::io::Error),
 }
 
 /// Convenience alias for `Result<T, LlmError>`.

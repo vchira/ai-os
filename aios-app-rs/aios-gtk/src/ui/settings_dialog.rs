@@ -128,11 +128,15 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
         .title("Speech-to-Text")
         .build();
 
-    let stt_enabled = adw::SwitchRow::builder()
+    let stt_switch = gtk::Switch::new();
+    stt_switch.set_active(config.get_bool("voice.stt_enabled", true));
+    stt_switch.set_valign(gtk::Align::Center);
+    let stt_enabled = adw::ActionRow::builder()
         .title("STT Enabled")
         .subtitle("Enable voice input via microphone")
-        .active(config.get_bool("voice.stt_enabled", true))
         .build();
+    stt_enabled.add_suffix(&stt_switch);
+    stt_enabled.set_activatable_widget(Some(&stt_switch));
     stt_group.add(&stt_enabled);
 
     let stt_backends = gtk::StringList::new(&["Whisper", "Vosk"]);
@@ -168,11 +172,15 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
         .title("Text-to-Speech")
         .build();
 
-    let tts_enabled = adw::SwitchRow::builder()
+    let tts_switch = gtk::Switch::new();
+    tts_switch.set_active(config.get_bool("voice.tts_enabled", true));
+    tts_switch.set_valign(gtk::Align::Center);
+    let tts_enabled = adw::ActionRow::builder()
         .title("TTS Enabled")
         .subtitle("Enable spoken responses")
-        .active(config.get_bool("voice.tts_enabled", true))
         .build();
+    tts_enabled.add_suffix(&tts_switch);
+    tts_enabled.set_activatable_widget(Some(&tts_switch));
     tts_group.add(&tts_enabled);
 
     let tts_backends = gtk::StringList::new(&["Piper", "Espeak", "CoquiXtts"]);
@@ -197,9 +205,13 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
         0.1,  // page step
         0.0,  // page size
     );
-    let rate_row = adw::SpinRow::new(Some(&adjustment), 0.1, 1);
-    rate_row.set_title("Speech Rate");
-    rate_row.set_subtitle("Playback speed multiplier");
+    let rate_spin = gtk::SpinButton::new(Some(&adjustment), 0.1, 1);
+    rate_spin.set_valign(gtk::Align::Center);
+    let rate_row = adw::ActionRow::builder()
+        .title("Speech Rate")
+        .subtitle("Playback speed multiplier")
+        .build();
+    rate_row.add_suffix(&rate_spin);
     tts_group.add(&rate_row);
 
     page.add(&tts_group);

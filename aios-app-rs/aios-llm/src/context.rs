@@ -1,0 +1,348 @@
+//! Context pruning via recursive summarization.
+//!
+//! When conversation history grows beyond a configurable token threshold,
+//! [`ContextManager`] triggers summarization of older messages into a compact
+//! "state memo".  This keeps the context window manageable while preserving
+//! essential information from earlier in the conversation.
+
+use aios_core::types::{Message, Role};
+
+/// Default token threshold before pruning triggers.
+const DEFAULT_PRUNE_THRESHOLD: usize = 10_000;
+
+/// Default number of estimated tokens to summarize into a memo.
+const DEFAULT_PRUNE_WINDOW: usize = 8_000;
+
+/// Default maximum context size (matches typical model limits).
+const DEFAULT_MAX_TOKENS: usize = 100_000;
+
+/// Rough estimate: 4 characters per token (conservative average for English).
+const CHARS_PER_TOKEN: usize = 4;
+
+/// Manages conversation context length via recursive summarization.
+///
+/// When the estimated token count of a message list exceeds
+/// [`prune_threshold`](Self::prune_threshold), the manager generates a
+/// summarization prompt and collapses old messages into a single
+/// `[Context Summary]` system message.
+pub struct ContextManager {
+    /// Maximum tokens the context may contain.
+    max_tokens: usize,
+    /// Token threshold to start summarization.
+    prune_threshold: usize,
+    /// How many estimated tokens of old messages to summarize.
+    prune_window: usize,
+}
+
+impl ContextManager {
+    /// Create a new context manager with the given maximum token budget.
+    ///
+    /// Uses default values for `prune_threshold` (10,000) and
+    /// `prune_window` (8,000).
+    pub fn new(max_tokens: usize) -> Self {
+        Self {
+            max_tokens,
+            prune_threshold: DEFAULT_PRUNE_THRESHOLD,
+            prune_window: DEFAULT_PRUNE_WINDOW,
+        }
+    }
+
+    /// Create a context manager with fully custom parameters.
+    pub fn with_config(max_tokens: usize, prune_threshold: usize, prune_window: usize) -> Self {
+        Self {
+            max_tokens,
+            prune_threshold,
+            prune_window,
+        }
+    }
+
+    /// Return the maximum token budget.
+    pub fn max_tokens(&self) -> usize {
+        self.max_tokens
+    }
+
+    /// Return the pruning threshold (summarization starts when exceeded).
+    pub fn prune_threshold(&self) -> usize {
+        self.prune_threshold
+    }
+
+    /// Return the prune window size (how many tokens of old messages to summarize).
+    pub fn prune_window(&self) -> usize {
+        self.prune_window
+    }
+
+    /// Estimate the token count for a list of messages.
+    ///
+    /// Uses a rough heuristic: 4 characters = 1 token.  This is not precise
+    /// but is fast and sufficient for deciding when to prune.
+    pub fn estimate_tokens(messages: &[Message]) -> usize {
+        let total_chars: usize = messages
+            .iter()
+            .map(|m| {
+                let content_len = m.content.as_deref().map_or(0, |c| c.len());
+                let tool_calls_len: usize = m
+                    .tool_calls
+                    .iter()
+                    .map(|tc| tc.name.len() + tc.arguments.to_string().len())
+                    .sum();
+                content_len + tool_calls_len
+            })
+            .sum();
+        total_chars / CHARS_PER_TOKEN
+    }
+
+    /// Check if pruning is needed for the given message list.
+    pub fn needs_pruning(&self, messages: &[Message]) -> bool {
+        Self::estimate_tokens(messages) > self.prune_threshold
+    }
+
+    /// Prune the conversation by replacing old messages with a summary.
+    ///
+    /// The `summary` parameter is the LLM-generated summary of the old
+    /// messages.  This method finds the split point (messages whose
+    /// cumulative tokens fit in `prune_window`), replaces them with a
+    /// single `[Context Summary]` system message, and returns the new
+    /// message list.
+    ///
+    /// If the summary is empty, the old messages are simply dropped.
+    pub fn prune(&self, messages: &[Message], summary: &str) -> Vec<Message> {
+        let mut cumulative_tokens: usize = 0;
+        let mut split_index: usize = 0;
+
+        for (i, msg) in messages.iter().enumerate() {
+            let msg_tokens = Self::estimate_tokens(&[msg.clone()]);
+            cumulative_tokens += msg_tokens;
+            if cumulative_tokens >= self.prune_window {
+                split_index = i + 1;
+                break;
+            }
+            split_index = i + 1;
+        }
+
+        // Don't prune if we'd remove everything.
+        if split_index >= messages.len() {
+            return messages.to_vec();
+        }
+
+        let mut pruned = Vec::with_capacity(messages.len() - split_index + 1);
+
+        // Insert the summary as a system message.
+        if !summary.is_empty() {
+            pruned.push(Message::system(format!("[Context Summary] {summary}")));
+        }
+
+        // Keep the remaining (newer) messages.
+        pruned.extend_from_slice(&messages[split_index..]);
+
+        pruned
+    }
+
+    /// Generate the summarization prompt for the LLM.
+    ///
+    /// This returns a prompt that asks the AI to summarize the conversation
+    /// so far into a compact state memo.  The caller should send this prompt
+    /// to the LLM and use the response as the `summary` argument to
+    /// [`prune()`](Self::prune).
+    pub fn summarization_prompt(messages: &[Message]) -> String {
+        let mut conversation_text = String::new();
+
+        for msg in messages {
+            let role_label = match msg.role {
+                Role::System => "System",
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+                Role::Tool => "Tool",
+            };
+
+            if let Some(content) = &msg.content {
+                // Truncate very long messages for the summary prompt.
+                let truncated: String = content.chars().take(500).collect();
+                let suffix = if content.len() > 500 { "..." } else { "" };
+                conversation_text.push_str(&format!("{role_label}: {truncated}{suffix}\n"));
+            }
+
+            for tc in &msg.tool_calls {
+                conversation_text.push_str(&format!(
+                    "  [Tool call: {} with {}]\n",
+                    tc.name,
+                    tc.arguments.to_string().chars().take(200).collect::<String>(),
+                ));
+            }
+        }
+
+        format!(
+            "Summarize the following conversation into a concise state memo. \
+             Preserve all important facts, decisions, and context that would be \
+             needed to continue the conversation naturally. Be concise but complete. \
+             Focus on what was discussed, what was decided, and what state the \
+             system is in.\n\n\
+             --- Conversation ---\n\
+             {conversation_text}\
+             --- End ---\n\n\
+             State memo:"
+        )
+    }
+}
+
+impl Default for ContextManager {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_TOKENS)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimate_tokens_empty() {
+        assert_eq!(ContextManager::estimate_tokens(&[]), 0);
+    }
+
+    #[test]
+    fn estimate_tokens_basic() {
+        let messages = vec![
+            Message::user("Hello world"),        // 11 chars -> ~2 tokens
+            Message::assistant("Hi there!"),      // 9 chars -> ~2 tokens
+        ];
+        let tokens = ContextManager::estimate_tokens(&messages);
+        assert_eq!(tokens, (11 + 9) / CHARS_PER_TOKEN);
+    }
+
+    #[test]
+    fn estimate_tokens_with_tool_calls() {
+        let messages = vec![Message::assistant_with_tools(
+            Some("thinking...".into()),
+            vec![aios_core::types::ToolCall {
+                id: "tc-1".into(),
+                name: "memory".into(),
+                arguments: serde_json::json!({"key": "name", "value": "Alice"}),
+            }],
+        )];
+        let tokens = ContextManager::estimate_tokens(&messages);
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn needs_pruning_below_threshold() {
+        let cm = ContextManager::new(100_000);
+        let messages = vec![Message::user("short message")];
+        assert!(!cm.needs_pruning(&messages));
+    }
+
+    #[test]
+    fn needs_pruning_above_threshold() {
+        let cm = ContextManager::with_config(100_000, 10, 5);
+        // Create a message with > 40 chars (10 tokens * 4 chars/token)
+        let messages = vec![Message::user("a".repeat(100))];
+        assert!(cm.needs_pruning(&messages));
+    }
+
+    #[test]
+    fn prune_replaces_old_with_summary() {
+        // Each message is 100 chars = 25 tokens.
+        // prune_window=60 means we summarize up to 60 tokens worth of
+        // messages.  After 2 messages (50 tokens) the 3rd crosses 60,
+        // so split_index=3, leaving messages[3..] in place.
+        let cm = ContextManager::with_config(100_000, 100, 60);
+
+        let messages = vec![
+            Message::user("a".repeat(100)),         // 25 tokens, cumul 25
+            Message::assistant("b".repeat(100)),     // 25 tokens, cumul 50
+            Message::user("c".repeat(100)),          // 25 tokens, cumul 75 >= 60
+            Message::assistant("d".repeat(100)),     // kept
+            Message::user("recent question"),        // kept
+            Message::assistant("recent answer"),     // kept
+        ];
+
+        let pruned = cm.prune(&messages, "Summary of earlier conversation.");
+        // Should start with the summary message.
+        assert_eq!(pruned[0].role, Role::System);
+        assert!(pruned[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("[Context Summary]"));
+        assert!(pruned[0]
+            .content
+            .as_deref()
+            .unwrap()
+            .contains("Summary of earlier conversation."));
+        // 1 summary + 3 remaining = 4 messages, less than original 6
+        assert!(
+            pruned.len() < messages.len(),
+            "pruned.len()={} should be < messages.len()={}",
+            pruned.len(),
+            messages.len(),
+        );
+        assert_eq!(pruned.len(), 4); // summary + messages[3..5]
+    }
+
+    #[test]
+    fn prune_empty_summary_drops_messages() {
+        let cm = ContextManager::with_config(100_000, 100, 20);
+        let messages = vec![
+            Message::user("a".repeat(100)),
+            Message::assistant("recent"),
+        ];
+
+        let pruned = cm.prune(&messages, "");
+        // No summary message should be inserted.
+        assert!(pruned.iter().all(|m| m.role != Role::System));
+    }
+
+    #[test]
+    fn prune_preserves_all_when_short() {
+        let cm = ContextManager::with_config(100_000, 100, 100_000);
+        let messages = vec![
+            Message::user("hello"),
+            Message::assistant("hi"),
+        ];
+
+        // Window is larger than the messages, so nothing should be pruned.
+        let pruned = cm.prune(&messages, "summary");
+        assert_eq!(pruned.len(), messages.len());
+    }
+
+    #[test]
+    fn summarization_prompt_includes_messages() {
+        let messages = vec![
+            Message::user("What is the weather?"),
+            Message::assistant("I'll check for you."),
+        ];
+        let prompt = ContextManager::summarization_prompt(&messages);
+        assert!(prompt.contains("User: What is the weather?"));
+        assert!(prompt.contains("Assistant: I'll check for you."));
+        assert!(prompt.contains("State memo:"));
+    }
+
+    #[test]
+    fn summarization_prompt_truncates_long_messages() {
+        let long_msg = "x".repeat(1000);
+        let messages = vec![Message::user(&long_msg)];
+        let prompt = ContextManager::summarization_prompt(&messages);
+        assert!(prompt.contains("..."));
+        // The truncated version should be 500 chars + "..."
+        assert!(prompt.len() < long_msg.len() + 200);
+    }
+
+    #[test]
+    fn default_config() {
+        let cm = ContextManager::default();
+        assert_eq!(cm.max_tokens(), DEFAULT_MAX_TOKENS);
+        assert_eq!(cm.prune_threshold(), DEFAULT_PRUNE_THRESHOLD);
+        assert_eq!(cm.prune_window(), DEFAULT_PRUNE_WINDOW);
+    }
+
+    #[test]
+    fn custom_config() {
+        let cm = ContextManager::with_config(50_000, 5_000, 3_000);
+        assert_eq!(cm.max_tokens(), 50_000);
+        assert_eq!(cm.prune_threshold(), 5_000);
+        assert_eq!(cm.prune_window(), 3_000);
+    }
+}

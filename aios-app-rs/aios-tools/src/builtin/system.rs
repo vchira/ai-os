@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use aios_core::types::ToolResult;
 use regex::Regex;
-use tracing::warn;
+use tracing::{debug, warn};
 
+use crate::sandbox::{Sandbox, SandboxType};
 use crate::tool::Tool;
 
 /// Timeout for shell commands.
@@ -87,6 +88,10 @@ impl Tool for SystemTool {
          get the current date/time, or list running processes."
     }
 
+    fn category(&self) -> &str {
+        "system"
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
@@ -126,48 +131,58 @@ impl Tool for SystemTool {
 // Action implementations
 // ---------------------------------------------------------------------------
 
-/// Execute a shell command after safety checks.
+/// Execute a shell command after safety checks, routed through the sandbox.
 fn run_command(command: &str) -> ToolResult {
     if command.is_empty() {
         return ToolResult::fail("'command' is required for run_command.");
     }
 
+    // Hard deny: check blocklist first (these are never allowed).
     if let Err(reason) = check_command_safety(command) {
         warn!(command, reason = %reason, "command rejected");
         return ToolResult::fail(format!("Command rejected: {reason}"));
     }
 
-    // Wrap the command with `timeout` to enforce COMMAND_TIMEOUT.
-    let wrapped = format!("timeout {}s sh -c {}", COMMAND_TIMEOUT.as_secs(), shell_escape(command));
+    // Classify the command and route through the appropriate sandbox.
+    let sandbox_type = Sandbox::classify_command(command);
+    let sandbox_label = match &sandbox_type {
+        SandboxType::None => "none (direct)",
+        SandboxType::Process { .. } => "process",
+        SandboxType::Docker { .. } => "docker",
+    };
+    debug!(command, sandbox = sandbox_label, "executing via sandbox");
 
-    let output = match Command::new("sh")
-        .arg("-c")
-        .arg(&wrapped)
-        .env("LC_ALL", "C.UTF-8")
-        .output()
-    {
-        Ok(o) => o,
+    let result = match Sandbox::execute(
+        &sandbox_type,
+        "sh",
+        &["-c", command],
+        None,
+        None,
+    ) {
+        Ok(r) => r,
         Err(e) => return ToolResult::fail(format!("Failed to run command: {e}")),
     };
 
-    // Exit code 124 means `timeout` killed the process.
-    if output.status.code() == Some(124) {
+    // Check for timeout.
+    if result.timed_out {
         return ToolResult::fail(format!(
             "Command timed out after {}s.",
             COMMAND_TIMEOUT.as_secs()
         ));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Check for resource limit exceeded.
+    if result.resource_exceeded {
+        return ToolResult::fail("Command exceeded resource limits (OOM killed).");
+    }
 
-    let mut text = stdout.to_string();
-    if !stderr.is_empty() {
+    let mut text = result.stdout.clone();
+    if !result.stderr.is_empty() {
         if text.is_empty() {
-            text = stderr.to_string();
+            text = result.stderr.clone();
         } else {
             text.push_str("\n--- stderr ---\n");
-            text.push_str(&stderr);
+            text.push_str(&result.stderr);
         }
     }
 
@@ -177,14 +192,17 @@ fn run_command(command: &str) -> ToolResult {
         text.trim().to_string()
     };
 
-    let code = output.status.code().unwrap_or(-1);
-    if output.status.success() {
-        ToolResult::ok_with_data(text, serde_json::json!({ "returncode": code }))
+    let code = result.exit_code;
+    if code == 0 {
+        ToolResult::ok_with_data(
+            text,
+            serde_json::json!({ "returncode": code, "sandbox": sandbox_label }),
+        )
     } else {
         ToolResult {
             success: false,
             output: text,
-            data: Some(serde_json::json!({ "returncode": code })),
+            data: Some(serde_json::json!({ "returncode": code, "sandbox": sandbox_label })),
             error: Some(format!("Exit code {code}")),
         }
     }
@@ -330,6 +348,7 @@ fn list_processes() -> ToolResult {
 // ---------------------------------------------------------------------------
 
 /// Escape a string for safe embedding inside a `sh -c '...'` invocation.
+#[allow(unused)]
 fn shell_escape(s: &str) -> String {
     // Wrap in single quotes and escape any embedded single quotes.
     let escaped = s.replace('\'', "'\\''");

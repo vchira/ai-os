@@ -6,6 +6,8 @@ members = [
     "aios-voice",
     "aios-tools",
     "aios-gtk",
+    "aios-web",
+    "aios-signal",
 ]
 
 [workspace.package]
@@ -32,13 +34,15 @@ cpal = "0.15"
 hound = "3.5"
 rubato = "0.15"
 
-gtk4 = { version = "0.9", features = ["v4_12"] }
-libadwaita = { version = "0.7", features = ["v1_4"] }
+gtk4 = "0.9"
+libadwaita = { version = "0.7", features = ["v1_2"] }
 
 aios-core = { path = "aios-core" }
 aios-voice = { path = "aios-voice" }
 aios-llm = { path = "aios-llm" }
 aios-tools = { path = "aios-tools" }
+aios-web = { path = "aios-web" }
+aios-signal = { path = "aios-signal" }
 
 [profile.release]
 lto = "thin"

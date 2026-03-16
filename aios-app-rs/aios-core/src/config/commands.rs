@@ -23,6 +23,9 @@ pub enum CommandResult {
     Clear,
     /// The user asked to open the settings dialog.
     Configure,
+    /// The user asked to run the self-test.
+    /// The string argument is the optional filter (e.g. "quick", "channel", "interactive").
+    SelfTest(String),
     /// The command was not recognised.
     Unknown(String),
 }
@@ -79,6 +82,10 @@ impl<'a> CommandHandler<'a> {
             "/speaker" => self.cmd_speaker(&args),
             "/language" => self.cmd_language(&args),
             "/tools" => self.cmd_tools(),
+            "/effort" => self.cmd_effort(&args),
+            "/mode" => self.cmd_mode(&args),
+            "/channel" => self.cmd_channel(&args),
+            "/selftest" => CommandResult::SelfTest(args),
             "/clear" => CommandResult::Clear,
             "/configure" => CommandResult::Configure,
             "/info" => self.cmd_info(),
@@ -104,6 +111,10 @@ Available commands:
 /speaker <on|off>           Enable/disable voice output
 /language <code>            Set STT language (blank=auto)
 /tools                      List available tools
+/effort <level>             Set AI effort (low, medium, high, auto)
+/mode <mode>                Set quality mode (saver, balanced, thorough)
+/channel                    Show active channel / channel settings
+/selftest [filter]          Run self-tests (quick, channel, tools, interactive)
 /info                       Show system information
 /configure                  Open settings dialog
 /clear                      Clear chat history
@@ -250,6 +261,124 @@ Available commands:
         // Actual tool listing requires the tool registry which lives outside
         // aios-core.  Return a placeholder the caller can enrich.
         CommandResult::Response("Tool listing requires the tool registry.".into())
+    }
+
+    fn cmd_effort(&mut self, args: &str) -> CommandResult {
+        let level = args.trim().to_lowercase();
+        match level.as_str() {
+            "low" | "medium" | "high" | "auto" => {
+                let _ = self.config.set("llm.effort", json!(level));
+                CommandResult::Response(format!("Effort level set to {level}"))
+            }
+            "" => {
+                let current = self.config.get_str("llm.effort", "auto");
+                CommandResult::Response(format!(
+                    "Current effort level: {current}\n\
+                     Usage: /effort <low|medium|high|auto>"
+                ))
+            }
+            _ => CommandResult::Response(
+                "Usage: /effort <low|medium|high|auto>\n\
+                 - low: fast mode (smaller model, shorter output)\n\
+                 - medium: balanced (default)\n\
+                 - high: thorough mode (extended thinking)\n\
+                 - auto: let the system decide based on message complexity"
+                    .into(),
+            ),
+        }
+    }
+
+    fn cmd_mode(&mut self, args: &str) -> CommandResult {
+        let mode = args.trim().to_lowercase();
+        match mode.as_str() {
+            "saver" | "balanced" | "thorough" => {
+                let _ = self.config.set("llm.quality_mode", json!(mode));
+                CommandResult::Response(format!("Quality mode set to {mode}"))
+            }
+            "" => {
+                let current = self.config.get_str("llm.quality_mode", "balanced");
+                CommandResult::Response(format!(
+                    "Current quality mode: {current}\n\
+                     Usage: /mode <saver|balanced|thorough>\n\
+                     - saver: cheapest model, heuristic escalation\n\
+                     - balanced: auto-detected effort, reliable escalation only\n\
+                     - thorough: best model always, extended thinking"
+                ))
+            }
+            _ => CommandResult::Response(
+                "Usage: /mode <saver|balanced|thorough>\n\
+                 - saver: cheapest model, heuristic escalation (saves money)\n\
+                 - balanced: auto-detected effort, reliable escalation only (default)\n\
+                 - thorough: best model always, extended thinking (best quality)"
+                    .into(),
+            ),
+        }
+    }
+
+    fn cmd_channel(&mut self, args: &str) -> CommandResult {
+        let args = args.trim();
+
+        if args.is_empty() {
+            // Show current channel settings.
+            let web_enabled = self.config.get_bool("channels.web.enabled", false);
+            let web_port = self.config.get_str("channels.web.port", "80");
+            let signal_enabled = self.config.get_bool("channels.signal.enabled", false);
+            let signal_phone = self.config.get_str("channels.signal.phone", "(not set)");
+
+            let info = format!(
+                "\
+Channel Settings
+========================================
+Web:    {} (port {})
+Signal: {} (phone: {})
+
+Usage:
+  /channel web on|off       Enable/disable web channel
+  /channel signal on|off    Enable/disable Signal channel
+  /channel web port <N>     Set web server port
+  /channel signal phone <N> Set Signal phone number",
+                if web_enabled { "enabled" } else { "disabled" },
+                web_port,
+                if signal_enabled { "enabled" } else { "disabled" },
+                signal_phone,
+            );
+            return CommandResult::Response(info);
+        }
+
+        let mut parts = args.splitn(3, char::is_whitespace);
+        let channel = parts.next().unwrap_or("");
+        let action = parts.next().unwrap_or("");
+        let value = parts.next().unwrap_or("").trim();
+
+        match (channel, action) {
+            ("web", "on") => {
+                let _ = self.config.set("channels.web.enabled", json!(true));
+                CommandResult::Response("Web channel enabled. Restart required.".to_string())
+            }
+            ("web", "off") => {
+                let _ = self.config.set("channels.web.enabled", json!(false));
+                CommandResult::Response("Web channel disabled. Restart required.".to_string())
+            }
+            ("web", "port") if !value.is_empty() => {
+                let _ = self.config.set("channels.web.port", json!(value));
+                CommandResult::Response(format!("Web port set to {value}. Restart required."))
+            }
+            ("signal", "on") => {
+                let _ = self.config.set("channels.signal.enabled", json!(true));
+                CommandResult::Response("Signal channel enabled. Restart required.".to_string())
+            }
+            ("signal", "off") => {
+                let _ = self.config.set("channels.signal.enabled", json!(false));
+                CommandResult::Response("Signal channel disabled. Restart required.".to_string())
+            }
+            ("signal", "phone") if !value.is_empty() => {
+                let _ = self.config.set("channels.signal.phone", json!(value));
+                CommandResult::Response(format!("Signal phone set to {value}."))
+            }
+            _ => CommandResult::Response(
+                "Usage: /channel web|signal on|off|port|phone [value]".to_string(),
+            ),
+        }
     }
 
     fn cmd_info(&self) -> CommandResult {
@@ -431,6 +560,56 @@ mod tests {
     }
 
     #[test]
+    fn execute_effort_set_low() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/effort low");
+        match result {
+            CommandResult::Response(text) => assert!(text.contains("low")),
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("llm.effort", ""), "low");
+    }
+
+    #[test]
+    fn execute_effort_set_auto() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/effort auto");
+        match result {
+            CommandResult::Response(text) => assert!(text.contains("auto")),
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("llm.effort", ""), "auto");
+    }
+
+    #[test]
+    fn execute_effort_show_current() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/effort");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Current effort level"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_effort_invalid() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/effort extreme");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Usage"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn execute_info() {
         let (_dir, mut cfg) = temp_config();
         let mut handler = CommandHandler::new(&mut cfg);
@@ -440,6 +619,71 @@ mod tests {
                 assert!(text.contains("AiOS"));
                 assert!(text.contains("2.0.0"));
                 assert!(text.contains("claude"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    // -- /mode command tests --------------------------------------------------
+
+    #[test]
+    fn execute_mode_set_saver() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/mode saver");
+        match result {
+            CommandResult::Response(text) => assert!(text.contains("saver")),
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("llm.quality_mode", ""), "saver");
+    }
+
+    #[test]
+    fn execute_mode_set_balanced() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/mode balanced");
+        match result {
+            CommandResult::Response(text) => assert!(text.contains("balanced")),
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("llm.quality_mode", ""), "balanced");
+    }
+
+    #[test]
+    fn execute_mode_set_thorough() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/mode thorough");
+        match result {
+            CommandResult::Response(text) => assert!(text.contains("thorough")),
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("llm.quality_mode", ""), "thorough");
+    }
+
+    #[test]
+    fn execute_mode_show_current() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/mode");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Current quality mode"));
+                assert!(text.contains("balanced"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_mode_invalid() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/mode turbo");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Usage"));
             }
             other => panic!("expected Response, got {other:?}"),
         }

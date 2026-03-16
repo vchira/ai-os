@@ -120,6 +120,126 @@ impl ChatView {
         self.scroll_to_bottom();
     }
 
+    /// Append a message with a severity level (INFO, SUCCESS, WARNING, etc.).
+    ///
+    /// Renders with a colored left border, level icon + label, and the content.
+    pub fn add_level_message(&self, level: aios_core::types::MessageLevel, content: &str) {
+        let row = gtk::Box::new(Orientation::Vertical, 2);
+        row.add_css_class("message-row");
+        row.add_css_class("message-system");
+        row.add_css_class(level.css_class());
+        row.set_halign(Align::Start);
+        row.set_margin_start(0);
+        row.set_margin_end(40);
+        row.set_hexpand(true);
+
+        // Level label: "ℹ️ [INFO]" / "✅ [SUCCESS]" etc.
+        let level_label = gtk::Label::new(Some(&format!(
+            "{} [{}]",
+            level.icon(),
+            level.label()
+        )));
+        level_label.add_css_class("msg-level-label");
+        level_label.set_halign(Align::Start);
+        row.append(&level_label);
+
+        // Message bubble with content.
+        let bubble = gtk::Box::new(Orientation::Vertical, 4);
+        bubble.add_css_class("message-bubble");
+
+        let label = gtk::Label::new(Some(content));
+        label.set_wrap(true);
+        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        label.set_xalign(0.0);
+        label.set_selectable(true);
+        // Use Pango markup so we can render bold/italic.
+        label.set_use_markup(true);
+        bubble.append(&label);
+
+        row.append(&bubble);
+        self.container.append(&row);
+        self.scroll_to_bottom();
+    }
+
+    /// Append a rich "setup card" to the chat view.
+    ///
+    /// Setup cards are used during the first-boot conversation. They look like
+    /// assistant messages but have a colored icon, bold title, description, and
+    /// an optional inline input widget (entry field, buttons, etc.).
+    ///
+    /// # Arguments
+    ///
+    /// * `icon_name` — A GTK4 symbolic icon name (e.g. `"dialog-password-symbolic"`).
+    /// * `title` — Bold heading text for the card.
+    /// * `description` — Body text (lighter color, supports newlines).
+    /// * `input_widget` — Optional inline widget displayed below the description.
+    pub fn add_setup_card(
+        &self,
+        icon_name: &str,
+        title: &str,
+        description: &str,
+        input_widget: Option<&gtk::Widget>,
+    ) {
+        let row = gtk::Box::new(Orientation::Vertical, 2);
+        row.add_css_class("message-row");
+        row.add_css_class("message-assistant");
+        row.set_halign(Align::Start);
+        row.set_margin_start(0);
+        row.set_margin_end(40);
+        row.set_hexpand(true);
+
+        // Role label.
+        let role_label = gtk::Label::new(Some("AiOS"));
+        role_label.add_css_class("message-role-label");
+        role_label.set_halign(Align::Start);
+        row.append(&role_label);
+
+        // Card container with special styling.
+        let card = gtk::Box::new(Orientation::Vertical, 8);
+        card.add_css_class("setup-card");
+
+        // Header row: icon + title.
+        let header = gtk::Box::new(Orientation::Horizontal, 10);
+        header.set_margin_bottom(4);
+
+        let icon = gtk::Image::from_icon_name(icon_name);
+        icon.set_pixel_size(32);
+        icon.add_css_class("setup-card-icon");
+        header.append(&icon);
+
+        let title_label = gtk::Label::new(Some(title));
+        title_label.add_css_class("setup-card-title");
+        title_label.set_halign(Align::Start);
+        title_label.set_hexpand(true);
+        title_label.set_wrap(true);
+        header.append(&title_label);
+
+        card.append(&header);
+
+        // Description.
+        let desc_label = gtk::Label::new(Some(description));
+        desc_label.add_css_class("setup-card-description");
+        desc_label.set_halign(Align::Start);
+        desc_label.set_xalign(0.0);
+        desc_label.set_wrap(true);
+        desc_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+        card.append(&desc_label);
+
+        // Optional input widget.
+        if let Some(widget) = input_widget {
+            let input_area = gtk::Box::new(Orientation::Vertical, 0);
+            input_area.add_css_class("setup-card-input");
+            input_area.set_margin_top(8);
+            input_area.append(widget);
+            card.append(&input_area);
+        }
+
+        row.append(&card);
+        self.container.append(&row);
+
+        self.scroll_to_bottom();
+    }
+
     /// Remove all messages from the chat view.
     pub fn clear(&self) {
         while let Some(child) = self.container.first_child() {

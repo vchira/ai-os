@@ -11,6 +11,10 @@
 //! | [`builtin::FilesTool`] | File read/write/list/search/info |
 //! | [`builtin::WebTool`] | HTTP fetch, web search, file download |
 //! | [`builtin::DisplayTool`] | Images, notifications, markdown rendering |
+//! | [`builtin::UiPanelTool`] | Show input panels to the user and collect responses |
+//! | [`builtin::CodeExecTool`] | Sandboxed code execution (Python, Bash, JS, Rust) |
+//! | [`builtin::DataProcessTool`] | Local data processing (CSV, JSON, logs, grep) |
+//! | [`builtin::FindContentTool`] | Semantic file search by content/meaning |
 //!
 //! # Quick start
 //!
@@ -29,9 +33,11 @@
 pub mod builtin;
 pub mod error;
 pub mod registry;
+pub mod sandbox;
 pub mod tool;
 
 // Re-export the most commonly used items.
 pub use error::ToolError;
 pub use registry::ToolRegistry;
+pub use sandbox::{Sandbox, SandboxType};
 pub use tool::Tool;

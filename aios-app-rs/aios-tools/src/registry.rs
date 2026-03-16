@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use aios_core::channel::ChannelContext;
 use aios_core::types::{ToolResult, ToolSchema};
 use tracing::info;
 
@@ -65,6 +66,23 @@ impl ToolRegistry {
         }
     }
 
+    /// Execute a tool by name with channel awareness.
+    ///
+    /// Channel-aware tools (e.g. `ui_panel`, `display`) adapt their
+    /// behaviour based on the active channel.  All other tools ignore
+    /// the channel and behave identically to [`execute`](Self::execute).
+    pub fn execute_on_channel(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        channel: &ChannelContext,
+    ) -> ToolResult {
+        match self.get(name) {
+            Some(tool) => tool.execute_on_channel(args, channel),
+            None => ToolResult::fail(format!("Tool not found: {name}")),
+        }
+    }
+
     /// List all registered tool names (sorted alphabetically).
     pub fn list_tools(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tools.keys().cloned().collect();
@@ -82,6 +100,42 @@ impl ToolRegistry {
         schemas
     }
 
+    /// Get all tools belonging to a given category.
+    pub fn get_tools_by_category(&self, category: &str) -> Vec<&dyn Tool> {
+        self.tools
+            .values()
+            .filter(|t| t.category() == category)
+            .map(|t| t.as_ref())
+            .collect()
+    }
+
+    /// Return tool schemas for tools belonging to any of the given categories.
+    ///
+    /// Results are sorted by tool name.
+    pub fn get_schemas_by_categories(&self, categories: &[&str]) -> Vec<ToolSchema> {
+        let mut schemas: Vec<ToolSchema> = self
+            .tools
+            .values()
+            .filter(|t| categories.contains(&t.category()))
+            .map(|t| t.to_schema())
+            .collect();
+        schemas.sort_by(|a, b| a.name.cmp(&b.name));
+        schemas
+    }
+
+    /// List all unique categories across registered tools (sorted).
+    pub fn categories(&self) -> Vec<String> {
+        let mut cats: Vec<String> = self
+            .tools
+            .values()
+            .map(|t| t.category().to_string())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        cats.sort();
+        cats
+    }
+
     /// Number of registered tools.
     pub fn len(&self) -> usize {
         self.tools.len()
@@ -94,7 +148,9 @@ impl ToolRegistry {
 
     /// Populate the registry with all built-in tools.
     ///
-    /// This registers: `memory`, `system`, `files`, `web`, `display`.
+    /// This registers: `memory`, `system`, `files`, `web`, `display`,
+    /// `ui_panel`, `delegate_to`, `reflect`, `recall_episodes`,
+    /// `execute_code`, `process_data`, `find_content`.
     pub fn load_builtins(&mut self) {
         let builtins: Vec<Box<dyn Tool>> = vec![
             Box::new(builtin::MemoryTool::new(None)),
@@ -102,6 +158,13 @@ impl ToolRegistry {
             Box::new(builtin::FilesTool),
             Box::new(builtin::WebTool::new()),
             Box::new(builtin::DisplayTool::new()),
+            Box::new(builtin::UiPanelTool::new()),
+            Box::new(builtin::DelegateTool::new()),
+            Box::new(builtin::ReflectTool::new()),
+            Box::new(builtin::RecallEpisodesTool::new()),
+            Box::new(builtin::CodeExecTool),
+            Box::new(builtin::DataProcessTool),
+            Box::new(builtin::FindContentTool::with_default_index()),
         ];
 
         for tool in builtins {
@@ -202,5 +265,63 @@ mod tests {
         let reg = ToolRegistry::new();
         let result = reg.execute("nope", serde_json::json!({}));
         assert!(!result.success);
+    }
+
+    #[test]
+    fn categories_lists_unique_sorted() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        let cats = reg.categories();
+        // Should contain at least memory, system, filesystem, network, ui
+        assert!(cats.contains(&"memory".to_string()));
+        assert!(cats.contains(&"system".to_string()));
+        assert!(cats.contains(&"filesystem".to_string()));
+        assert!(cats.contains(&"network".to_string()));
+        assert!(cats.contains(&"ui".to_string()));
+        // Should be sorted
+        let mut sorted = cats.clone();
+        sorted.sort();
+        assert_eq!(cats, sorted);
+    }
+
+    #[test]
+    fn get_tools_by_category() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        let ui_tools = reg.get_tools_by_category("ui");
+        assert_eq!(ui_tools.len(), 2);
+        let names: Vec<&str> = ui_tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"display"));
+        assert!(names.contains(&"ui_panel"));
+    }
+
+    #[test]
+    fn get_schemas_by_categories() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        let schemas = reg.get_schemas_by_categories(&["memory", "network"]);
+        // memory category: memory, recall_episodes, reflect (3) + network: web (1) = 4
+        let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"memory"));
+        assert!(names.contains(&"recall_episodes"));
+        assert!(names.contains(&"reflect"));
+        assert!(names.contains(&"web"));
+        assert_eq!(schemas.len(), 4);
+    }
+
+    #[test]
+    fn get_schemas_by_categories_empty_input() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        let schemas = reg.get_schemas_by_categories(&[]);
+        assert!(schemas.is_empty());
+    }
+
+    #[test]
+    fn get_tools_by_nonexistent_category() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        let tools = reg.get_tools_by_category("nonexistent");
+        assert!(tools.is_empty());
     }
 }

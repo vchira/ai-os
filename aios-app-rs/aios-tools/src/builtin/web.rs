@@ -68,6 +68,10 @@ impl Tool for WebTool {
          or download a file to a local path."
     }
 
+    fn category(&self) -> &str {
+        "network"
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

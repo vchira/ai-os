@@ -7,6 +7,7 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, Orientation, Separator};
 use libadwaita as adw;
 
+use super::channel_overlay::ChannelOverlay;
 use super::chat_view::ChatView;
 use super::prompt_input::PromptInput;
 
@@ -60,6 +61,29 @@ const APP_CSS: &str = r#"
     margin-bottom: 2px;
 }
 
+/* Message level styling */
+.msg-level-label {
+    font-weight: 700;
+    font-size: 0.8em;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+}
+
+.msg-info .msg-level-label { color: #4a9eff; }
+.msg-success .msg-level-label { color: #2ed573; }
+.msg-warning .msg-level-label { color: #ffa502; }
+.msg-important .msg-level-label { color: #ff6348; }
+.msg-error .msg-level-label { color: #ff4757; }
+
+.msg-info .message-bubble { border-left: 3px solid #4a9eff; }
+.msg-success .message-bubble { border-left: 3px solid #2ed573; }
+.msg-warning .message-bubble { border-left: 3px solid #ffa502; }
+.msg-important .message-bubble { border-left: 3px solid #ff6348; }
+.msg-error .message-bubble { border-left: 3px solid #ff4757; }
+
+.status-available { color: #2ed573; font-weight: 600; }
+.status-unavailable { color: #ff4757; font-weight: 600; }
+
 .code-block {
     background-color: alpha(@window_fg_color, 0.05);
     border-radius: 6px;
@@ -85,6 +109,49 @@ const APP_CSS: &str = r#"
     color: alpha(@window_fg_color, 0.4);
     font-size: 1.1em;
 }
+
+/* Setup card styling (first-boot conversational flow) */
+.setup-card {
+    padding: 16px 18px;
+    border-radius: 14px;
+    background-color: alpha(@card_bg_color, 0.9);
+    border: 1px solid alpha(@window_fg_color, 0.08);
+}
+
+.setup-card-icon {
+    color: @accent_bg_color;
+    min-width: 32px;
+    min-height: 32px;
+}
+
+.setup-card-title {
+    font-size: 1.15em;
+    font-weight: bold;
+}
+
+.setup-card-description {
+    color: alpha(@window_fg_color, 0.7);
+}
+
+.setup-card-input {
+    padding-top: 4px;
+}
+
+.setup-provider-button {
+    padding: 8px 12px;
+    border-radius: 10px;
+    background-color: alpha(@window_fg_color, 0.04);
+    border: 1px solid alpha(@window_fg_color, 0.1);
+}
+
+.setup-provider-button:hover {
+    background-color: alpha(@accent_bg_color, 0.15);
+    border-color: @accent_bg_color;
+}
+
+.setup-input {
+    min-height: 36px;
+}
 "#;
 
 // ---------------------------------------------------------------------------
@@ -107,10 +174,12 @@ const SETTINGS_BUTTON_NAME: &str = "settings-button";
 ///   a settings button.
 /// - A `ScrolledWindow` holding the chat view (vertical, expands).
 /// - A `Separator` and the prompt input area at the bottom.
+/// - A [`ChannelOverlay`] that appears when the AI is talking on another channel.
 pub fn build_main_window(
     app: &adw::Application,
     chat_view: &ChatView,
     prompt_input: &PromptInput,
+    channel_overlay: &ChannelOverlay,
 ) -> adw::ApplicationWindow {
     // Load CSS.
     let css_provider = gtk::CssProvider::new();
@@ -182,17 +251,26 @@ pub fn build_main_window(
     // Prompt input.
     content_box.append(prompt_input.widget());
 
+    // --- Overlay for channel switching ---
+    // The content_box is the base, and the channel overlay sits on top.
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&content_box));
+    overlay.add_overlay(channel_overlay.widget());
+
     // --- Assemble window ---
-    let toolbar_view = adw::ToolbarView::new();
-    toolbar_view.add_top_bar(&header);
-    toolbar_view.set_content(Some(&content_box));
+    let outer_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    outer_box.append(&header);
+    outer_box.append(&overlay);
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .default_width(700)
         .default_height(800)
-        .content(&toolbar_view)
+        .content(&outer_box)
         .build();
+
+    // Fullscreen on startup — AiOS IS the desktop
+    window.fullscreen();
 
     window
 }

@@ -101,6 +101,10 @@ impl Tool for FilesTool {
          search for files by name pattern, or get file info."
     }
 
+    fn category(&self) -> &str {
+        "filesystem"
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

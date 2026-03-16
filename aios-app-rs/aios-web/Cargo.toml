@@ -1,0 +1,17 @@
+[package]
+name = "aios-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Web channel for AiOS — axum HTTP server with WebSocket chat"
+
+[dependencies]
+aios-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower-http = { version = "0.6", features = ["cors"] }
+futures = { workspace = true }

@@ -2,7 +2,121 @@
 //!
 //! Ported from the Python `aios.llm.base` module.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// EffortLevel
+// ---------------------------------------------------------------------------
+
+/// Controls how much computational effort the AI puts into processing a request.
+///
+/// Each level adjusts the underlying model, token budget, and optional
+/// extended-thinking features to trade off latency vs. quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EffortLevel {
+    /// Fast response, minimal thinking. For simple queries, greetings,
+    /// file listings, and other lightweight tasks.
+    Low,
+    /// Standard balanced mode. Suitable for most interactions.
+    Medium,
+    /// Extended thinking, self-checking. For complex reasoning, security
+    /// audits, refactoring, and destructive operations.
+    High,
+}
+
+impl Default for EffortLevel {
+    fn default() -> Self {
+        Self::Medium
+    }
+}
+
+impl fmt::Display for EffortLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        };
+        f.write_str(label)
+    }
+}
+
+impl EffortLevel {
+    /// Parse an effort level from a string (case-insensitive).
+    ///
+    /// Returns `None` for unrecognised strings.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// QualityMode
+// ---------------------------------------------------------------------------
+
+/// Controls the cost-vs-quality tradeoff for model routing.
+///
+/// Unlike [`EffortLevel`] (which maps to a specific model tier),
+/// `QualityMode` determines the *strategy* for how effort escalation
+/// is handled:
+///
+/// - **Saver** — Start with the cheapest model and escalate aggressively
+///   based on heuristic quality checks.  Saves money but may give worse
+///   results.
+/// - **Balanced** — Use auto-detected effort and only escalate on
+///   reliable signals (empty response, tool errors, explicit user retry).
+/// - **Thorough** — Always use the most capable model with extended
+///   thinking enabled.  No cascading needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QualityMode {
+    /// Maximum cost savings.  Cheapest model first, heuristic escalation.
+    Saver,
+    /// Good results with reasonable cost.  Auto-detected effort, reliable
+    /// escalation only.
+    Balanced,
+    /// Best possible results.  Always uses the most capable model.
+    Thorough,
+}
+
+impl Default for QualityMode {
+    fn default() -> Self {
+        Self::Balanced
+    }
+}
+
+impl fmt::Display for QualityMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let label = match self {
+            Self::Saver => "saver",
+            Self::Balanced => "balanced",
+            Self::Thorough => "thorough",
+        };
+        f.write_str(label)
+    }
+}
+
+impl QualityMode {
+    /// Parse a quality mode from a string (case-insensitive).
+    ///
+    /// Returns `None` for unrecognised strings.
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "saver" => Some(Self::Saver),
+            "balanced" => Some(Self::Balanced),
+            "thorough" => Some(Self::Thorough),
+            _ => None,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Role
@@ -251,6 +365,38 @@ mod tests {
     }
 
     #[test]
+    fn effort_level_default_is_medium() {
+        assert_eq!(EffortLevel::default(), EffortLevel::Medium);
+    }
+
+    #[test]
+    fn effort_level_display() {
+        assert_eq!(EffortLevel::Low.to_string(), "low");
+        assert_eq!(EffortLevel::Medium.to_string(), "medium");
+        assert_eq!(EffortLevel::High.to_string(), "high");
+    }
+
+    #[test]
+    fn effort_level_from_str_opt() {
+        assert_eq!(EffortLevel::from_str_opt("low"), Some(EffortLevel::Low));
+        assert_eq!(EffortLevel::from_str_opt("MEDIUM"), Some(EffortLevel::Medium));
+        assert_eq!(EffortLevel::from_str_opt("High"), Some(EffortLevel::High));
+        assert_eq!(EffortLevel::from_str_opt("unknown"), None);
+    }
+
+    #[test]
+    fn effort_level_serializes_lowercase() {
+        let json = serde_json::to_string(&EffortLevel::High).unwrap();
+        assert_eq!(json, "\"high\"");
+    }
+
+    #[test]
+    fn effort_level_deserializes_lowercase() {
+        let level: EffortLevel = serde_json::from_str("\"low\"").unwrap();
+        assert_eq!(level, EffortLevel::Low);
+    }
+
+    #[test]
     fn message_roundtrips_json() {
         let msg = Message::assistant_with_tools(
             Some("thinking...".into()),
@@ -265,5 +411,39 @@ mod tests {
         assert_eq!(back.role, Role::Assistant);
         assert_eq!(back.tool_calls.len(), 1);
         assert_eq!(back.tool_calls[0].name, "memory_store");
+    }
+
+    // -- QualityMode tests ----------------------------------------------------
+
+    #[test]
+    fn quality_mode_default_is_balanced() {
+        assert_eq!(QualityMode::default(), QualityMode::Balanced);
+    }
+
+    #[test]
+    fn quality_mode_display() {
+        assert_eq!(QualityMode::Saver.to_string(), "saver");
+        assert_eq!(QualityMode::Balanced.to_string(), "balanced");
+        assert_eq!(QualityMode::Thorough.to_string(), "thorough");
+    }
+
+    #[test]
+    fn quality_mode_from_str_opt() {
+        assert_eq!(QualityMode::from_str_opt("saver"), Some(QualityMode::Saver));
+        assert_eq!(QualityMode::from_str_opt("BALANCED"), Some(QualityMode::Balanced));
+        assert_eq!(QualityMode::from_str_opt("Thorough"), Some(QualityMode::Thorough));
+        assert_eq!(QualityMode::from_str_opt("unknown"), None);
+    }
+
+    #[test]
+    fn quality_mode_serializes_lowercase() {
+        let json = serde_json::to_string(&QualityMode::Thorough).unwrap();
+        assert_eq!(json, "\"thorough\"");
+    }
+
+    #[test]
+    fn quality_mode_deserializes_lowercase() {
+        let mode: QualityMode = serde_json::from_str("\"saver\"").unwrap();
+        assert_eq!(mode, QualityMode::Saver);
     }
 }

@@ -3,29 +3,64 @@
 //! Communicates with the Anthropic Messages API using raw `reqwest` HTTP
 //! calls.  Converts between the internal AiOS message types and the
 //! Anthropic wire format.
+//!
+//! ## Prompt caching
+//!
+//! Anthropic supports prompt caching via `cache_control` annotations on the
+//! system prompt and the last tool definition.  When the same prefix hits the
+//! cloud cache, input tokens are billed at ~10% of the normal rate and
+//! latency drops significantly.
+//!
+//! This module:
+//! - Annotates the system prompt and last tool with
+//!   `cache_control: {"type": "ephemeral", "ttl": "1h"}`.
+//! - Sends the `anthropic-beta: prompt-caching-2024-07-31` header.
+//! - Implements `warmup()` to re-link the cache on startup with a
+//!   minimal `max_tokens=1` ping.
+//! - Tracks the last request time so the keep-warm timer can skip
+//!   unnecessary pings.
 
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::stream;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
 use serde_json::Value;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
-use aios_core::types::{LlmResponse, Message, Role, StreamChunk, ToolCall, ToolSchema, Usage};
+use aios_core::types::{EffortLevel, LlmResponse, Message, Role, StreamChunk, ToolCall, ToolSchema, Usage};
 
 use crate::error::{LlmError, Result};
-use crate::provider::{ChunkStream, LlmProvider};
+use crate::provider::{CacheConfig, CacheFingerprint, ChunkStream, LlmProvider};
 
 /// Base URL for the Anthropic Messages API.
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 /// API version header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// Beta header required for prompt-caching support.
+const ANTHROPIC_BETA: &str = "prompt-caching-2024-07-31";
 /// Default model identifier.
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
+/// Haiku model for low-effort requests.
+const HAIKU_MODEL: &str = "claude-haiku-3-20240307";
 /// Default maximum tokens in the response.
 const DEFAULT_MAX_TOKENS: u32 = 8192;
+/// Max tokens for low-effort requests.
+const LOW_EFFORT_MAX_TOKENS: u32 = 2048;
+/// Max tokens for high-effort requests.
+const HIGH_EFFORT_MAX_TOKENS: u32 = 16384;
+/// Extended thinking budget for high-effort requests.
+const HIGH_EFFORT_THINKING_BUDGET: u32 = 10000;
+
+/// Cloud cache TTL — 1 hour.
+const CACHE_TTL: Duration = Duration::from_secs(3600);
+/// Keep-warm interval — 55 minutes (slightly less than the 1h TTL).
+const CACHE_KEEP_WARM_INTERVAL: Duration = Duration::from_secs(3300);
+/// TTL value sent in the API request body.
+const CACHE_TTL_API_VALUE: &str = "1h";
 
 /// LLM provider backed by the Anthropic Claude API.
 pub struct ClaudeProvider {
@@ -33,6 +68,14 @@ pub struct ClaudeProvider {
     model: String,
     max_tokens: u32,
     client: Client,
+    /// Current effort level controlling model selection and token budget.
+    effort: EffortLevel,
+    /// Tracks the last time a request was sent, so the keep-warm task can
+    /// decide whether a ping is necessary.
+    last_request_at: Arc<Mutex<Option<Instant>>>,
+    /// The most recently computed fingerprint, kept in memory so
+    /// `save_fingerprint` can write it to disk without recomputing.
+    current_fingerprint: Arc<Mutex<Option<CacheFingerprint>>>,
 }
 
 impl ClaudeProvider {
@@ -53,7 +96,17 @@ impl ClaudeProvider {
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             client: Client::new(),
+            effort: EffortLevel::Medium,
+            last_request_at: Arc::new(Mutex::new(None)),
+            current_fingerprint: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Return the last time a request was sent, if any.
+    ///
+    /// Used by the keep-warm task to decide whether a ping is necessary.
+    pub fn last_request_at(&self) -> Option<Instant> {
+        *self.last_request_at.lock().unwrap()
     }
 
     /// Convert internal AiOS tool schemas to Anthropic `tool_use` format.
@@ -68,6 +121,35 @@ impl ClaudeProvider {
                     "description": t.description,
                     "input_schema": t.parameters,
                 })
+            })
+            .collect()
+    }
+
+    /// Convert internal AiOS tool schemas to Anthropic format *with*
+    /// `cache_control` on the last element.
+    ///
+    /// Anthropic caches the request prefix up to and including the last
+    /// block annotated with `cache_control`.  By placing the annotation on
+    /// both the system prompt and the last tool, we maximise the cached
+    /// prefix.
+    fn convert_tools_with_cache(tools: &[ToolSchema]) -> Vec<Value> {
+        let len = tools.len();
+        tools
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let mut val = serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                });
+                if i == len - 1 {
+                    val["cache_control"] = serde_json::json!({
+                        "type": "ephemeral",
+                        "ttl": CACHE_TTL_API_VALUE
+                    });
+                }
+                val
             })
             .collect()
     }
@@ -216,7 +298,33 @@ impl ClaudeProvider {
         serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ "raw": raw }))
     }
 
+    /// Build the system prompt value with `cache_control` annotation.
+    ///
+    /// When prompt caching is active, the system field is sent as an array
+    /// of content blocks rather than a plain string:
+    ///
+    /// ```json
+    /// "system": [{
+    ///     "type": "text",
+    ///     "text": "You are AiOS...",
+    ///     "cache_control": {"type": "ephemeral", "ttl": "1h"}
+    /// }]
+    /// ```
+    fn build_system_value_cached(system_prompt: &str) -> Value {
+        serde_json::json!([{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {
+                "type": "ephemeral",
+                "ttl": CACHE_TTL_API_VALUE
+            }
+        }])
+    }
+
     /// Build the request body for the Anthropic Messages API.
+    ///
+    /// Always uses cache annotations (system prompt array format + cache_control
+    /// on the last tool).
     fn build_request_body(
         &self,
         messages: &[Message],
@@ -224,18 +332,49 @@ impl ClaudeProvider {
         system_prompt: Option<&str>,
         stream: bool,
     ) -> Value {
+        self.build_request_body_inner(messages, tools, system_prompt, stream, true)
+    }
+
+    /// Inner body builder with explicit `use_cache` toggle.
+    fn build_request_body_inner(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        system_prompt: Option<&str>,
+        stream: bool,
+        use_cache: bool,
+    ) -> Value {
+        let effective_model = self.effective_model();
+        let effective_max_tokens = self.effective_max_tokens();
+
         let mut body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": self.max_tokens,
+            "model": effective_model,
+            "max_tokens": effective_max_tokens,
             "messages": Self::convert_messages(messages),
         });
 
+        // High effort: enable extended thinking.
+        if self.effort == EffortLevel::High {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": HIGH_EFFORT_THINKING_BUDGET
+            });
+        }
+
         if let Some(sp) = system_prompt {
-            body["system"] = Value::String(sp.to_string());
+            if use_cache {
+                body["system"] = Self::build_system_value_cached(sp);
+            } else {
+                body["system"] = Value::String(sp.to_string());
+            }
         }
 
         if !tools.is_empty() {
-            body["tools"] = Value::Array(Self::convert_tools(tools));
+            if use_cache {
+                body["tools"] = Value::Array(Self::convert_tools_with_cache(tools));
+            } else {
+                body["tools"] = Value::Array(Self::convert_tools(tools));
+            }
         }
 
         if stream {
@@ -256,6 +395,7 @@ impl ClaudeProvider {
             .post(API_URL)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("anthropic-beta", ANTHROPIC_BETA)
             .header("content-type", "application/json")
             .json(body)
             .send()
@@ -272,6 +412,38 @@ impl ClaudeProvider {
         }
 
         Ok(resp)
+    }
+
+    /// Record the current instant as the last request time.
+    fn touch_last_request(&self) {
+        *self.last_request_at.lock().unwrap() = Some(Instant::now());
+    }
+
+    /// Return the effective model for the current effort level.
+    fn effective_model(&self) -> &str {
+        match self.effort {
+            EffortLevel::Low => HAIKU_MODEL,
+            EffortLevel::Medium | EffortLevel::High => &self.model,
+        }
+    }
+
+    /// Return the effective max_tokens for the current effort level.
+    fn effective_max_tokens(&self) -> u32 {
+        match self.effort {
+            EffortLevel::Low => LOW_EFFORT_MAX_TOKENS,
+            EffortLevel::Medium => self.max_tokens,
+            EffortLevel::High => HIGH_EFFORT_MAX_TOKENS,
+        }
+    }
+
+    /// Update the in-memory fingerprint from the given system prompt + tools.
+    fn update_fingerprint(&self, system_prompt: Option<&str>, tools: &[ToolSchema]) {
+        let fp = CacheFingerprint::new(
+            system_prompt.unwrap_or(""),
+            tools,
+            &self.model,
+        );
+        *self.current_fingerprint.lock().unwrap() = Some(fp);
     }
 }
 
@@ -290,6 +462,9 @@ impl LlmProvider for ClaudeProvider {
         let body = self.build_request_body(messages, tools, system_prompt, false);
         debug!("Claude request: model={}", self.model);
 
+        self.touch_last_request();
+        self.update_fingerprint(system_prompt, tools);
+
         let resp = self.do_request(&body).await?;
         let response_json: Value = resp.json().await?;
 
@@ -304,6 +479,9 @@ impl LlmProvider for ClaudeProvider {
     ) -> Result<ChunkStream> {
         let body = self.build_request_body(messages, tools, system_prompt, true);
         debug!("Claude stream request: model={}", self.model);
+
+        self.touch_last_request();
+        self.update_fingerprint(system_prompt, tools);
 
         let resp = self.do_request(&body).await?;
 
@@ -509,6 +687,100 @@ impl LlmProvider for ClaudeProvider {
     fn model(&self) -> &str {
         &self.model
     }
+
+    // -- Effort level -------------------------------------------------------
+
+    fn set_effort(&mut self, level: EffortLevel) {
+        debug!("Claude effort level set to: {level}");
+        self.effort = level;
+    }
+
+    fn effort(&self) -> EffortLevel {
+        self.effort
+    }
+
+    // -- Cache support ------------------------------------------------------
+
+    fn cache_config(&self) -> Option<CacheConfig> {
+        Some(CacheConfig {
+            ttl: CACHE_TTL,
+            keep_warm_interval: CACHE_KEEP_WARM_INTERVAL,
+            ttl_api_value: CACHE_TTL_API_VALUE.to_string(),
+        })
+    }
+
+    async fn warmup(
+        &self,
+        system_prompt: Option<&str>,
+        tools: Option<&[ToolSchema]>,
+    ) -> Result<()> {
+        if self.api_key.is_empty() {
+            debug!("Claude warmup skipped — no API key configured");
+            return Ok(());
+        }
+
+        let tools = tools.unwrap_or(&[]);
+        let messages = &[Message::user("ping")];
+
+        // Build a minimal request with max_tokens=1 to save cost.
+        let mut body = self.build_request_body_inner(
+            messages, tools, system_prompt, false, true,
+        );
+        body["max_tokens"] = serde_json::json!(1);
+
+        info!(
+            "Claude cache warmup: model={}, system_len={}, tools={}",
+            self.model,
+            system_prompt.map_or(0, |s| s.len()),
+            tools.len(),
+        );
+
+        self.touch_last_request();
+
+        // Fire the request — we only care that it succeeds, not the response content.
+        let resp = self.do_request(&body).await?;
+        let _body: Value = resp.json().await?;
+
+        info!("Claude cache warmup complete");
+        Ok(())
+    }
+
+    fn save_fingerprint(&self, path: &std::path::Path) -> Result<()> {
+        let guard = self.current_fingerprint.lock().unwrap();
+        let fp = match guard.as_ref() {
+            Some(fp) => fp,
+            None => {
+                debug!("No fingerprint to save");
+                return Ok(());
+            }
+        };
+
+        // Ensure the parent directory exists.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let json = serde_json::to_string_pretty(fp)?;
+        std::fs::write(path, json)?;
+
+        debug!("Saved cache fingerprint to {:?} (hash={})", path, fp.hash);
+        Ok(())
+    }
+
+    fn load_fingerprint(&self, path: &std::path::Path) -> Result<Option<CacheFingerprint>> {
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let data = std::fs::read_to_string(path)?;
+        let fp: CacheFingerprint = serde_json::from_str(&data)?;
+
+        debug!(
+            "Loaded cache fingerprint from {:?} (hash={}, model={})",
+            path, fp.hash, fp.model
+        );
+        Ok(Some(fp))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -650,6 +922,197 @@ mod tests {
         assert!(converted[0].get("input_schema").is_some());
         assert!(converted[0].get("parameters").is_none());
         assert_eq!(converted[0]["name"], "memory_store");
+    }
+
+    #[test]
+    fn convert_tools_with_cache_adds_cache_control_to_last() {
+        let tools = vec![
+            ToolSchema {
+                name: "tool_a".into(),
+                description: "First tool".into(),
+                parameters: serde_json::json!({}),
+            },
+            ToolSchema {
+                name: "tool_b".into(),
+                description: "Second tool".into(),
+                parameters: serde_json::json!({}),
+            },
+        ];
+
+        let converted = ClaudeProvider::convert_tools_with_cache(&tools);
+        assert_eq!(converted.len(), 2);
+
+        // First tool should NOT have cache_control.
+        assert!(converted[0].get("cache_control").is_none());
+
+        // Last tool SHOULD have cache_control.
+        let cc = converted[1].get("cache_control").expect("missing cache_control on last tool");
+        assert_eq!(cc["type"], "ephemeral");
+        assert_eq!(cc["ttl"], "1h");
+    }
+
+    #[test]
+    fn convert_tools_with_cache_single_tool() {
+        let tools = vec![ToolSchema {
+            name: "only_tool".into(),
+            description: "The only tool".into(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let converted = ClaudeProvider::convert_tools_with_cache(&tools);
+        assert_eq!(converted.len(), 1);
+
+        let cc = converted[0].get("cache_control").expect("missing cache_control on single tool");
+        assert_eq!(cc["type"], "ephemeral");
+        assert_eq!(cc["ttl"], "1h");
+    }
+
+    #[test]
+    fn convert_tools_with_cache_empty() {
+        let converted = ClaudeProvider::convert_tools_with_cache(&[]);
+        assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn build_system_value_cached_has_cache_control() {
+        let val = ClaudeProvider::build_system_value_cached("You are AiOS.");
+        let arr = val.as_array().expect("should be an array");
+        assert_eq!(arr.len(), 1);
+
+        let block = &arr[0];
+        assert_eq!(block["type"], "text");
+        assert_eq!(block["text"], "You are AiOS.");
+
+        let cc = block.get("cache_control").expect("missing cache_control on system");
+        assert_eq!(cc["type"], "ephemeral");
+        assert_eq!(cc["ttl"], "1h");
+    }
+
+    #[test]
+    fn build_request_body_uses_cached_system() {
+        let provider = ClaudeProvider::new("test-key", None, None);
+        let messages = vec![Message::user("hello")];
+        let tools = vec![ToolSchema {
+            name: "t1".into(),
+            description: "a tool".into(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let body = provider.build_request_body(&messages, &tools, Some("sys prompt"), false);
+
+        // System should be an array (cached format), not a plain string.
+        let system = body.get("system").expect("missing system");
+        assert!(system.is_array(), "system should be array for cached format");
+        let arr = system.as_array().unwrap();
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+
+        // Last tool should have cache_control.
+        let api_tools = body["tools"].as_array().unwrap();
+        assert!(api_tools.last().unwrap().get("cache_control").is_some());
+    }
+
+    #[test]
+    fn build_request_body_no_cache_mode() {
+        let provider = ClaudeProvider::new("test-key", None, None);
+        let messages = vec![Message::user("hello")];
+
+        let body = provider.build_request_body_inner(
+            &messages,
+            &[],
+            Some("sys prompt"),
+            false,
+            false,
+        );
+
+        // System should be a plain string (no cache).
+        let system = body.get("system").expect("missing system");
+        assert!(system.is_string(), "system should be plain string without cache");
+    }
+
+    #[test]
+    fn cache_config_returns_some() {
+        let provider = ClaudeProvider::new("", None, None);
+        let config = provider.cache_config();
+        assert!(config.is_some());
+
+        let config = config.unwrap();
+        assert_eq!(config.ttl, Duration::from_secs(3600));
+        assert_eq!(config.keep_warm_interval, Duration::from_secs(3300));
+        assert_eq!(config.ttl_api_value, "1h");
+    }
+
+    #[test]
+    fn last_request_at_initially_none() {
+        let provider = ClaudeProvider::new("", None, None);
+        assert!(provider.last_request_at().is_none());
+    }
+
+    #[test]
+    fn touch_last_request_sets_instant() {
+        let provider = ClaudeProvider::new("", None, None);
+        provider.touch_last_request();
+        assert!(provider.last_request_at().is_some());
+    }
+
+    #[test]
+    fn fingerprint_save_and_load_roundtrip() {
+        let provider = ClaudeProvider::new("", None, None);
+        let tools = vec![ToolSchema {
+            name: "web_search".into(),
+            description: "Search the web".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+
+        // Update the internal fingerprint.
+        provider.update_fingerprint(Some("You are AiOS."), &tools);
+
+        // Save to a temp file.
+        let dir = tempfile::tempdir().unwrap();
+        let fp_path = dir.path().join("fingerprint.json");
+
+        provider.save_fingerprint(&fp_path).unwrap();
+        assert!(fp_path.exists());
+
+        // Load it back.
+        let loaded = provider.load_fingerprint(&fp_path).unwrap();
+        let loaded = loaded.expect("should have loaded a fingerprint");
+        assert_eq!(loaded.system_prompt, "You are AiOS.");
+        assert_eq!(loaded.model, DEFAULT_MODEL);
+        assert!(!loaded.tools_json.is_empty());
+
+        // Verify tools round-trip.
+        let restored_tools = loaded.tools();
+        assert_eq!(restored_tools.len(), 1);
+        assert_eq!(restored_tools[0].name, "web_search");
+    }
+
+    #[test]
+    fn load_fingerprint_missing_file_returns_none() {
+        let provider = ClaudeProvider::new("", None, None);
+        let result = provider
+            .load_fingerprint(std::path::Path::new("/tmp/nonexistent_fp_12345.json"))
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn fingerprint_hash_deterministic() {
+        let tools = vec![ToolSchema {
+            name: "t1".into(),
+            description: "d1".into(),
+            parameters: serde_json::json!({}),
+        }];
+        let fp1 = CacheFingerprint::new("sys", &tools, "model");
+        let fp2 = CacheFingerprint::new("sys", &tools, "model");
+        assert_eq!(fp1.hash, fp2.hash);
+    }
+
+    #[test]
+    fn fingerprint_hash_changes_with_prompt() {
+        let tools = vec![];
+        let fp1 = CacheFingerprint::new("prompt A", &tools, "model");
+        let fp2 = CacheFingerprint::new("prompt B", &tools, "model");
+        assert_ne!(fp1.hash, fp2.hash);
     }
 
     #[test]

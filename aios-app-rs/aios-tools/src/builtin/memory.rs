@@ -78,6 +78,10 @@ impl Tool for MemoryTool {
          Memorize facts, recall them later, forget them, or list all keys."
     }
 
+    fn category(&self) -> &str {
+        "memory"
+    }
+
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",

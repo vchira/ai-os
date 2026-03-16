@@ -14,7 +14,7 @@ use reqwest::Client;
 use serde_json::Value;
 use tracing::{debug, error};
 
-use aios_core::types::{LlmResponse, Message, Role, StreamChunk, ToolCall, ToolSchema, Usage};
+use aios_core::types::{EffortLevel, LlmResponse, Message, Role, StreamChunk, ToolCall, ToolSchema, Usage};
 
 use crate::error::{LlmError, Result};
 use crate::provider::{ChunkStream, LlmProvider};
@@ -23,8 +23,14 @@ use crate::provider::{ChunkStream, LlmProvider};
 const API_URL: &str = "https://api.openai.com/v1/chat/completions";
 /// Default model identifier.
 const DEFAULT_MODEL: &str = "gpt-4o";
+/// Mini model for low-effort requests.
+const MINI_MODEL: &str = "gpt-4o-mini";
 /// Default maximum tokens in the response.
 const DEFAULT_MAX_TOKENS: u32 = 4096;
+/// Max tokens for low-effort requests.
+const LOW_EFFORT_MAX_TOKENS: u32 = 2048;
+/// Max tokens for high-effort requests.
+const HIGH_EFFORT_MAX_TOKENS: u32 = 16384;
 
 /// LLM provider backed by the OpenAI Chat Completions API.
 pub struct OpenAIProvider {
@@ -32,6 +38,8 @@ pub struct OpenAIProvider {
     model: String,
     max_tokens: u32,
     client: Client,
+    /// Current effort level controlling model selection and token budget.
+    effort: EffortLevel,
 }
 
 impl OpenAIProvider {
@@ -52,6 +60,7 @@ impl OpenAIProvider {
             model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             client: Client::new(),
+            effort: EffortLevel::Medium,
         }
     }
 
@@ -219,6 +228,23 @@ impl OpenAIProvider {
         serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ "raw": raw }))
     }
 
+    /// Return the effective model for the current effort level.
+    fn effective_model(&self) -> &str {
+        match self.effort {
+            EffortLevel::Low => MINI_MODEL,
+            EffortLevel::Medium | EffortLevel::High => &self.model,
+        }
+    }
+
+    /// Return the effective max_tokens for the current effort level.
+    fn effective_max_tokens(&self) -> u32 {
+        match self.effort {
+            EffortLevel::Low => LOW_EFFORT_MAX_TOKENS,
+            EffortLevel::Medium => self.max_tokens,
+            EffortLevel::High => HIGH_EFFORT_MAX_TOKENS,
+        }
+    }
+
     /// Build the request body for the OpenAI Chat Completions API.
     fn build_request_body(
         &self,
@@ -227,6 +253,9 @@ impl OpenAIProvider {
         system_prompt: Option<&str>,
         stream: bool,
     ) -> Value {
+        let effective_model = self.effective_model();
+        let effective_max_tokens = self.effective_max_tokens();
+
         // Prepend system prompt as the first message if provided.
         let mut api_messages = Self::convert_messages(messages);
         if let Some(sp) = system_prompt {
@@ -240,13 +269,18 @@ impl OpenAIProvider {
         }
 
         let mut body = serde_json::json!({
-            "model": self.model,
-            "max_tokens": self.max_tokens,
+            "model": effective_model,
+            "max_tokens": effective_max_tokens,
             "messages": api_messages,
         });
 
         if !tools.is_empty() {
             body["tools"] = Value::Array(Self::convert_tools(tools));
+        }
+
+        // High effort: add reasoning_effort parameter.
+        if self.effort == EffortLevel::High {
+            body["reasoning_effort"] = serde_json::json!("high");
         }
 
         if stream {
@@ -545,6 +579,22 @@ impl LlmProvider for OpenAIProvider {
     fn model(&self) -> &str {
         &self.model
     }
+
+    // -- Effort level -------------------------------------------------------
+
+    fn set_effort(&mut self, level: EffortLevel) {
+        debug!("OpenAI effort level set to: {level}");
+        self.effort = level;
+    }
+
+    fn effort(&self) -> EffortLevel {
+        self.effort
+    }
+
+    // -- Cache support ------------------------------------------------------
+
+    // OpenAI does not support prompt caching.
+    // cache_config() uses the default trait impl which returns None.
 }
 
 // ---------------------------------------------------------------------------

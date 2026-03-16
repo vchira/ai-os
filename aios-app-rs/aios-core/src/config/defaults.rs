@@ -14,7 +14,9 @@ pub const DEFAULTS_JSON: &str = r#"{
         "openai_api_key": "",
         "openai_model": "gpt-4o",
         "extra_system_prompt": "",
-        "max_tool_rounds": 10
+        "max_tool_rounds": 10,
+        "effort": "auto",
+        "quality_mode": "balanced"
     },
     "voice": {
         "stt_enabled": true,

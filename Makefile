@@ -2,52 +2,48 @@
 # ====================================
 #
 # AiOS v2.0: Linux-based AI-native operating system
-# Built on Debian Bookworm with Wayland (labwc) and GTK4
+# Built on Debian Bookworm with Wayland (labwc) + Rust (GTK4/libadwaita)
 #
 # Targets:
-#   make app       — Install the AiOS application locally
-#   make run       — Run the AiOS app (development mode)
-#   make selftest  — Run the self-test suite (/selftest)
-#   make test      — Run unit tests
+#   make build     — Build the Rust application (release)
+#   make dev       — Build debug + run tests
+#   make test      — Run all workspace tests
+#   make check     — Check compilation (fast, no codegen)
 #   make iso       — Build the bootable/installable ISO
 #   make qemu      — Build ISO and launch in QEMU
 #   make clean     — Clean build artifacts
 
-.PHONY: app run selftest test iso qemu clean help
-
-PYTHON ?= python3
-PIP ?= $(PYTHON) -m pip
+.PHONY: build dev test check iso qemu clean help
 
 help:
 	@echo "AiOS — AI-Native Linux Distribution v2.0"
 	@echo ""
-	@echo "Application:"
-	@echo "  make app       Install AiOS app and dependencies"
-	@echo "  make run       Run AiOS in development mode"
-	@echo "  make selftest  Run /selftest (simulated conversation test)"
-	@echo "  make test      Run unit tests with pytest"
+	@echo "Development:"
+	@echo "  make build     Build release binary"
+	@echo "  make dev       Build debug + run tests"
+	@echo "  make test      Run all workspace tests"
+	@echo "  make check     Fast compilation check (no codegen)"
 	@echo ""
 	@echo "Distribution:"
-	@echo "  make iso       Build the AiOS Linux ISO (requires sudo + live-build)"
+	@echo "  make iso       Build the AiOS Linux ISO (requires Docker)"
 	@echo "  make qemu      Build ISO and test in QEMU"
 	@echo ""
 	@echo "Other:"
 	@echo "  make clean     Clean all build artifacts"
 	@echo "  make help      Show this help"
 
-# ─── Application ──────────────────────────────────────────────────
+# ─── Development ────────────────────────────────────────────────
 
-app:
-	cd aios-app && $(PIP) install -e ".[dev]"
+build:
+	cd aios-app-rs && cargo build --release
 
-run:
-	cd aios-app && $(PYTHON) -m aios
-
-selftest:
-	cd aios-app && $(PYTHON) -c "from aios.config.manager import ConfigManager; from aios.selftest.runner import SelfTestRunner; c = ConfigManager(); r = SelfTestRunner(c, None); print(r.run_all())"
+dev: check test
 
 test:
-	cd aios-app && $(PYTHON) -m pytest tests/ -v
+	cd aios-app-rs && cargo test --workspace
+
+check:
+	cd aios-app-rs && cargo check --workspace
 
 # ─── Distribution ────────────────────────────────────────────────
 
@@ -55,12 +51,10 @@ iso:
 	cd distro && sudo ./build.sh
 
 qemu:
-	cd distro && ./run-qemu.sh
+	cd distro && ./run-vm.sh
 
 # ─── Cleanup ─────────────────────────────────────────────────────
 
 clean:
 	rm -rf distro/build
-	rm -rf aios-app/build aios-app/dist aios-app/*.egg-info
-	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name "*.pyc" -delete 2>/dev/null || true
+	cd aios-app-rs && cargo clean

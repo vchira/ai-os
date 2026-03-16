@@ -12,6 +12,10 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 directories = { workspace = true }
+tokio = { workspace = true }
+argon2 = "0.5"
+aes-gcm = "0.10"
+rand = "0.9"
 
 [dev-dependencies]
 tempfile = { workspace = true }

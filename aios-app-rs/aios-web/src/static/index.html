@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AiOS</title>
+<style>
+:root {
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --surface-light: #1f2b47;
+  --accent: #4a9eff;
+  --accent-dim: rgba(74, 158, 255, 0.15);
+  --text: #e0e0e0;
+  --text-dim: #8892a4;
+  --user-bubble: #4a9eff;
+  --user-text: #fff;
+  --assistant-bubble: #1f2b47;
+  --system-text: #8892a4;
+  --error: #ff4757;
+  --radius: 12px;
+  --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Header */
+.header {
+  background: var(--surface);
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  flex-shrink: 0;
+}
+
+.header h1 {
+  font-size: 1.2em;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.status {
+  font-size: 0.8em;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--error);
+}
+
+.status-dot.connected { background: #2ed573; }
+
+/* Chat area */
+.chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.message {
+  display: flex;
+  flex-direction: column;
+  max-width: 80%;
+}
+
+.message.user { align-self: flex-end; }
+.message.assistant { align-self: flex-start; }
+.message.system { align-self: center; max-width: 90%; }
+
+.message .role {
+  font-size: 0.7em;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.message.user .role { text-align: right; }
+
+.bubble {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  line-height: 1.5;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+}
+
+.message.user .bubble {
+  background: var(--user-bubble);
+  color: var(--user-text);
+  border-bottom-right-radius: 4px;
+}
+
+.message.assistant .bubble {
+  background: var(--assistant-bubble);
+  border-bottom-left-radius: 4px;
+}
+
+.message.system .bubble {
+  background: transparent;
+  color: var(--system-text);
+  font-style: italic;
+  font-size: 0.9em;
+  text-align: center;
+}
+
+/* Message levels */
+.message.level .bubble { border-left: 3px solid; padding-left: 12px; }
+.message.level .level-label { font-weight: 700; font-size: 0.8em; letter-spacing: 0.5px; margin-bottom: 4px; }
+.message.level-info .bubble { border-color: #4a9eff; }
+.message.level-info .level-label { color: #4a9eff; }
+.message.level-success .bubble { border-color: #2ed573; }
+.message.level-success .level-label { color: #2ed573; }
+.message.level-warning .bubble { border-color: #ffa502; }
+.message.level-warning .level-label { color: #ffa502; }
+.message.level-important .bubble { border-color: #ff6348; }
+.message.level-important .level-label { color: #ff6348; }
+.message.level-error .bubble { border-color: #ff4757; }
+.message.level-error .level-label { color: #ff4757; }
+
+/* Code blocks */
+.bubble code {
+  font-family: var(--mono);
+  background: rgba(255,255,255,0.06);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.bubble pre {
+  background: rgba(0,0,0,0.3);
+  padding: 10px 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 6px 0;
+  font-family: var(--mono);
+  font-size: 0.85em;
+  line-height: 1.4;
+}
+
+.bubble pre code {
+  background: none;
+  padding: 0;
+}
+
+/* Panel overlay (for tool panels) */
+.panel-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 100;
+  justify-content: center;
+  align-items: center;
+}
+
+.panel-overlay.active { display: flex; }
+
+.panel {
+  background: var(--surface);
+  border-radius: 16px;
+  padding: 24px 32px;
+  min-width: 380px;
+  max-width: 500px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.panel h2 { font-size: 1.2em; margin-bottom: 8px; }
+.panel .description { color: var(--text-dim); margin-bottom: 16px; font-size: 0.9em; }
+
+.panel .field { margin-bottom: 14px; }
+.panel .field label {
+  display: block;
+  font-weight: 600;
+  font-size: 0.85em;
+  margin-bottom: 4px;
+}
+
+.panel .field input,
+.panel .field select,
+.panel .field textarea {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 0.95em;
+}
+
+.panel .field textarea { min-height: 80px; resize: vertical; }
+
+.panel .buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.panel .buttons button {
+  padding: 8px 20px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9em;
+}
+
+.panel .buttons .cancel {
+  background: rgba(255,255,255,0.06);
+  color: var(--text);
+}
+
+.panel .buttons .submit {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* Input area */
+.input-area {
+  padding: 12px 20px;
+  background: var(--surface);
+  border-top: 1px solid rgba(255,255,255,0.06);
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.input-area input {
+  flex: 1;
+  padding: 10px 16px;
+  border-radius: 20px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 1em;
+  outline: none;
+}
+
+.input-area input:focus {
+  border-color: var(--accent);
+}
+
+.input-area button {
+  padding: 10px 20px;
+  border-radius: 20px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.95em;
+}
+
+.input-area button:hover { opacity: 0.9; }
+.input-area button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Scrollbar */
+.chat::-webkit-scrollbar { width: 6px; }
+.chat::-webkit-scrollbar-track { background: transparent; }
+.chat::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+
+/* Typing indicator */
+.typing { color: var(--text-dim); font-style: italic; font-size: 0.85em; padding: 4px 0; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>AiOS</h1>
+  <div class="status">
+    <div class="status-dot" id="statusDot"></div>
+    <span id="statusText">Connecting...</span>
+  </div>
+</div>
+
+<div class="chat" id="chat"></div>
+
+<div class="panel-overlay" id="panelOverlay">
+  <div class="panel" id="panelContent"></div>
+</div>
+
+<div class="input-area">
+  <input type="text" id="input" placeholder="Message AiOS..." autocomplete="off">
+  <button id="sendBtn" disabled>Send</button>
+</div>
+
+<script>
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+const panelOverlay = document.getElementById('panelOverlay');
+const panelContent = document.getElementById('panelContent');
+
+let ws = null;
+let reconnectTimer = null;
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    statusDot.className = 'status-dot connected';
+    statusText.textContent = 'Connected';
+    sendBtn.disabled = false;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  };
+
+  ws.onclose = () => {
+    statusDot.className = 'status-dot';
+    statusText.textContent = 'Disconnected';
+    sendBtn.disabled = true;
+    reconnectTimer = setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => { ws.close(); };
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      handleServerMessage(msg);
+    } catch (e) {
+      console.error('Bad message:', e);
+    }
+  };
+}
+
+function handleServerMessage(msg) {
+  switch (msg.type) {
+    case 'message':
+      addMessage(msg.role, msg.content, msg.level);
+      break;
+    case 'panel_request':
+      showPanel(msg.id, msg.request);
+      break;
+    case 'image':
+      addImage(msg.path);
+      break;
+    case 'notification':
+      addMessage('system', `[${msg.title}] ${msg.message}`);
+      break;
+    case 'system':
+      addMessage('system', msg.content);
+      break;
+    case 'channel_status':
+      statusText.textContent = `Channel: ${msg.active}`;
+      break;
+  }
+}
+
+const LEVEL_ICONS = {info:'\u2139\ufe0f',success:'\u2705',warning:'\u26a0\ufe0f',important:'\u2757',error:'\u274c'};
+const LEVEL_LABELS = {info:'INFO',success:'SUCCESS',warning:'WARNING',important:'IMPORTANT',error:'ERROR'};
+
+function addMessage(role, content, level) {
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+
+  if (level) {
+    div.classList.add('level', `level-${level}`);
+    const levelLabel = document.createElement('div');
+    levelLabel.className = 'level-label';
+    levelLabel.textContent = `${LEVEL_ICONS[level]||''} [${LEVEL_LABELS[level]||level.toUpperCase()}]`;
+    div.appendChild(levelLabel);
+  } else if (role !== 'system') {
+    const roleLabel = document.createElement('div');
+    roleLabel.className = 'role';
+    roleLabel.textContent = role;
+    div.appendChild(roleLabel);
+  }
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.innerHTML = formatContent(content);
+  div.appendChild(bubble);
+
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function formatContent(text) {
+  // Code blocks
+  text = text.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+  // Inline code
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  text = text.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  text = text.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  return text;
+}
+
+function addImage(path) {
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  const img = document.createElement('img');
+  img.src = path;
+  img.style.maxWidth = '100%';
+  img.style.borderRadius = '8px';
+  bubble.appendChild(img);
+  div.appendChild(bubble);
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function showPanel(id, request) {
+  let html = '';
+  if (request.title) html += `<h2>${esc(request.title)}</h2>`;
+  if (request.description) html += `<div class="description">${esc(request.description)}</div>`;
+
+  const fields = request.fields || [];
+  fields.forEach(f => {
+    html += `<div class="field">`;
+    html += `<label>${esc(f.label)}${f.required ? ' *' : ''}</label>`;
+
+    switch (f.type || f.field_type) {
+      case 'text':
+      case 'date':
+        html += `<input type="text" data-id="${esc(f.id)}" placeholder="${esc(f.placeholder || '')}">`;
+        break;
+      case 'password':
+        html += `<input type="password" data-id="${esc(f.id)}" placeholder="${esc(f.placeholder || '')}">`;
+        break;
+      case 'number':
+        html += `<input type="number" data-id="${esc(f.id)}" min="${f.min||''}" max="${f.max||''}" step="${f.step||1}">`;
+        break;
+      case 'toggle':
+        html += `<input type="checkbox" data-id="${esc(f.id)}" style="width:auto">`;
+        break;
+      case 'multiline':
+        html += `<textarea data-id="${esc(f.id)}" placeholder="${esc(f.placeholder || '')}"></textarea>`;
+        break;
+      case 'choice':
+      case 'dropdown':
+        html += `<select data-id="${esc(f.id)}">`;
+        (f.options || []).forEach(o => {
+          html += `<option value="${esc(o.value)}">${esc(o.label)}</option>`;
+        });
+        html += `</select>`;
+        break;
+    }
+    html += `</div>`;
+  });
+
+  html += `<div class="buttons">
+    <button class="cancel" onclick="closePanel('${esc(id)}', true)">Cancel</button>
+    <button class="submit" onclick="submitPanel('${esc(id)}')">Submit</button>
+  </div>`;
+
+  panelContent.innerHTML = html;
+  panelOverlay.classList.add('active');
+}
+
+function submitPanel(id) {
+  const values = {};
+  panelContent.querySelectorAll('[data-id]').forEach(el => {
+    const key = el.dataset.id;
+    if (el.type === 'checkbox') {
+      values[key] = el.checked;
+    } else if (el.type === 'number') {
+      values[key] = parseFloat(el.value) || 0;
+    } else {
+      values[key] = el.value;
+    }
+  });
+  ws.send(JSON.stringify({ type: 'panel_response', id, values, cancelled: false }));
+  panelOverlay.classList.remove('active');
+}
+
+function closePanel(id, cancelled) {
+  ws.send(JSON.stringify({ type: 'panel_response', id, values: {}, cancelled: true }));
+  panelOverlay.classList.remove('active');
+}
+
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function sendMessage() {
+  const text = input.value.trim();
+  if (!text || !ws || ws.readyState !== 1) return;
+  addMessage('user', text);
+  ws.send(JSON.stringify({ type: 'message', text }));
+  input.value = '';
+}
+
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+
+sendBtn.addEventListener('click', sendMessage);
+
+connect();
+</script>
+</body>
+</html>

@@ -27,6 +27,10 @@ pub enum AiosError {
     #[error("tool error: {0}")]
     Tool(String),
 
+    /// Secure storage / crypto errors (vault, auth, permissions).
+    #[error("secure error: {0}")]
+    Secure(String),
+
     /// Catch-all for anything that doesn't fit the above categories.
     #[error("{0}")]
     Other(String),

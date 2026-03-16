@@ -44,17 +44,22 @@ if [ "${ARG}" = "--clean" ] && [ -d "${BUILD_DIR}" ]; then
     docker run --rm -v "${REPO_DIR}:/work" "${IMAGE}" rm -rf /work/distro/build
 fi
 
-# Build the Rust binary on the host (much faster than inside chroot)
+# Build the Rust binary inside Docker (must match Bookworm's GLIBC)
 AIOS_BIN="${REPO_DIR}/aios-app-rs/target/release/aios"
+CARGO_CACHE="aios-cargo-cache"
+docker volume create "${CARGO_CACHE}" &>/dev/null || true
+
 if [ ! -f "${AIOS_BIN}" ] || [ "${ARG}" = "--clean" ]; then
-    echo "[*] Building AiOS Rust binary..."
-    cd "${REPO_DIR}/aios-app-rs" && cargo build --release 2>&1
-    cd "${SCRIPT_DIR}"
+    echo "[*] Building AiOS Rust binary (inside Bookworm container)..."
+    docker run --rm \
+        -v "${REPO_DIR}:/work" \
+        -v "${CARGO_CACHE}:/root/.cargo/registry" \
+        -w /work/aios-app-rs \
+        "${IMAGE}" cargo build --release 2>&1
 fi
 
 if [ ! -f "${AIOS_BIN}" ]; then
     echo "ERROR: Rust binary not found at ${AIOS_BIN}"
-    echo "  Run: cd aios-app-rs && cargo build --release"
     exit 1
 fi
 echo "[*] AiOS binary: $(du -h "${AIOS_BIN}" | cut -f1)"
