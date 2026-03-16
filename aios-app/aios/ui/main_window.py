@@ -104,7 +104,11 @@ class MainWindow(Adw.ApplicationWindow):
             style_mgr.set_color_scheme(Adw.ColorScheme.DEFAULT)
 
         css_provider = Gtk.CssProvider()
-        css_provider.load_from_string(self._get_css())
+        css_data = self._get_css()
+        try:
+            css_provider.load_from_string(css_data)
+        except (AttributeError, TypeError):
+            css_provider.load_from_data(css_data.encode())
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(),
             css_provider,

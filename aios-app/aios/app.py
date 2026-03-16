@@ -83,19 +83,16 @@ class AiOSApplication(Adw.Application):
 
             self.llm_manager = LLMManager()
 
-            # Register Claude provider
+            # Always register providers (keys can be set later via /key)
             claude_key = self.config_mgr.get("llm.claude_api_key", "")
             claude_model = self.config_mgr.get("llm.claude_model", "claude-sonnet-4-20250514")
-            if claude_key:
-                claude = ClaudeProvider(api_key=claude_key, model=claude_model)
-                self.llm_manager.register_provider(claude)
+            claude = ClaudeProvider(api_key=claude_key, model=claude_model)
+            self.llm_manager.register_provider(claude)
 
-            # Register OpenAI provider
             openai_key = self.config_mgr.get("llm.openai_api_key", "")
             openai_model = self.config_mgr.get("llm.openai_model", "gpt-4o")
-            if openai_key:
-                openai_prov = OpenAIProvider(api_key=openai_key, model=openai_model)
-                self.llm_manager.register_provider(openai_prov)
+            openai_prov = OpenAIProvider(api_key=openai_key, model=openai_model)
+            self.llm_manager.register_provider(openai_prov)
 
             # Set active provider
             active = self.config_mgr.get("llm.provider", "claude")
