@@ -287,6 +287,51 @@ body {
 
 /* Typing indicator */
 .typing { color: var(--text-dim); font-style: italic; font-size: 0.85em; padding: 4px 0; }
+
+/* Autocomplete dropdown */
+.autocomplete {
+  display: none;
+  position: absolute;
+  bottom: 100%;
+  left: 20px;
+  right: 20px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+  z-index: 50;
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.4);
+}
+
+.autocomplete.visible { display: block; }
+
+.autocomplete .ac-item {
+  padding: 8px 14px;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.autocomplete .ac-item:hover,
+.autocomplete .ac-item.active {
+  background: var(--accent-dim);
+}
+
+.autocomplete .ac-cmd {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--accent);
+  font-size: 0.95em;
+  white-space: nowrap;
+}
+
+.autocomplete .ac-desc {
+  color: var(--text-dim);
+  font-size: 0.85em;
+}
 </style>
 </head>
 <body>
@@ -305,7 +350,8 @@ body {
   <div class="panel" id="panelContent"></div>
 </div>
 
-<div class="input-area">
+<div class="input-area" style="position:relative;">
+  <div class="autocomplete" id="autocomplete"></div>
   <input type="text" id="input" placeholder="Message AiOS..." autocomplete="off">
   <button id="sendBtn" disabled>Send</button>
 </div>
@@ -515,6 +561,107 @@ input.addEventListener('keydown', (e) => {
 });
 
 sendBtn.addEventListener('click', sendMessage);
+
+// -----------------------------------------------------------------------
+// Slash-command autocomplete
+// -----------------------------------------------------------------------
+
+const COMMANDS = [
+  { cmd: '/help',       desc: 'Show available commands' },
+  { cmd: '/key',        desc: 'Set API key for a provider' },
+  { cmd: '/provider',   desc: 'Switch LLM provider' },
+  { cmd: '/model',      desc: 'Set model for current provider' },
+  { cmd: '/effort',     desc: 'Set AI effort level' },
+  { cmd: '/mode',       desc: 'Set quality/cost mode' },
+  { cmd: '/keyboard',   desc: 'Set keyboard layout' },
+  { cmd: '/resolution', desc: 'Set screen resolution' },
+  { cmd: '/theme',      desc: 'Set UI theme' },
+  { cmd: '/voice',      desc: 'Set TTS voice' },
+  { cmd: '/mic',        desc: 'Toggle voice input' },
+  { cmd: '/speaker',    desc: 'Toggle voice output' },
+  { cmd: '/language',   desc: 'Set STT language' },
+  { cmd: '/tools',      desc: 'List available tools' },
+  { cmd: '/channel',    desc: 'Channel settings' },
+  { cmd: '/selftest',   desc: 'Run self-tests' },
+  { cmd: '/info',       desc: 'Show system information' },
+  { cmd: '/configure',  desc: 'Open settings dialog' },
+  { cmd: '/clear',      desc: 'Clear chat history' },
+];
+
+const acBox = document.getElementById('autocomplete');
+let acIndex = -1;
+
+function showAutocomplete(filter) {
+  const prefix = filter.toLowerCase();
+  const matches = COMMANDS.filter(c => c.cmd.startsWith(prefix));
+  if (matches.length === 0) { hideAutocomplete(); return; }
+
+  acBox.innerHTML = matches.map((c, i) =>
+    `<div class="ac-item${i === 0 ? ' active' : ''}" data-cmd="${esc(c.cmd)}">` +
+      `<span class="ac-cmd">${esc(c.cmd)}</span>` +
+      `<span class="ac-desc">${esc(c.desc)}</span>` +
+    `</div>`
+  ).join('');
+  acBox.classList.add('visible');
+  acIndex = 0;
+}
+
+function hideAutocomplete() {
+  acBox.classList.remove('visible');
+  acBox.innerHTML = '';
+  acIndex = -1;
+}
+
+function selectAutocomplete(cmd) {
+  // Insert command into input. If the command takes arguments, add a trailing space.
+  const noArgCmds = ['/help', '/tools', '/info', '/clear'];
+  input.value = noArgCmds.includes(cmd) ? cmd : cmd + ' ';
+  input.focus();
+  hideAutocomplete();
+}
+
+input.addEventListener('input', () => {
+  const text = input.value;
+  if (text.startsWith('/') && !text.includes(' ')) {
+    showAutocomplete(text);
+  } else {
+    hideAutocomplete();
+  }
+});
+
+input.addEventListener('keydown', (e) => {
+  if (!acBox.classList.contains('visible')) return;
+
+  const items = acBox.querySelectorAll('.ac-item');
+  if (items.length === 0) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    items[acIndex]?.classList.remove('active');
+    acIndex = (acIndex + 1) % items.length;
+    items[acIndex]?.classList.add('active');
+    items[acIndex]?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    items[acIndex]?.classList.remove('active');
+    acIndex = (acIndex - 1 + items.length) % items.length;
+    items[acIndex]?.classList.add('active');
+    items[acIndex]?.scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter' || e.key === 'Tab') {
+    if (acIndex >= 0 && acIndex < items.length) {
+      e.preventDefault();
+      selectAutocomplete(items[acIndex].dataset.cmd);
+    }
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    hideAutocomplete();
+  }
+});
+
+acBox.addEventListener('click', (e) => {
+  const item = e.target.closest('.ac-item');
+  if (item) selectAutocomplete(item.dataset.cmd);
+});
 
 connect();
 </script>

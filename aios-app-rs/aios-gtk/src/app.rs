@@ -71,6 +71,13 @@ impl AiosApp {
     /// [`SetupConversation`] that drives setup cards through the chat view.
     /// Once setup completes, the vault is created, secrets are stored, the
     /// LLM manager is configured, and normal chat mode begins.
+    ///
+    /// **Channel restriction**: First-boot setup can only happen on the
+    /// Desktop (GTK) or Web channel. Remote channels (Signal, Voice, etc.)
+    /// are not started until `activate_main()`, which runs *after* the vault
+    /// has been created. This means the setup wizard is never reachable from
+    /// remote channels — by the time they are online, the vault already
+    /// exists and `activate()` takes the normal startup path.
     fn run_first_boot_setup(app: &adw::Application, rt: tokio::runtime::Handle) {
         // Build the main UI — same window as normal mode.
         let chat_view = ChatView::new();
@@ -319,7 +326,7 @@ impl AiosApp {
     /// Normal application startup — builds the UI and wires up signals.
     fn activate_main(app: &adw::Application, rt: tokio::runtime::Handle) {
         // Load configuration.
-        let config = match ConfigManager::new() {
+        let mut config = match ConfigManager::new() {
             Ok(c) => c,
             Err(e) => {
                 warn!("Failed to load config, using defaults: {e}");
@@ -375,40 +382,30 @@ impl AiosApp {
             }
         }));
 
-        // Show the boot status message.
-        {
-            use aios_core::types::{BootStatus, MessageLevel, StatusLine};
+        // Read channel config (used by both boot status and channel startup).
+        let web_enabled = config.get_bool("channels.web.enabled", false);
+        let web_port = config.get_str("channels.web.port", "80");
+        let signal_enabled = config.get_bool("channels.signal.enabled", false);
+        let signal_phone = config.get_str("channels.signal.phone", "");
+
+        // Build boot status text (used by GTK + Web).
+        let boot_status_text = {
+            use aios_core::types::{BootStatus, StatusLine};
 
             let mut status = BootStatus::new();
-
-            // Desktop is always available.
             status.add(StatusLine::new("Desktop", true, "GTK4/libadwaita"));
-
-            // Web channel.
-            let web_enabled = config.get_bool("channels.web.enabled", false);
-            let web_port = config.get_str("channels.web.port", "80");
             if web_enabled {
-                status.add(StatusLine::new(
-                    "Web Channel",
-                    true,
-                    format!("http://aios.local:{web_port}"),
-                ));
+                status.add(StatusLine::new("Web Channel", true, format!("http://aios.local:{web_port}")));
             } else {
                 status.add(StatusLine::new("Web Channel", false, "disabled (/channel web on)"));
             }
-
-            // Signal channel.
-            let signal_enabled = config.get_bool("channels.signal.enabled", false);
-            let signal_phone = config.get_str("channels.signal.phone", "");
             if signal_enabled && !signal_phone.is_empty() {
-                status.add(StatusLine::new("Signal", true, signal_phone));
+                status.add(StatusLine::new("Signal", true, &signal_phone));
             } else if signal_enabled {
                 status.add(StatusLine::new("Signal", false, "enabled but no phone configured"));
             } else {
                 status.add(StatusLine::new("Signal", false, "disabled (/channel signal on)"));
             }
-
-            // LLM provider.
             let provider = config.get_str("llm.provider", "claude");
             let has_key = match provider.as_str() {
                 "claude" => !config.get_str("llm.claude_api_key", "").is_empty(),
@@ -418,39 +415,275 @@ impl AiosApp {
             if has_key {
                 status.add(StatusLine::new("LLM Provider", true, &provider));
             } else {
-                status.add(StatusLine::new(
-                    "LLM Provider",
-                    false,
-                    format!("{provider} (no API key — use /key)"),
-                ));
+                status.add(StatusLine::new("LLM Provider", false, format!("{provider} (no API key — use /key)")));
             }
-
-            // Voice.
             let stt = config.get_bool("voice.stt_enabled", true);
             let tts = config.get_bool("voice.tts_enabled", true);
-            status.add(StatusLine::new(
-                "Voice",
-                stt || tts,
-                format!("STT: {} | TTS: {}", if stt { "on" } else { "off" }, if tts { "on" } else { "off" }),
-            ));
+            status.add(StatusLine::new("Voice", stt || tts,
+                format!("STT: {} | TTS: {}", if stt { "on" } else { "off" }, if tts { "on" } else { "off" })));
+            status.format()
+        };
 
-            chat_view.add_level_message(MessageLevel::Info, &status.format());
-            chat_view.add_message(
-                "system",
-                "Type a message or use /help to see available commands.",
+        // Show boot status on Desktop.
+        chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
+        chat_view.add_message("system", "Type a message or use /help to see available commands.");
+
+        // --- Channel infrastructure ---
+
+        // Create the shared AppRuntime for multi-channel orchestration.
+        let runtime = aios_core::channel::AppRuntime::new();
+
+        // Register Desktop channel (always available).
+        runtime.switcher.register_channel(
+            aios_core::channel::ChannelKind::Desktop,
+            aios_core::channel::ChannelContext::desktop(),
+        );
+
+        // Start Web server if enabled.
+        let web_server = if web_enabled {
+            let port: u16 = web_port.parse().unwrap_or(80);
+            let web_tx = runtime.message_sender();
+            // Generate or load auth token for web access.
+            let web_token = config.get_str("channels.web.token", "");
+            let web_token = if web_token.is_empty() {
+                let token = uuid::Uuid::new_v4().to_string().replace("-", "")[..16].to_string();
+                let _ = config.set("channels.web.token", serde_json::json!(token));
+                info!("Generated web auth token: {token}");
+                Some(token)
+            } else {
+                Some(web_token)
+            };
+            let server = aios_web::server::WebServer::new(
+                port, web_tx, web_token,
+                Some(runtime.switcher.clone()),
+                Some(boot_status_text.clone()),
             );
+            let response_tx = server.response_tx.clone();
+            server.start();
+            runtime.switcher.register_channel(
+                aios_core::channel::ChannelKind::Web,
+                aios_core::channel::ChannelContext::web(),
+            );
+            info!("Web channel started on port {port}");
+            Some(response_tx)
+        } else {
+            None
+        };
+
+        // Start Signal listener if enabled.
+        let signal_sender = if signal_enabled && !signal_phone.is_empty() {
+            let contacts_str = config.get_str("channels.signal.allowed_contacts", "");
+            let allowed: Vec<String> = contacts_str
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let listener = aios_signal::SignalListener::new(
+                signal_phone.clone(),
+                allowed,
+            );
+            let sig_tx = runtime.message_sender();
+            listener.start(sig_tx);
+            runtime.switcher.register_channel(
+                aios_core::channel::ChannelKind::Signal,
+                aios_core::channel::ChannelContext::signal(),
+            );
+            info!("Signal channel started for {signal_phone}");
+            Some(Arc::new(aios_signal::SignalSender::new(signal_phone)))
+        } else {
+            None
+        };
+
+        // Wire channel switcher to the overlay (item 5).
+        // GTK widgets aren't Send, so we use a std::sync::mpsc channel to
+        // bridge from the switcher callback (any thread) to the GTK thread.
+        {
+            let (overlay_tx, overlay_rx) =
+                std::sync::mpsc::channel::<aios_core::channel::ChannelKind>();
+
+            runtime.switcher.on_switch(Arc::new(move |_old, new| {
+                let _ = overlay_tx.send(new);
+            }));
+
+            // GTK-side: poll the channel and update the overlay.
+            let overlay_for_poll = channel_overlay.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                while let Ok(new_kind) = overlay_rx.try_recv() {
+                    if new_kind == aios_core::channel::ChannelKind::Desktop {
+                        overlay_for_poll.hide();
+                    } else {
+                        overlay_for_poll.show(new_kind);
+                    }
+                }
+                glib::ControlFlow::Continue
+            });
+
+            // "Switch back here" button → switch to Desktop.
+            let switcher_for_btn = runtime.switcher.clone();
+            channel_overlay.on_switch_back(move || {
+                let _ = switcher_for_btn.switch_to(aios_core::channel::ChannelKind::Desktop);
+            });
+        }
+
+        // Warn if no API key is configured.
+        {
+            let provider = config.get_str("llm.provider", "claude");
+            let has_key = match provider.as_str() {
+                "claude" => !config.get_str("llm.claude_api_key", "").is_empty(),
+                "openai" => !config.get_str("llm.openai_api_key", "").is_empty(),
+                _ => false,
+            };
+            if !has_key {
+                chat_view.add_level_message(
+                    aios_core::types::MessageLevel::Warning,
+                    "No API key configured. Use **/key claude sk-ant-...** or **/key openai sk-...** to set one.",
+                );
+            }
         }
 
         // Create shared application state.
+        let llm_arc = Arc::new(tokio::sync::Mutex::new(llm));
         let state = Rc::new(RefCell::new(AiosApp {
             config,
-            llm: Arc::new(tokio::sync::Mutex::new(llm)),
+            llm: llm_arc.clone(),
             tools,
             conversation: Vec::new(),
-            rt,
+            rt: rt.clone(),
         }));
 
-        // --- Connect signals ---
+        // --- Unified message loop (item 3) ---
+        // Poll incoming messages from ALL channels (Web, Signal, Desktop)
+        // and route them through the LLM.
+        {
+            let msg_rx_holder = runtime.clone();
+            let state_for_loop = state.clone();
+            let chat_for_loop = chat_view.clone();
+            let switcher_for_loop = runtime.switcher.clone();
+            let llm_for_loop = llm_arc.clone();
+            let rt_for_loop = rt.clone();
+            let web_tx = web_server.clone();
+            let sig_sender = signal_sender.clone();
+
+            // We take the receiver on the Tokio side and poll it from GTK.
+            let (bridge_tx, bridge_rx) =
+                std::sync::mpsc::channel::<aios_core::channel::IncomingMessage>();
+
+            // Tokio task: drain AppRuntime's message channel into the std bridge.
+            rt.spawn(async move {
+                if let Some(mut rx) = msg_rx_holder.take_message_rx().await {
+                    while let Some(msg) = rx.recv().await {
+                        if bridge_tx.send(msg).is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // GTK poll: check for incoming messages from remote channels.
+            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                while let Ok(msg) = bridge_rx.try_recv() {
+                    // Switch channel if needed.
+                    if switcher_for_loop.active_kind() != msg.channel {
+                        let _ = switcher_for_loop.switch_to(msg.channel);
+                    }
+
+                    // Always show in Desktop chat (conversation continuity).
+                    chat_for_loop.add_message("user", &msg.text);
+
+                    // Record in conversation history.
+                    {
+                        let mut s = state_for_loop.borrow_mut();
+                        s.conversation.push(aios_core::types::Message::user(&msg.text));
+                    }
+
+                    // Handle slash commands from remote channels.
+                    if msg.text.starts_with('/') {
+                        Self::handle_command(&state_for_loop, &chat_for_loop, &msg.text);
+                        continue;
+                    }
+
+                    // Send to LLM and route response to active channel (item 4).
+                    let llm = llm_for_loop.clone();
+                    let history = state_for_loop.borrow().conversation.clone();
+                    let text = msg.text.clone();
+                    let sender_id = msg.sender_id.clone();
+                    let active_channel = switcher_for_loop.active_kind();
+                    let (resp_tx, resp_rx) = std::sync::mpsc::channel::<LlmResult>();
+                    let web_tx_inner = web_tx.clone();
+                    let sig_inner = sig_sender.clone();
+
+                    rt_for_loop.spawn(async move {
+                        let mut llm_guard = llm.lock().await;
+                        let mut history = history;
+                        if history.last().is_some_and(|m| m.role == aios_core::types::Role::User) {
+                            history.pop();
+                        }
+                        let result = llm_guard.chat(&text, Some(&mut history), &[], None).await;
+                        drop(llm_guard);
+
+                        match result {
+                            Ok(response) => {
+                                let content = response.content.unwrap_or_default();
+                                // Route to active channel.
+                                match active_channel {
+                                    aios_core::channel::ChannelKind::Web => {
+                                        if let Some(ref tx) = web_tx_inner {
+                                            let msg = aios_web::protocol::ServerMessage::Message {
+                                                role: "assistant".into(),
+                                                content: content.clone(),
+                                                level: None,
+                                            };
+                                            if let Ok(json) = serde_json::to_string(&msg) {
+                                                let _ = tx.send(json);
+                                            }
+                                        }
+                                    }
+                                    aios_core::channel::ChannelKind::Signal => {
+                                        if let Some(ref sender) = sig_inner {
+                                            if let Some(ref recipient) = sender_id {
+                                                let _ = sender.send_text(recipient, &content).await;
+                                            }
+                                        }
+                                    }
+                                    _ => {} // Desktop is handled below via resp_tx.
+                                }
+                                let _ = resp_tx.send(LlmResult::Success {
+                                    content,
+                                    updated_history: history,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = resp_tx.send(LlmResult::Error(format!("{e}")));
+                            }
+                        }
+                    });
+
+                    // Poll for this response too (displays on Desktop).
+                    let chat_for_resp = chat_for_loop.clone();
+                    let state_for_resp = state_for_loop.clone();
+                    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                        match resp_rx.try_recv() {
+                            Ok(LlmResult::Success { content, updated_history }) => {
+                                chat_for_resp.add_message("assistant", &content);
+                                let mut s = state_for_resp.borrow_mut();
+                                s.conversation = updated_history;
+                                s.conversation.push(aios_core::types::Message::assistant(&content));
+                                glib::ControlFlow::Break
+                            }
+                            Ok(LlmResult::Error(err)) => {
+                                chat_for_resp.add_message("system", &format!("Error: {err}"));
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                        }
+                    });
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+
+        // --- Connect GTK signals ---
 
         // Provider dropdown changed.
         let state_ref = state.clone();
@@ -459,7 +692,6 @@ impl AiosApp {
             let mut s = state_ref.borrow_mut();
             let name = provider_name.to_lowercase();
             let _ = s.config.set("llm.provider", serde_json::json!(name));
-            // Provider switching is done synchronously via try_lock.
             if let Ok(mut llm) = s.llm.try_lock() {
                 if llm.set_active(&name).is_err() {
                     chat_view_ref
@@ -494,7 +726,7 @@ impl AiosApp {
             info!("Speaker toggled: {active}");
         });
 
-        // Message submission (Enter key or send button).
+        // Message submission (Enter key or send button) — Desktop channel.
         let state_ref = state.clone();
         let chat_view_ref = chat_view.clone();
         let prompt_ref = prompt_input.clone();
@@ -632,6 +864,23 @@ impl AiosApp {
                     "Use the settings button (gear icon) to configure AiOS.",
                 );
             }
+            CommandResult::SysInfo => {
+                let info = aios_core::system_monitor::SystemInfo::gather();
+                chat_view.add_level_message(
+                    aios_core::types::MessageLevel::Info,
+                    &info.format_text(),
+                );
+            }
+            CommandResult::ClosePanel => {
+                drop(s);
+                let closed = Self::close_topmost_dialog();
+                if closed {
+                    chat_view.add_message("system", "Panel closed.");
+                } else {
+                    chat_view.add_message("system", "No open panel or dialog to close.");
+                }
+                return;
+            }
             CommandResult::SelfTest(filter) => {
                 drop(s);
                 Self::run_selftest(state, chat_view, &filter);
@@ -698,6 +947,45 @@ impl AiosApp {
 
         let report = SelfTestRunner::format_report(&results);
         chat.add_message("system", &report);
+    }
+
+    /// Close the topmost modal/transient dialog window.
+    ///
+    /// Iterates all windows registered with the GTK application and looks
+    /// for visible windows that are not the main `ApplicationWindow`.
+    /// Closes the last one found (topmost) and returns `true` if a window
+    /// was closed.
+    fn close_topmost_dialog() -> bool {
+        // Get the running GtkApplication via gio::Application::default().
+        let gio_app = match gtk4::gio::Application::default() {
+            Some(a) => a,
+            None => return false,
+        };
+        let gtk_app = match gio_app.downcast::<gtk4::Application>() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
+
+        // Iterate windows registered with the application.
+        // The list is ordered; the last matching window is the topmost.
+        let mut candidate: Option<gtk4::Window> = None;
+
+        for win in gtk_app.windows() {
+            // Skip the main application window.
+            if win.downcast_ref::<adw::ApplicationWindow>().is_some() {
+                continue;
+            }
+            if win.is_visible() {
+                candidate = Some(win);
+            }
+        }
+
+        if let Some(win) = candidate {
+            win.close();
+            true
+        } else {
+            false
+        }
     }
 
     /// Send a user message to the LLM on the Tokio runtime.

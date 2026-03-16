@@ -11,6 +11,44 @@ use serde_json::json;
 use super::ConfigManager;
 
 // ---------------------------------------------------------------------------
+// CommandInfo — metadata for autocomplete
+// ---------------------------------------------------------------------------
+
+/// Command metadata for autocomplete menus.
+pub struct CommandInfo {
+    pub command: &'static str,
+    pub description: &'static str,
+}
+
+/// Return all available commands with short descriptions.
+pub fn command_list() -> Vec<CommandInfo> {
+    vec![
+        CommandInfo { command: "/help", description: "Show available commands" },
+        CommandInfo { command: "/key", description: "Set API key for a provider" },
+        CommandInfo { command: "/provider", description: "Switch LLM provider" },
+        CommandInfo { command: "/model", description: "Set model for current provider" },
+        CommandInfo { command: "/effort", description: "Set AI effort level" },
+        CommandInfo { command: "/mode", description: "Set quality/cost mode" },
+        CommandInfo { command: "/keyboard", description: "Set keyboard layout" },
+        CommandInfo { command: "/resolution", description: "Set screen resolution" },
+        CommandInfo { command: "/theme", description: "Set UI theme" },
+        CommandInfo { command: "/voice", description: "Set TTS voice" },
+        CommandInfo { command: "/mic", description: "Toggle voice input" },
+        CommandInfo { command: "/speaker", description: "Toggle voice output" },
+        CommandInfo { command: "/language", description: "Set STT language" },
+        CommandInfo { command: "/tools", description: "List available tools" },
+        CommandInfo { command: "/channel", description: "Channel settings" },
+        CommandInfo { command: "/selftest", description: "Run self-tests" },
+        CommandInfo { command: "/info", description: "Show system information" },
+        CommandInfo { command: "/sysinfo", description: "Show system monitor" },
+        CommandInfo { command: "/close", description: "Close topmost panel/dialog" },
+        CommandInfo { command: "/configure", description: "Open settings dialog" },
+        CommandInfo { command: "/wake", description: "Set wake word phrase" },
+        CommandInfo { command: "/clear", description: "Clear chat history" },
+    ]
+}
+
+// ---------------------------------------------------------------------------
 // CommandResult
 // ---------------------------------------------------------------------------
 
@@ -26,6 +64,10 @@ pub enum CommandResult {
     /// The user asked to run the self-test.
     /// The string argument is the optional filter (e.g. "quick", "channel", "interactive").
     SelfTest(String),
+    /// The user asked to see the system monitor (`/sysinfo`).
+    SysInfo,
+    /// The user asked to close the topmost panel/dialog (`/close`).
+    ClosePanel,
     /// The command was not recognised.
     Unknown(String),
 }
@@ -84,8 +126,11 @@ impl<'a> CommandHandler<'a> {
             "/tools" => self.cmd_tools(),
             "/effort" => self.cmd_effort(&args),
             "/mode" => self.cmd_mode(&args),
+            "/wake" => self.cmd_wake(&args),
             "/channel" => self.cmd_channel(&args),
             "/selftest" => CommandResult::SelfTest(args),
+            "/sysinfo" => CommandResult::SysInfo,
+            "/close" => CommandResult::ClosePanel,
             "/clear" => CommandResult::Clear,
             "/configure" => CommandResult::Configure,
             "/info" => self.cmd_info(),
@@ -110,12 +155,15 @@ Available commands:
 /mic <on|off>               Enable/disable voice input
 /speaker <on|off>           Enable/disable voice output
 /language <code>            Set STT language (blank=auto)
+/wake <phrase>              Set wake word (e.g., /wake hey aios)
 /tools                      List available tools
 /effort <level>             Set AI effort (low, medium, high, auto)
 /mode <mode>                Set quality mode (saver, balanced, thorough)
 /channel                    Show active channel / channel settings
 /selftest [filter]          Run self-tests (quick, channel, tools, interactive)
+/sysinfo                    Show system monitor (CPU, memory, disk, processes)
 /info                       Show system information
+/close                      Close the topmost panel or dialog
 /configure                  Open settings dialog
 /clear                      Clear chat history
 /help                       Show this help"
@@ -254,6 +302,40 @@ Available commands:
             CommandResult::Response("STT language set to auto-detect".into())
         } else {
             CommandResult::Response(format!("STT language set to {lang}"))
+        }
+    }
+
+    fn cmd_wake(&mut self, args: &str) -> CommandResult {
+        let phrase = args.trim();
+        if phrase.is_empty() {
+            let current = self.config.get_str("voice.wake_word", "hey aios");
+            let enabled = self.config.get_bool("voice.wake_enabled", true);
+            let status = if enabled { "enabled" } else { "disabled" };
+            return CommandResult::Response(format!(
+                "Wake word: \"{current}\" ({status})\n\
+                 Usage: /wake <phrase>   Set wake word\n\
+                 Usage: /wake off        Disable wake word detection\n\
+                 Usage: /wake on         Enable wake word detection"
+            ));
+        }
+
+        match phrase.to_lowercase().as_str() {
+            "off" => {
+                let _ = self.config.set("voice.wake_enabled", json!(false));
+                CommandResult::Response("Wake word detection disabled".into())
+            }
+            "on" => {
+                let _ = self.config.set("voice.wake_enabled", json!(true));
+                let current = self.config.get_str("voice.wake_word", "hey aios");
+                CommandResult::Response(format!(
+                    "Wake word detection enabled (phrase: \"{current}\")"
+                ))
+            }
+            _ => {
+                let _ = self.config.set("voice.wake_word", json!(phrase));
+                let _ = self.config.set("voice.wake_enabled", json!(true));
+                CommandResult::Response(format!("Wake word set to \"{phrase}\""))
+            }
         }
     }
 

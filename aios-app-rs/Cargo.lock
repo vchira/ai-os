@@ -54,7 +54,9 @@ dependencies = [
  "argon2",
  "chrono",
  "directories",
+ "libc",
  "rand",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -70,8 +72,10 @@ version = "2.0.0"
 dependencies = [
  "aios-core",
  "aios-llm",
+ "aios-signal",
  "aios-tools",
  "aios-voice",
+ "aios-web",
  "chrono",
  "dirs",
  "futures",
@@ -82,6 +86,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

@@ -71,6 +71,8 @@ polkitd
 udev
 network-manager
 bluez
+avahi-daemon
+libnss-mdns
 pipewire
 pipewire-pulse
 wireplumber
@@ -154,6 +156,25 @@ echo "[AiOS] Setting up AiOS distribution..."
 useradd -m -G sudo,audio,video,input,render -s /bin/bash aios 2>/dev/null || true
 echo "aios:aios" | chpasswd
 echo "aios ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/aios
+
+# ── Set hostname to 'aios' (makes it reachable as aios.local via mDNS) ──
+echo "aios" > /etc/hostname
+echo "127.0.0.1 aios" >> /etc/hosts
+
+# ── Avahi mDNS — makes http://aios.local work on the LAN ──
+systemctl enable avahi-daemon 2>/dev/null || true
+mkdir -p /etc/avahi/services
+cat > /etc/avahi/services/aios-web.service << AVEOF
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name>AiOS Web Interface</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>80</port>
+  </service>
+</service-group>
+AVEOF
 
 # ── Install AiOS binary ──
 if [ -f /opt/aios-app/aios ]; then
@@ -399,72 +420,115 @@ EOF
 
 # ─── Build ────────────────────────────────────────────────────
 
-# ─── Boot Menu Branding (syslinux for BIOS boot) ────────────
+# ─── Boot Menu Branding (syslinux/isolinux for BIOS boot) ────
 
-# Custom syslinux splash and menu
-mkdir -p config/bootloaders/syslinux
+# live-build uses config/bootloaders/isolinux/ to override the default
+# boot menu. We must provide ALL the files it expects, otherwise it
+# falls back to the Debian defaults.
 
-cat > config/bootloaders/syslinux/live.cfg.in << 'EOF'
+echo "[*] Creating custom boot menu..."
+
+# Copy the stock syslinux/isolinux modules from live-build as a base,
+# then override with our branding.
+mkdir -p config/bootloaders/isolinux
+
+# Create the main isolinux config that live-build will use.
+# This replaces the auto-generated menu entirely.
+cat > config/bootloaders/isolinux/isolinux.cfg << 'BOOTEOF'
 ui vesamenu.c32
+timeout 50
+prompt 0
 
 menu title AiOS — AI-Native Operating System
 menu background splash.png
-menu color title  1;37;40 #ffffffff #00000000
-menu color border 0;30;40 #00000000 #00000000
-menu color sel    7;37;40 #ff00aaff #33000000
-menu color unsel  0;37;40 #ffcccccc #00000000
-menu color hotkey 0;37;40 #ff00aaff #00000000
-menu color tabmsg 0;37;40 #ff999999 #00000000
-menu color help   0;37;40 #ff999999 #00000000
-menu vshift 12
-menu hshift 0
-menu width 50
-menu margin 10
+
+menu color screen  0;37;40 #00000000 #00000000 none
+menu color border  0;30;40 #00000000 #00000000 none
+menu color title   1;37;40 #ff4a9eff #00000000 none
+menu color sel     7;37;40 #ffffffff #ff1f2b47 none
+menu color unsel   0;37;40 #ffaaaaaa #00000000 none
+menu color hotkey  0;37;40 #ff4a9eff #00000000 none
+menu color tabmsg  0;37;40 #ff666666 #00000000 none
+menu color help    0;37;40 #ff666666 #00000000 none
+menu color cmdline 0;37;40 #ff999999 #00000000 none
+
+menu vshift 10
+menu hshift 6
+menu width 60
+menu margin 8
 menu rows 5
 menu tabmsgrow 18
-menu cmdlinerow 18
+menu cmdlinerow 19
 menu timeoutrow 20
 menu tabmsg Press TAB to edit boot options
 
-timeout 50
-
 label live-aios
-    menu label AiOS (normal boot, straight to desktop)
+    menu label ^AiOS
     menu default
     kernel /live/vmlinuz
     append initrd=/live/initrd.img boot=live components username=aios quiet splash
 
 label live-safe
-    menu label AiOS Safe Mode (text-only root shell, no graphics)
+    menu label AiOS ^Safe Mode
     kernel /live/vmlinuz
-    append initrd=/live/initrd.img boot=live components username=aios single
+    append initrd=/live/initrd.img boot=live components username=aios single nomodeset
 
 label live-debug
-    menu label AiOS Debug Mode (normal boot with all system messages visible)
+    menu label AiOS ^Debug Mode
     kernel /live/vmlinuz
     append initrd=/live/initrd.img boot=live components username=aios debug
-EOF
+BOOTEOF
 
-# Generate a simple branded splash image using Python (available in the builder)
-# 640x480 PNG with dark background and AiOS text
+# Also provide live.cfg (some live-build versions include this)
+cp config/bootloaders/isolinux/isolinux.cfg config/bootloaders/isolinux/live.cfg
+
+# Generate a branded splash image (640x480 PNG — syslinux requirement)
 python3 -c "
 from PIL import Image, ImageDraw, ImageFont
-import os
-img = Image.new('RGB', (640, 480), (26, 26, 46))
+
+W, H = 640, 480
+bg = (18, 18, 36)       # Dark navy
+accent = (74, 158, 255) # Blue accent
+white = (255, 255, 255)
+dim = (130, 140, 160)
+
+img = Image.new('RGB', (W, H), bg)
 draw = ImageDraw.Draw(img)
-# Try to use a nice font, fall back to default
+
+# Subtle gradient-ish top bar
+for y in range(0, 4):
+    draw.line([(0, y), (W, y)], fill=accent)
+
 try:
-    font_large = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 36)
-    font_small = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 16)
+    font_title = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf', 48)
+    font_sub = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 18)
+    font_ver = ImageFont.truetype('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', 14)
 except:
-    font_large = ImageFont.load_default()
-    font_small = ImageFont.load_default()
-draw.text((640//2, 160), 'AiOS', fill=(255, 255, 255), font=font_large, anchor='mm')
-draw.text((640//2, 210), 'AI-Native Operating System', fill=(180, 180, 200), font=font_small, anchor='mm')
-draw.text((640//2, 250), 'v2.0', fill=(120, 120, 150), font=font_small, anchor='mm')
-img.save('config/bootloaders/syslinux/splash.png')
-print('[*] Boot splash generated')
-" 2>/dev/null || echo "[*] Splash generation skipped (no PIL)"
+    font_title = ImageFont.load_default()
+    font_sub = font_title
+    font_ver = font_title
+
+# Title
+draw.text((W//2, 100), 'AiOS', fill=white, font=font_title, anchor='mm')
+
+# Subtitle
+draw.text((W//2, 150), 'AI-Native Operating System', fill=dim, font=font_sub, anchor='mm')
+
+# Version
+draw.text((W//2, 180), 'v2.0', fill=(80, 90, 110), font=font_ver, anchor='mm')
+
+# Bottom accent line
+for y in range(H-3, H):
+    draw.line([(0, y), (W, y)], fill=(40, 50, 70))
+
+img.save('config/bootloaders/isolinux/splash.png')
+print('[*] AiOS boot splash generated')
+" 2>/dev/null || echo "[*] Splash generation skipped (no PIL — install python3-pil)"
+
+# Also copy splash to syslinux dir as fallback
+mkdir -p config/bootloaders/syslinux
+cp config/bootloaders/isolinux/isolinux.cfg config/bootloaders/syslinux/syslinux.cfg 2>/dev/null || true
+cp config/bootloaders/isolinux/splash.png config/bootloaders/syslinux/splash.png 2>/dev/null || true
 
 rm -f *.iso 2>/dev/null || true
 

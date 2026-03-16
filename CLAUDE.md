@@ -23,6 +23,58 @@ The AI is the primary actor. Humans ask questions or express intent through voic
 - Tools are expandable via a plugin system
 - API keys are stored in an encrypted vault (AES-256-GCM + Argon2id)
 
+## Multi-Channel System
+
+AiOS has **one AI brain, one conversation, multiple output surfaces**. The active channel is where the user is currently interacting. Whoever sends a message last owns the channel.
+
+### Channels
+
+| Channel | Interface | Capabilities | How |
+|---------|-----------|-------------|-----|
+| **Desktop** | GTK4/libadwaita | Full (panels, images, markdown) | Default, always available |
+| **Web** | Browser via WebSocket | Full (HTML forms, images, markdown) | `http://aios.local` on the LAN |
+| **Signal** | Signal messenger | Limited (text, images, no panels) | Via `signal-cli` daemon |
+| **Voice** | TTS/STT | Minimal (spoken text only) | Via PipeWire + Whisper/Piper |
+
+### Channel Switching
+
+- When a message arrives from Signal → channel switches to Signal
+- Desktop shows a modal overlay: "AI is talking on Signal" + "Switch back here" button
+- Clicking the button switches back to Desktop; Signal gets "Conversation moved to desktop"
+- Same for Web: opening the browser UI and sending a message switches the channel
+
+### Tool Channel Awareness
+
+Most tools (10/12) are channel-agnostic — they return text regardless. Two tools adapt:
+- **`ui_panel`**: GTK dialog on Desktop, HTML form on Web, numbered text choices on Signal
+- **`display`**: Native rendering on Desktop/Web, text fallbacks on Signal/Voice
+
+Tools implement `execute_on_channel(args, channel)` — the default delegates to `execute()` ignoring the channel.
+
+### Configuration
+
+```
+/channel                    Show channel status
+/channel web on|off         Enable/disable web channel
+/channel signal on|off      Enable/disable Signal
+/channel web port <N>       Set web server port (default: 80)
+/channel signal phone <N>   Set Signal phone number
+```
+
+### Boot Status
+
+On startup, AiOS shows an INFO message with green/red indicators for each channel:
+```
+ℹ️ [INFO] AiOS System Status
+  Boot time: 2026-03-16 12:00:00 UTC
+
+  ✅ Desktop: available — GTK4/libadwaita
+  ✅ Web Channel: available — http://aios.local:80
+  ❌ Signal: unavailable — disabled (/channel signal on)
+  ✅ LLM Provider: available — claude
+  ✅ Voice: available — STT: on | TTS: on
+```
+
 ## Architecture
 
 - **Base**: Debian Bookworm (12) — maximum hardware support with non-free firmware
@@ -31,19 +83,23 @@ The AI is the primary actor. Humans ask questions or express intent through voic
 - **Voice STT**: whisper.cpp (local inference, swappable via SttEngine trait)
 - **Voice TTS**: Piper / espeak-ng (swappable via TtsEngine trait, auto-selects based on hardware)
 - **LLM Providers**: Claude API, OpenAI API — switchable at runtime, model-agnostic via LlmProvider trait
-- **Tools**: 11 built-in tools + plugin system with categories and dynamic routing
+- **Tools**: 12 built-in tools + plugin system with categories and dynamic routing
+- **Multi-Channel**: Desktop (GTK), Web (axum + WebSocket), Signal (signal-cli) — one AI brain, multiple surfaces
 - **Security**: Encrypted vault for secrets, permission system with auth framework
 - **Audio**: PipeWire (modern Linux audio)
+- **mDNS**: Avahi — web UI reachable as `http://aios.local` on the LAN
 
 ### Rust Workspace (`aios-app-rs/`)
 
 | Crate | Purpose |
 |-------|---------|
-| `aios-core` | Shared types, config, commands, secure vault, auth, permissions, episodic memory, semantic index |
+| `aios-core` | Shared types, config, commands, channel system, AppRuntime, secure vault, auth, permissions, episodic memory, semantic index, selftest |
 | `aios-llm` | LLM provider trait + Claude/OpenAI implementations, caching, context pruning, pre-fetch, effort levels, multi-agent orchestrator |
-| `aios-tools` | Tool trait + 11 built-in tools, plugin registry, sandbox execution, tool categories |
+| `aios-tools` | Tool trait + 12 built-in tools (channel-aware), plugin registry, sandbox execution, tool categories |
 | `aios-voice` | TTS/STT engine traits + Piper, espeak-ng, Whisper backends, audio I/O via cpal |
-| `aios-gtk` | GTK4/libadwaita UI binary — chat, prompt, settings, auth dialogs, setup wizard, panel renderer |
+| `aios-gtk` | GTK4/libadwaita UI binary — chat, prompt, settings, auth dialogs, setup wizard, panel renderer, channel overlay |
+| `aios-web` | Web channel — axum HTTP server, WebSocket, full HTML/CSS/JS chat client (mirrors desktop) |
+| `aios-signal` | Signal messenger channel — signal-cli integration, listener + sender |
 
 ## Build
 
@@ -60,8 +116,11 @@ The AI is the primary actor. Humans ask questions or express intent through voic
 # Deep clean (also purge Docker cache volumes)
 ./clean.sh --deep
 
-# Run Rust tests
-cd aios-app-rs && cargo test --workspace
+# Development workflow
+make check              # Fast compilation check
+make test               # Run all 563+ workspace tests
+make build              # Build release binary
+make dev                # check + test
 
 # Build only the Rust binary (for development)
 cd aios-app-rs && cargo build --release
@@ -115,6 +174,8 @@ API keys are stored in the encrypted vault (`~/.aios/vault.enc`).
 | `/speaker <on\|off>` | Toggle voice output |
 | `/language <code>` | Set STT language (blank=auto) |
 | `/tools` | List available tools |
+| `/channel` | Show/configure channels (web on/off, signal on/off, port, phone) |
+| `/selftest [filter]` | Run self-tests (quick, channel, tools, interactive) |
 | `/configure` | Re-run first-boot setup wizard |
 | `/clear` | Clear chat history |
 | `/info` | Show system information |
@@ -333,25 +394,33 @@ Code execution (`execute_code` tool) always uses sandbox — Docker preferred, p
 ## Key Files
 
 ### Rust Application (`aios-app-rs/`)
-- `aios-core/src/config/` — Configuration manager, defaults, slash commands
-- `aios-core/src/types/` — Message, ToolResult, Voice types, EffortLevel
+- `aios-core/src/config/` — Configuration manager, defaults, slash commands, command autocomplete
+- `aios-core/src/types/` — Message, ToolResult, Voice types, EffortLevel, MessageLevel, BootStatus, RichText
+- `aios-core/src/channel/` — ChannelKind, ChannelContext, ChannelSwitcher, AppRuntime
+- `aios-core/src/selftest/` — Self-test runner + 14 scenarios (auto + interactive)
 - `aios-core/src/secure/` — Vault, auth framework, permission system
 - `aios-core/src/memory/` — Episodic memory, semantic file index
 - `aios-llm/src/provider.rs` — LlmProvider trait, CacheConfig
 - `aios-llm/src/claude.rs` — Claude API with caching + effort levels
 - `aios-llm/src/openai.rs` — OpenAI API with effort levels
-- `aios-llm/src/manager.rs` — Provider manager, tool-call loop, all optimizations
+- `aios-llm/src/manager.rs` — Provider manager, tool-call loop, all optimizations, channel-aware system prompt
 - `aios-llm/src/agents.rs` — Multi-agent orchestrator
 - `aios-llm/src/context.rs` — Context pruning via recursive summarization
 - `aios-llm/src/prefetch.rs` — Speculative pre-fetch engine
-- `aios-tools/src/tool.rs` — Tool trait with categories
+- `aios-tools/src/tool.rs` — Tool trait with categories + `execute_on_channel`
 - `aios-tools/src/sandbox.rs` — Sandbox execution (Process + Docker)
-- `aios-tools/src/builtin/` — 11 built-in tools
+- `aios-tools/src/builtin/` — 12 built-in tools (ui_panel + display are channel-aware)
 - `aios-voice/src/stt/` — STT engine trait + Whisper backend
 - `aios-voice/src/tts/` — TTS engine trait + Piper, espeak-ng backends
 - `aios-voice/src/audio/` — Audio capture/playback via cpal
-- `aios-gtk/src/app.rs` — Application entry, first-boot detection, LLM wiring
-- `aios-gtk/src/ui/` — GTK4 widgets (chat, prompt, settings, auth, panels, setup)
+- `aios-gtk/src/app.rs` — Application entry, first-boot, LLM wiring, channel startup, unified message loop
+- `aios-gtk/src/ui/` — GTK4 widgets (chat, prompt, settings, auth, panels, setup, channel overlay)
+- `aios-web/src/server.rs` — axum HTTP + WebSocket server
+- `aios-web/src/protocol.rs` — JSON message protocol (client ↔ server)
+- `aios-web/src/static/index.html` — Full web chat client (HTML/CSS/JS, no build system)
+- `aios-signal/src/listener.rs` — signal-cli daemon reader
+- `aios-signal/src/sender.rs` — Signal message/image sender
+- `aios-signal/src/panel.rs` — Panel → text format converter for Signal
 
 ### Distribution (`distro/`)
 - `build.sh` — Docker-based ISO builder (compiles Rust inside Bookworm)

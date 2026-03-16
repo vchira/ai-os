@@ -17,9 +17,15 @@ pub struct TestResult {
 
 impl fmt::Display for TestResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let icon = if self.passed { "PASS" } else { "FAIL" };
+        use crate::types::MessageLevel;
+
+        let (level, label) = if self.passed {
+            (MessageLevel::Success, "PASS")
+        } else {
+            (MessageLevel::Error, "FAIL")
+        };
         let tag = if self.interactive { " [interactive]" } else { "" };
-        write!(f, "[{icon}] {}{tag}: {}", self.name, self.detail)
+        write!(f, "{} [{label}] {}{tag}: {}", level.icon(), self.name, self.detail)
     }
 }
 
@@ -145,14 +151,25 @@ impl SelfTestRunner {
 
     /// Format results into a human-readable report.
     pub fn format_report(results: &[TestResult]) -> String {
+        use crate::types::MessageLevel;
+
         let total = results.len();
         let passed = results.iter().filter(|r| r.passed).count();
         let failed = total - passed;
 
+        let header_level = if failed == 0 {
+            MessageLevel::Success
+        } else {
+            MessageLevel::Error
+        };
+
         let mut lines = vec![
             String::new(),
             "========================================".to_string(),
-            "       AiOS Self-Test Report".to_string(),
+            format!(
+                "  {} AiOS Self-Test Report",
+                header_level.format(if failed == 0 { "All tests passed" } else { "Some tests failed" })
+            ),
             "========================================".to_string(),
             String::new(),
         ];
@@ -168,9 +185,9 @@ impl SelfTestRunner {
         ));
 
         if failed == 0 {
-            lines.push("All tests passed!".to_string());
+            lines.push(MessageLevel::Success.format("All tests passed!"));
         } else {
-            lines.push(format!("{failed} test(s) FAILED."));
+            lines.push(MessageLevel::Error.format(&format!("{failed} test(s) FAILED.")));
         }
         lines.push("========================================".to_string());
 

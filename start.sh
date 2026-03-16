@@ -2,8 +2,9 @@
 # AiOS — Build (if needed) and boot the OS in QEMU
 #
 # Usage:
-#   ./start.sh              # incremental build + boot
-#   ./start.sh --clean      # full clean rebuild + boot
+#   ./start.sh              # just boot (rebuild code if source changed)
+#   ./start.sh --code-rebuild       # rebuild Rust code only + boot (fast, ~1 min)
+#   ./start.sh --clean      # full clean rebuild + boot (slow, ~20 min)
 #   DEBUG=1 ./start.sh      # boot with serial logging
 
 set -euo pipefail
@@ -11,11 +12,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ARG="${1:-}"
 
-# Build if --clean requested or no ISO exists
 if [ "${ARG}" = "--clean" ]; then
     echo "[*] Clean build requested..."
     "${SCRIPT_DIR}/clean.sh"
     "${SCRIPT_DIR}/distro/build.sh" --clean
+elif [ "${ARG}" = "--code-rebuild" ]; then
+    echo "[*] Rebuilding Rust code only (fast rebuild)..."
+    "${SCRIPT_DIR}/distro/build.sh" --code-rebuild
 else
     ISO=$(find "${SCRIPT_DIR}/distro/build" -maxdepth 1 -name "*.iso" -type f 2>/dev/null || true)
     if [ -z "${ISO}" ]; then
@@ -34,4 +37,9 @@ echo "[*] Booting AiOS: ${ISO}"
 if [ "${DEBUG:-}" = "1" ]; then
     echo "[*] Debug mode on — after boot, check /tmp/aios-serial.log"
 fi
+
+# Clean up stale VM before starting
+virsh --connect qemu:///system destroy aios-live 2>/dev/null || true
+virsh --connect qemu:///system undefine aios-live 2>/dev/null || true
+
 cd "${SCRIPT_DIR}/distro" && exec ./run-vm.sh "${ISO}"

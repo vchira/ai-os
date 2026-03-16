@@ -44,6 +44,8 @@ pub struct SetupResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SetupStep {
     Welcome,
+    TestAudioOutput,
+    TestAudioInput,
     ChooseProvider,
     EnterApiKey { provider: String },
     CreatePassword,
@@ -135,6 +137,16 @@ impl SetupConversation {
         match step {
             SetupStep::Welcome => {
                 // Any voice input advances past welcome.
+                self.advance(SetupStep::TestAudioOutput);
+            }
+            SetupStep::TestAudioOutput => {
+                // Voice input during audio test = audio works!
+                self.advance(SetupStep::TestAudioInput);
+            }
+            SetupStep::TestAudioInput => {
+                // Any voice input means the mic works.
+                self.chat_view.add_message("system",
+                    &format!("\u{2705} Mic works! I heard: \"{text}\""));
                 self.advance(SetupStep::ChooseProvider);
             }
             SetupStep::ChooseProvider => {
@@ -187,6 +199,8 @@ impl SetupConversation {
 
         match step {
             SetupStep::Welcome => self.show_welcome(),
+            SetupStep::TestAudioOutput => self.show_test_audio_output(),
+            SetupStep::TestAudioInput => self.show_test_audio_input(),
             SetupStep::ChooseProvider => self.show_choose_provider(),
             SetupStep::EnterApiKey { ref provider } => {
                 self.show_enter_api_key(provider.clone(), false);
@@ -218,20 +232,112 @@ impl SetupConversation {
 
         let this = self.clone();
         btn.connect_clicked(move |_| {
-            this.advance(SetupStep::ChooseProvider);
+            this.advance(SetupStep::TestAudioOutput);
         });
 
         self.chat_view.add_setup_card(
             "starred-symbolic",
             "Welcome to AiOS!",
             "I'm your AI assistant. Let's set up your system together.\n\
-             You can speak to me or type your answers.",
+             First, let's check your audio.",
             Some(btn.upcast_ref()),
         );
 
         self.speak(
             "Welcome to AiOS! I'm your AI assistant. \
              Let's set up your system together.",
+        );
+    }
+
+    // -- Step 1b: Test Audio Output -----------------------------------------
+
+    fn show_test_audio_output(&self) {
+        let input_box = gtk::Box::new(Orientation::Vertical, 8);
+        input_box.set_margin_top(8);
+
+        // "Replay" button — speaks the test phrase again.
+        let replay_btn = gtk::Button::with_label("\u{1f50a} Replay Audio");
+        replay_btn.set_halign(Align::Start);
+
+        let this_for_replay = self.clone();
+        replay_btn.connect_clicked(move |_| {
+            this_for_replay.speak("Can you hear me? This is AiOS speaking.");
+        });
+        input_box.append(&replay_btn);
+
+        // Row of yes/no buttons.
+        let btn_box = gtk::Box::new(Orientation::Horizontal, 8);
+        btn_box.set_margin_top(4);
+
+        let yes_btn = gtk::Button::with_label("\u{2705} Yes, I can hear");
+        yes_btn.add_css_class("suggested-action");
+        let this = self.clone();
+        yes_btn.connect_clicked(move |_| {
+            this.chat_view.add_message("user", "Yes, I can hear the audio");
+            this.advance(SetupStep::TestAudioInput);
+        });
+        btn_box.append(&yes_btn);
+
+        let no_btn = gtk::Button::with_label("\u{274c} No audio / Skip");
+        let this = self.clone();
+        no_btn.connect_clicked(move |_| {
+            this.chat_view.add_message("user", "Skip audio test");
+            this.chat_view.add_message("system",
+                "Audio output skipped. You can configure it later in Settings.");
+            this.advance(SetupStep::ChooseProvider);
+        });
+        btn_box.append(&no_btn);
+        input_box.append(&btn_box);
+
+        self.chat_view.add_setup_card(
+            "audio-speakers-symbolic",
+            "Test Audio Output",
+            "Let's check if you can hear me.\n\
+             I'll play a test message. Click Replay if you need to hear it again.",
+            Some(input_box.upcast_ref()),
+        );
+
+        // Speak the test phrase.
+        self.speak("Can you hear me? This is AiOS speaking.");
+    }
+
+    // -- Step 1c: Test Audio Input ------------------------------------------
+
+    fn show_test_audio_input(&self) {
+        let input_box = gtk::Box::new(Orientation::Vertical, 8);
+        input_box.set_margin_top(8);
+
+        let status_label = gtk::Label::new(Some(
+            "\u{1f3a4} Listening... Say something like \"Hello AiOS\"",
+        ));
+        status_label.set_halign(Align::Start);
+        status_label.add_css_class("dim-label");
+        input_box.append(&status_label);
+
+        // Manual skip button.
+        let skip_btn = gtk::Button::with_label("Skip mic test \u{2192}");
+        skip_btn.set_halign(Align::Start);
+        skip_btn.set_margin_top(8);
+
+        let this = self.clone();
+        skip_btn.connect_clicked(move |_| {
+            this.chat_view.add_message("user", "Skip mic test");
+            this.chat_view.add_message("system",
+                "Mic test skipped. You can configure voice input later in Settings.");
+            this.advance(SetupStep::ChooseProvider);
+        });
+        input_box.append(&skip_btn);
+
+        self.chat_view.add_setup_card(
+            "audio-input-microphone-symbolic",
+            "Test Microphone",
+            "Now let's check your microphone.\n\
+             Say something \u{2014} I'll show you what I hear.",
+            Some(input_box.upcast_ref()),
+        );
+
+        self.speak(
+            "Now let's test your microphone. Please say something.",
         );
     }
 

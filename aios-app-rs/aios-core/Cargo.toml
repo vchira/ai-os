@@ -16,6 +16,8 @@ tokio = { workspace = true }
 argon2 = "0.5"
 aes-gcm = "0.10"
 rand = "0.9"
+regex = { workspace = true }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

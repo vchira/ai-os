@@ -25,7 +25,9 @@ pub const DEFAULTS_JSON: &str = r#"{
         "tts_enabled": true,
         "tts_voice": "en_US-amy-medium",
         "tts_gender": "female",
-        "tts_rate": 1.0
+        "tts_rate": 1.0,
+        "wake_word": "hey aios",
+        "wake_enabled": true
     },
     "ui": {
         "theme": "dark",

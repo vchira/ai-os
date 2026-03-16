@@ -1,15 +1,20 @@
-//! Text input area with send and push-to-talk buttons.
+//! Text input area with send, push-to-talk, and slash-command autocomplete.
 //!
 //! [`PromptInput`] wraps a horizontal `gtk::Box` containing a text entry,
 //! a send button, and a push-to-talk button. It exposes an `on_submit`
 //! method to register a callback that fires when the user presses Enter
 //! or clicks Send.
+//!
+//! When the user types `/` followed by letters, an autocomplete popover
+//! appears showing matching slash commands.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{self as gtk, Orientation};
+use gtk4::{self as gtk, Align, Orientation};
+
+use aios_core::config::commands::command_list;
 
 // ---------------------------------------------------------------------------
 // PromptInput
@@ -21,7 +26,11 @@ pub struct PromptInput {
     container: gtk::Box,
     entry: gtk::Entry,
     send_button: gtk::Button,
-    ptt_button: gtk::Button,
+    /// Mic status indicator (replaces push-to-talk).
+    /// Green = listening for wake word, red/grey = muted.
+    mic_indicator: gtk::Button,
+    popover: gtk::Popover,
+    list_box: gtk::ListBox,
     /// Shared callback invoked when the user submits text.
     on_submit_cb: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
 }
@@ -49,25 +58,46 @@ impl PromptInput {
         send_button.set_tooltip_text(Some("Send message"));
         container.append(&send_button);
 
-        // Push-to-talk button.
-        let ptt_button = gtk::Button::from_icon_name("microphone-symbolic");
-        ptt_button.add_css_class("circular");
-        ptt_button.set_tooltip_text(Some("Push to talk"));
-        container.append(&ptt_button);
+        // Mic status indicator (always-listening wake word).
+        // Green = listening, red = muted, grey = disabled.
+        let mic_indicator = gtk::Button::from_icon_name("audio-input-microphone-symbolic");
+        mic_indicator.add_css_class("circular");
+        mic_indicator.add_css_class("mic-muted"); // starts muted until configured
+        mic_indicator.set_tooltip_text(Some("Mic: muted (click to toggle)"));
+        container.append(&mic_indicator);
 
         let on_submit_cb: Rc<RefCell<Option<Box<dyn Fn(String)>>>> =
             Rc::new(RefCell::new(None));
+
+        // --- Autocomplete popover ---
+        let list_box = gtk::ListBox::new();
+        list_box.set_selection_mode(gtk::SelectionMode::Single);
+
+        let scrolled = gtk::ScrolledWindow::builder()
+            .max_content_height(250)
+            .propagate_natural_height(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
+        scrolled.set_child(Some(&list_box));
+
+        let popover = gtk::Popover::new();
+        popover.set_parent(&entry);
+        popover.set_child(Some(&scrolled));
+        popover.set_autohide(false); // We manage visibility ourselves
+        popover.set_position(gtk::PositionType::Top);
 
         let prompt = Self {
             container,
             entry,
             send_button,
-            ptt_button,
+            mic_indicator,
+            popover,
+            list_box,
             on_submit_cb,
         };
 
-        // Wire internal signals.
         prompt.connect_internal_signals();
+        prompt.connect_autocomplete();
 
         prompt
     }
@@ -85,12 +115,50 @@ impl PromptInput {
         *self.on_submit_cb.borrow_mut() = Some(Box::new(callback));
     }
 
+    /// Enable or disable the input field and send button.
+    #[allow(dead_code)]
+    ///
+    /// When disabled, the entry shows a hint and the user cannot type or send.
+    /// Call this with `false` when no API key is configured.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.entry.set_sensitive(enabled);
+        self.send_button.set_sensitive(enabled);
+        if enabled {
+            self.entry
+                .set_placeholder_text(Some("Type a message or /command..."));
+        } else {
+            self.entry
+                .set_placeholder_text(Some("Configure an API key to start chatting (/key)"));
+        }
+    }
+
+    /// Update the mic indicator state.
+    #[allow(dead_code)]
+    pub fn set_mic_listening(&self, listening: bool) {
+        self.mic_indicator.remove_css_class("mic-listening");
+        self.mic_indicator.remove_css_class("mic-muted");
+        if listening {
+            self.mic_indicator.add_css_class("mic-listening");
+            self.mic_indicator.set_tooltip_text(Some(
+                "Mic: listening for wake word (click to mute)",
+            ));
+        } else {
+            self.mic_indicator.add_css_class("mic-muted");
+            self.mic_indicator.set_tooltip_text(Some("Mic: muted (click to toggle)"));
+        }
+    }
+
     /// Wire up Enter key and Send button to the submit handler.
     fn connect_internal_signals(&self) {
         // Enter key in the entry.
         let cb = self.on_submit_cb.clone();
         let entry = self.entry.clone();
+        let popover = self.popover.clone();
         self.entry.connect_activate(move |e| {
+            // If popover is showing, don't submit — let autocomplete handle it.
+            if popover.is_visible() {
+                return;
+            }
             let text = e.text().to_string();
             if text.trim().is_empty() {
                 return;
@@ -115,9 +183,187 @@ impl PromptInput {
             entry.set_text("");
         });
 
-        // Push-to-talk: placeholder — just log for now.
-        self.ptt_button.connect_clicked(|_| {
-            tracing::info!("Push-to-talk clicked (not yet implemented)");
+        // Mic indicator: toggle mute on click.
+        let mic = self.mic_indicator.clone();
+        self.mic_indicator.connect_clicked(move |btn| {
+            if btn.has_css_class("mic-listening") {
+                btn.remove_css_class("mic-listening");
+                btn.add_css_class("mic-muted");
+                btn.set_tooltip_text(Some("Mic: muted (click to toggle)"));
+                tracing::info!("Mic muted");
+            } else {
+                btn.remove_css_class("mic-muted");
+                btn.add_css_class("mic-listening");
+                btn.set_tooltip_text(Some("Mic: listening for wake word (click to mute)"));
+                tracing::info!("Mic listening");
+            }
+            let _ = mic; // suppress unused
         });
+    }
+
+    /// Set up the slash-command autocomplete popover.
+    fn connect_autocomplete(&self) {
+        let entry = self.entry.clone();
+        let popover = self.popover.clone();
+        let list_box = self.list_box.clone();
+        let commands = command_list();
+
+        // When the entry text changes, filter and show/hide the popover.
+        let entry_for_changed = entry.clone();
+        let popover_for_changed = popover.clone();
+        let list_box_for_changed = list_box.clone();
+        entry.connect_changed(move |_| {
+            let text = entry_for_changed.text().to_string();
+
+            // Only show when text starts with '/' and has no spaces.
+            if !text.starts_with('/') || text.contains(' ') || text.len() < 1 {
+                popover_for_changed.popdown();
+                return;
+            }
+
+            let filter = text.to_lowercase();
+
+            // Filter matching commands.
+            let matches: Vec<_> = commands
+                .iter()
+                .filter(|c| c.command.starts_with(&filter))
+                .collect();
+
+            if matches.is_empty() {
+                popover_for_changed.popdown();
+                return;
+            }
+
+            // Rebuild list box rows.
+            while let Some(child) = list_box_for_changed.first_child() {
+                list_box_for_changed.remove(&child);
+            }
+
+            for cmd_info in &matches {
+                let row_box = gtk::Box::new(Orientation::Horizontal, 10);
+                row_box.set_margin_start(8);
+                row_box.set_margin_end(8);
+                row_box.set_margin_top(4);
+                row_box.set_margin_bottom(4);
+
+                let cmd_label = gtk::Label::new(Some(cmd_info.command));
+                cmd_label.set_halign(Align::Start);
+                cmd_label.add_css_class("heading");
+                row_box.append(&cmd_label);
+
+                let desc_label = gtk::Label::new(Some(cmd_info.description));
+                desc_label.set_halign(Align::Start);
+                desc_label.set_hexpand(true);
+                desc_label.set_opacity(0.6);
+                row_box.append(&desc_label);
+
+                list_box_for_changed.append(&row_box);
+            }
+
+            // Select first row.
+            if let Some(first) = list_box_for_changed.row_at_index(0) {
+                list_box_for_changed.select_row(Some(&first));
+            }
+
+            popover_for_changed.popup();
+        });
+
+        // When user clicks a row, insert the command.
+        let entry_for_activate = entry.clone();
+        let popover_for_activate = popover.clone();
+        list_box.connect_row_activated(move |lb, row| {
+            let idx = row.index();
+            let text = entry_for_activate.text().to_string();
+            let filter = text.to_lowercase();
+            let cmds = command_list();
+            let matches: Vec<_> = cmds
+                .iter()
+                .filter(|c| c.command.starts_with(&filter))
+                .collect();
+
+            if let Some(cmd) = matches.get(idx as usize) {
+                // Commands that take args get a trailing space.
+                let insert = if ["/help", "/tools", "/info", "/clear", "/configure"]
+                    .contains(&cmd.command)
+                {
+                    cmd.command.to_string()
+                } else {
+                    format!("{} ", cmd.command)
+                };
+                entry_for_activate.set_text(&insert);
+                entry_for_activate.set_position(insert.len() as i32);
+            }
+
+            popover_for_activate.popdown();
+            let _ = lb; // suppress unused
+        });
+
+        // Keyboard navigation for popover.
+        let popover_for_key = popover.clone();
+        let entry_for_key = entry.clone();
+        let entry_for_controller = entry.clone();
+        let list_box_for_key = list_box.clone();
+        let key_controller = gtk::EventControllerKey::new();
+        key_controller.connect_key_pressed(move |_, key, _, _| {
+            if !popover_for_key.is_visible() {
+                return gtk::glib::Propagation::Proceed;
+            }
+
+            match key {
+                gtk::gdk::Key::Escape => {
+                    popover_for_key.popdown();
+                    gtk::glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Return | gtk::gdk::Key::Tab => {
+                    // Accept selected row — insert command text.
+                    if let Some(row) = list_box_for_key.selected_row() {
+                        let idx = row.index();
+                        let text = entry_for_key.text().to_string();
+                        let filter = text.to_lowercase();
+                        let cmds = command_list();
+                        let matches: Vec<_> = cmds.iter()
+                            .filter(|c| c.command.starts_with(&filter))
+                            .collect();
+                        if let Some(cmd) = matches.get(idx as usize) {
+                            let insert = if ["/help", "/tools", "/info", "/clear", "/configure"]
+                                .contains(&cmd.command)
+                            {
+                                cmd.command.to_string()
+                            } else {
+                                format!("{} ", cmd.command)
+                            };
+                            entry_for_key.set_text(&insert);
+                            entry_for_key.set_position(insert.len() as i32);
+                        }
+                    }
+                    popover_for_key.popdown();
+                    gtk::glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Down => {
+                    // Move selection down.
+                    if let Some(row) = list_box_for_key.selected_row() {
+                        let next_idx = row.index() + 1;
+                        if let Some(next) = list_box_for_key.row_at_index(next_idx) {
+                            list_box_for_key.select_row(Some(&next));
+                        }
+                    }
+                    gtk::glib::Propagation::Stop
+                }
+                gtk::gdk::Key::Up => {
+                    // Move selection up.
+                    if let Some(row) = list_box_for_key.selected_row() {
+                        let prev_idx = row.index() - 1;
+                        if prev_idx >= 0 {
+                            if let Some(prev) = list_box_for_key.row_at_index(prev_idx) {
+                                list_box_for_key.select_row(Some(&prev));
+                            }
+                        }
+                    }
+                    gtk::glib::Propagation::Stop
+                }
+                _ => gtk::glib::Propagation::Proceed,
+            }
+        });
+        entry_for_controller.add_controller(key_controller);
     }
 }

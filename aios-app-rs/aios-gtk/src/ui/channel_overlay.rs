@@ -59,6 +59,7 @@ const OVERLAY_CSS: &str = r#"
 /// - A subtitle with guidance
 /// - A "Switch back here" button
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct ChannelOverlay {
     /// The overlay container (covers the full chat area).
     widget: gtk::Box,
@@ -146,7 +147,6 @@ impl ChannelOverlay {
     }
 
     /// Show the overlay with a message for the given channel.
-    #[allow(dead_code)]
     pub fn show(&self, channel: ChannelKind) {
         let (title, icon_name) = match channel {
             ChannelKind::Signal => ("AI is talking on Signal", "phone-symbolic"),
@@ -165,13 +165,11 @@ impl ChannelOverlay {
     }
 
     /// Hide the overlay (when Desktop becomes the active channel again).
-    #[allow(dead_code)]
     pub fn hide(&self) {
         self.widget.set_visible(false);
     }
 
     /// Connect the "Switch back here" button to a callback.
-    #[allow(dead_code)]
     pub fn on_switch_back(&self, cb: impl Fn() + 'static) {
         self.switch_button.connect_clicked(move |_| {
             cb();

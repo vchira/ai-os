@@ -84,6 +84,21 @@ const APP_CSS: &str = r#"
 .status-available { color: #2ed573; font-weight: 600; }
 .status-unavailable { color: #ff4757; font-weight: 600; }
 
+/* Mic indicator */
+.mic-listening {
+    color: #2ed573;
+    background-color: alpha(#2ed573, 0.15);
+}
+
+.mic-muted {
+    color: alpha(@window_fg_color, 0.3);
+}
+
+/* Disabled prompt */
+.prompt-entry:disabled {
+    opacity: 0.4;
+}
+
 .code-block {
     background-color: alpha(@window_fg_color, 0.05);
     border-radius: 6px;

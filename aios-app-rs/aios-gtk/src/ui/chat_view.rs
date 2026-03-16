@@ -90,7 +90,10 @@ impl ChatView {
             match part {
                 ContentPart::Text(text) => {
                     if !text.is_empty() {
-                        let label = gtk::Label::new(Some(&text));
+                        // Convert rich text markup (**bold**, *italic*, etc.) to Pango.
+                        let pango = aios_core::types::to_pango(&text);
+                        let label = gtk::Label::new(None);
+                        label.set_markup(&pango);
                         label.set_wrap(true);
                         label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
                         label.set_xalign(0.0);

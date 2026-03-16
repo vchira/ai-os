@@ -28,6 +28,7 @@
 //! * [`audio`] — Audio capture, playback, and voice activity detection (VAD).
 //! * [`stt`] — Speech-to-text engine trait and backends (Whisper).
 //! * [`tts`] — Text-to-speech engine trait and backends (Piper, eSpeak-ng).
+//! * [`wake`] — Wake word detection (always-listening trigger phrase).
 //! * [`controller`] — High-level orchestrator that wires everything together.
 //! * [`error`] — Voice-specific error types.
 
@@ -36,9 +37,11 @@ pub mod controller;
 pub mod error;
 pub mod stt;
 pub mod tts;
+pub mod wake;
 
 // Re-export the most commonly used items at the crate root.
 pub use controller::VoiceController;
 pub use error::{Result, VoiceError};
 pub use stt::{SttBackend, SttEngine, TranscriptionResult};
 pub use tts::{TtsBackend, TtsEngine, VoiceInfo};
+pub use wake::{WakeWordConfig, WakeWordDetector, WakeWordEvent};

@@ -78,14 +78,17 @@ fn test_config_roundtrip(ctx: &mut TestContext) -> TestResult {
 
     let _ = std::fs::remove_dir_all(&dir);
 
-    match res {
-        Ok(()) => {
-            (ctx.display)("selftest", &format!("[PASS] {name}"));
-            TestResult { name: name.into(), passed: true, detail: "Config round-trips correctly".into(), interactive: false }
-        }
-        Err(e) => {
-            (ctx.display)("selftest", &format!("[FAIL] {name}: {e}"));
-            TestResult { name: name.into(), passed: false, detail: e, interactive: false }
+    {
+        use crate::types::MessageLevel;
+        match res {
+            Ok(()) => {
+                (ctx.display)("selftest", &MessageLevel::Success.format(&format!("[PASS] {name}")));
+                TestResult { name: name.into(), passed: true, detail: "Config round-trips correctly".into(), interactive: false }
+            }
+            Err(e) => {
+                (ctx.display)("selftest", &MessageLevel::Error.format(&format!("[FAIL] {name}: {e}")));
+                TestResult { name: name.into(), passed: false, detail: e, interactive: false }
+            }
         }
     }
 }
@@ -424,12 +427,14 @@ fn test_tool_schema(ctx: &mut TestContext) -> TestResult {
 // ---------------------------------------------------------------------------
 
 fn test_interactive_panel_text(ctx: &mut TestContext) -> TestResult {
+    use crate::types::MessageLevel;
+
     let name = "interactive: ui_panel text input";
 
     if ctx.show_panel.is_none() {
         (ctx.display)(
             "selftest",
-            &format!("[SKIP] {name}: no panel callback on this channel"),
+            &MessageLevel::Warning.format(&format!("[SKIP] {name}: no panel callback on this channel")),
         );
         return TestResult {
             name: name.into(),
@@ -441,7 +446,7 @@ fn test_interactive_panel_text(ctx: &mut TestContext) -> TestResult {
 
     (ctx.display)(
         "selftest",
-        "A panel will appear asking you to type something. Please fill it in and click Submit.",
+        &MessageLevel::Info.format("A panel will appear asking you to type something. Please fill it in and click Submit."),
     );
 
     let panel_req = serde_json::json!({
@@ -465,7 +470,7 @@ fn test_interactive_panel_text(ctx: &mut TestContext) -> TestResult {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             if input.trim().is_empty() {
-                (ctx.display)("selftest", &format!("[FAIL] {name}: empty input"));
+                (ctx.display)("selftest", &MessageLevel::Error.format(&format!("[FAIL] {name}: empty input")));
                 TestResult {
                     name: name.into(),
                     passed: false,
@@ -475,7 +480,7 @@ fn test_interactive_panel_text(ctx: &mut TestContext) -> TestResult {
             } else {
                 (ctx.display)(
                     "selftest",
-                    &format!("[PASS] {name}: received '{input}'"),
+                    &MessageLevel::Success.format(&format!("[PASS] {name}: received '{input}'")),
                 );
                 TestResult {
                     name: name.into(),
@@ -486,7 +491,7 @@ fn test_interactive_panel_text(ctx: &mut TestContext) -> TestResult {
             }
         }
         None => {
-            (ctx.display)("selftest", &format!("[FAIL] {name}: panel cancelled or unavailable"));
+            (ctx.display)("selftest", &MessageLevel::Error.format(&format!("[FAIL] {name}: panel cancelled or unavailable")));
             TestResult {
                 name: name.into(),
                 passed: false,
@@ -498,12 +503,14 @@ fn test_interactive_panel_text(ctx: &mut TestContext) -> TestResult {
 }
 
 fn test_interactive_panel_choice(ctx: &mut TestContext) -> TestResult {
+    use crate::types::MessageLevel;
+
     let name = "interactive: ui_panel choice";
 
     if ctx.show_panel.is_none() {
         (ctx.display)(
             "selftest",
-            &format!("[SKIP] {name}: no panel callback on this channel"),
+            &MessageLevel::Warning.format(&format!("[SKIP] {name}: no panel callback on this channel")),
         );
         return TestResult {
             name: name.into(),
@@ -515,7 +522,7 @@ fn test_interactive_panel_choice(ctx: &mut TestContext) -> TestResult {
 
     (ctx.display)(
         "selftest",
-        "A panel will appear with a choice. Please select one option and click Submit.",
+        &MessageLevel::Info.format("A panel will appear with a choice. Please select one option and click Submit."),
     );
 
     let panel_req = serde_json::json!({
@@ -544,7 +551,7 @@ fn test_interactive_panel_choice(ctx: &mut TestContext) -> TestResult {
             if ["red", "blue", "green"].contains(&choice) {
                 (ctx.display)(
                     "selftest",
-                    &format!("[PASS] {name}: user chose '{choice}'"),
+                    &MessageLevel::Success.format(&format!("[PASS] {name}: user chose '{choice}'")),
                 );
                 TestResult {
                     name: name.into(),
@@ -553,7 +560,7 @@ fn test_interactive_panel_choice(ctx: &mut TestContext) -> TestResult {
                     interactive: true,
                 }
             } else {
-                (ctx.display)("selftest", &format!("[FAIL] {name}: invalid choice '{choice}'"));
+                (ctx.display)("selftest", &MessageLevel::Error.format(&format!("[FAIL] {name}: invalid choice '{choice}'")));
                 TestResult {
                     name: name.into(),
                     passed: false,
@@ -563,7 +570,7 @@ fn test_interactive_panel_choice(ctx: &mut TestContext) -> TestResult {
             }
         }
         None => {
-            (ctx.display)("selftest", &format!("[FAIL] {name}: cancelled"));
+            (ctx.display)("selftest", &MessageLevel::Error.format(&format!("[FAIL] {name}: cancelled")));
             TestResult {
                 name: name.into(),
                 passed: false,
@@ -579,9 +586,11 @@ fn test_interactive_panel_choice(ctx: &mut TestContext) -> TestResult {
 // ---------------------------------------------------------------------------
 
 fn make_result(name: &str, res: Result<String, String>, ctx: &mut TestContext) -> TestResult {
+    use crate::types::MessageLevel;
+
     match res {
         Ok(detail) => {
-            (ctx.display)("selftest", &format!("[PASS] {name}"));
+            (ctx.display)("selftest", &MessageLevel::Success.format(&format!("[PASS] {name}")));
             TestResult {
                 name: name.into(),
                 passed: true,
@@ -590,7 +599,7 @@ fn make_result(name: &str, res: Result<String, String>, ctx: &mut TestContext) -
             }
         }
         Err(e) => {
-            (ctx.display)("selftest", &format!("[FAIL] {name}: {e}"));
+            (ctx.display)("selftest", &MessageLevel::Error.format(&format!("[FAIL] {name}: {e}")));
             TestResult {
                 name: name.into(),
                 passed: false,
