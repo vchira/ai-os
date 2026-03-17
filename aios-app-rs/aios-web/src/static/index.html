@@ -487,28 +487,30 @@ function showPanel(id, request) {
     html += `<div class="field">`;
     html += `<label>${esc(f.label)}${f.required ? ' *' : ''}</label>`;
 
+    const defVal = f.default_value !== undefined ? f.default_value : (f.default !== undefined ? f.default : '');
     switch (f.type || f.field_type) {
       case 'text':
       case 'date':
-        html += `<input type="text" data-id="${esc(f.id)}" placeholder="${esc(f.placeholder || '')}">`;
+        html += `<input type="text" data-id="${esc(f.id)}" placeholder="${esc(f.placeholder || '')}" value="${esc(defVal)}">`;
         break;
       case 'password':
-        html += `<input type="password" data-id="${esc(f.id)}" placeholder="${esc(f.placeholder || '')}">`;
+        html += `<input type="password" data-id="${esc(f.id)}" placeholder="${esc(f.placeholder || '')}" value="${esc(defVal)}">`;
         break;
       case 'number':
-        html += `<input type="number" data-id="${esc(f.id)}" min="${f.min||''}" max="${f.max||''}" step="${f.step||1}">`;
+        html += `<input type="number" data-id="${esc(f.id)}" min="${f.min||''}" max="${f.max||''}" step="${f.step||1}" value="${esc(defVal)}">`;
         break;
       case 'toggle':
-        html += `<input type="checkbox" data-id="${esc(f.id)}" style="width:auto">`;
+        html += `<input type="checkbox" data-id="${esc(f.id)}" style="width:auto"${defVal ? ' checked' : ''}>`;
         break;
       case 'multiline':
-        html += `<textarea data-id="${esc(f.id)}" placeholder="${esc(f.placeholder || '')}"></textarea>`;
+        html += `<textarea data-id="${esc(f.id)}" placeholder="${esc(f.placeholder || '')}">${esc(defVal)}</textarea>`;
         break;
       case 'choice':
       case 'dropdown':
         html += `<select data-id="${esc(f.id)}">`;
         (f.options || []).forEach(o => {
-          html += `<option value="${esc(o.value)}">${esc(o.label)}</option>`;
+          const sel = String(o.value) === String(defVal) ? ' selected' : '';
+          html += `<option value="${esc(o.value)}"${sel}>${esc(o.label)}</option>`;
         });
         html += `</select>`;
         break;
