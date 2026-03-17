@@ -7,6 +7,9 @@
 /// This is parsed at runtime and deep-merged with the user's saved config
 /// so that any newly added keys are automatically present.
 pub const DEFAULTS_JSON: &str = r#"{
+    "assistant": {
+        "name": "Assistant"
+    },
     "llm": {
         "provider": "claude",
         "claude_api_key": "",
@@ -26,7 +29,7 @@ pub const DEFAULTS_JSON: &str = r#"{
         "tts_voice": "en_US-amy-medium",
         "tts_gender": "female",
         "tts_rate": 1.0,
-        "wake_word": "hey aios",
+        "wake_word": "Assistant",
         "wake_enabled": true
     },
     "ui": {
@@ -37,7 +40,8 @@ pub const DEFAULTS_JSON: &str = r#"{
         "keyboard_layout": "us",
         "keyboard_variant": "",
         "locale": "en_US.UTF-8",
-        "timezone": ""
+        "timezone": "",
+        "machine_name": "assistant"
     },
     "tools": {
         "plugins_dir": "~/.aios/plugins",

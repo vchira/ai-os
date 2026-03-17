@@ -317,7 +317,7 @@ Available commands:
     fn cmd_wake(&mut self, args: &str) -> CommandResult {
         let phrase = args.trim();
         if phrase.is_empty() {
-            let current = self.config.get_str("voice.wake_word", "hey aios");
+            let current = self.config.get_str("voice.wake_word", "Assistant");
             let enabled = self.config.get_bool("voice.wake_enabled", true);
             let status = if enabled { "enabled" } else { "disabled" };
             return CommandResult::Response(format!(
@@ -335,7 +335,7 @@ Available commands:
             }
             "on" => {
                 let _ = self.config.set("voice.wake_enabled", json!(true));
-                let current = self.config.get_str("voice.wake_word", "hey aios");
+                let current = self.config.get_str("voice.wake_word", "Assistant");
                 CommandResult::Response(format!(
                     "Wake word detection enabled (phrase: \"{current}\")"
                 ))
@@ -934,7 +934,7 @@ mod tests {
         match result {
             CommandResult::Response(text) => {
                 assert!(text.contains("Wake word:"));
-                assert!(text.contains("hey aios"));
+                assert!(text.contains("Assistant"));
             }
             other => panic!("expected Response, got {other:?}"),
         }
