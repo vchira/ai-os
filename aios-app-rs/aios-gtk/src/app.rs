@@ -345,13 +345,44 @@ impl AiosApp {
 
         let window = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay, &["Setup..."]);
 
-        // Show boot status before setup begins.
-        {
+        // Load config and create channel infrastructure for setup mode.
+        let mut config = match ConfigManager::new() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to load config for first-boot, using defaults: {e}");
+                match ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json")) {
+                    Ok(c) => c,
+                    Err(e2) => {
+                        error!("Fallback config also failed: {e2}");
+                        panic!("Cannot initialize configuration from any path");
+                    }
+                }
+            }
+        };
+
+        // Create the shared AppRuntime for multi-channel orchestration.
+        let runtime = aios_core::channel::AppRuntime::new();
+
+        // Register Desktop channel (always available).
+        runtime.switcher.register_channel(
+            aios_core::channel::ChannelKind::Desktop,
+            aios_core::channel::ChannelContext::desktop(),
+        );
+
+        // Build boot status text for setup mode.
+        let boot_status_text = {
             use aios_core::types::{BootStatus, StatusLine};
             let mut status = BootStatus::new();
 
             status.add(StatusLine::new("Desktop", true, "GTK4/libadwaita"));
-            status.add(StatusLine::new("Web Channel", true, "http://aios.local"));
+
+            let web_enabled = config.get_bool("channels.web.enabled", true);
+            let web_port = config.get_str("channels.web.port", "80");
+            if web_enabled {
+                status.add(StatusLine::new("Web Channel", true, format!("http://aios.local:{web_port}")));
+            } else {
+                status.add(StatusLine::new("Web Channel", false, "disabled (/channel web on)"));
+            }
 
             // Check audio
             let has_piper = std::path::Path::new("/usr/bin/piper").exists();
@@ -362,25 +393,29 @@ impl AiosApp {
             status.add(StatusLine::new("Audio Input (STT)", has_whisper, if has_whisper { "Whisper" } else { "not installed" }));
 
             // System info
-            let kb = std::fs::read_to_string("/etc/default/keyboard")
-                .ok()
-                .and_then(|s| s.lines().find(|l| l.starts_with("XKBLAYOUT")).map(|l| {
-                    l.split('"').nth(1).unwrap_or("us").to_string()
-                }))
-                .unwrap_or_else(|| "us".into());
+            let kb = config.get_str("system.keyboard_layout", "us");
             let tz = std::fs::read_to_string("/etc/timezone")
                 .unwrap_or_else(|_| "UTC".into()).trim().to_string();
-            status.add(StatusLine::new("Keyboard", true, &kb));
-            status.add(StatusLine::new("Timezone", true, &tz));
-
             let boot_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            status.add(StatusLine::new("Boot time", true, &boot_time));
+            status.add(StatusLine::new("Keyboard", true, kb));
+            status.add(StatusLine::new("Timezone", true, &tz));
+            status.add(StatusLine::new("Boot time", true, boot_time));
 
-            chat_view.add_level_message(aios_core::types::MessageLevel::Info, &status.format());
-        }
+            status.format()
+        };
 
-        // Create the setup conversation.
-        let setup = SetupConversation::new(chat_view.clone());
+        // Start the web server so the setup wizard is also available via browser.
+        let _web_server = Self::start_web_server(
+            &mut config,
+            &runtime,
+            Some(boot_status_text.clone()),
+        );
+
+        // Show boot status on Desktop.
+        chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
+
+        // Create the setup conversation with config for pre-filling API keys.
+        let setup = SetupConversation::new(chat_view.clone(), Some(config));
 
         // On completion: create vault, store secrets, transition to normal mode.
         let app_ref = app.clone();
@@ -799,35 +834,11 @@ impl AiosApp {
         );
 
         // Start Web server if enabled.
-        let web_server = if web_enabled {
-            let port: u16 = web_port.parse().unwrap_or(80);
-            let web_tx = runtime.message_sender();
-            // Generate or load auth token for web access.
-            let web_token = config.get_str("channels.web.token", "");
-            let web_token = if web_token.is_empty() {
-                let token = uuid::Uuid::new_v4().to_string().replace("-", "")[..16].to_string();
-                let _ = config.set("channels.web.token", serde_json::json!(token));
-                info!("Generated web auth token: {token}");
-                Some(token)
-            } else {
-                Some(web_token)
-            };
-            let server = aios_web::server::WebServer::new(
-                port, web_tx, web_token,
-                Some(runtime.switcher.clone()),
-                Some(boot_status_text.clone()),
-            );
-            let response_tx = server.response_tx.clone();
-            server.start();
-            runtime.switcher.register_channel(
-                aios_core::channel::ChannelKind::Web,
-                aios_core::channel::ChannelContext::web(),
-            );
-            info!("Web channel started on port {port}");
-            Some(response_tx)
-        } else {
-            None
-        };
+        let web_server = Self::start_web_server(
+            &mut config,
+            &runtime,
+            Some(boot_status_text.clone()),
+        );
 
         // Start Signal listener if enabled.
         let signal_sender = if signal_enabled && !signal_phone.is_empty() {
@@ -1142,6 +1153,56 @@ impl AiosApp {
         });
 
         window.present();
+    }
+
+    /// Start the web server if enabled in config.
+    ///
+    /// Reads web-channel settings from `config`, generates or loads an auth
+    /// token, creates a [`aios_web::server::WebServer`], starts it, and
+    /// registers the Web channel on the given `runtime`.
+    ///
+    /// Returns `Some(broadcast::Sender)` for routing AI responses to web
+    /// clients, or `None` if the web channel is disabled.
+    fn start_web_server(
+        config: &mut ConfigManager,
+        runtime: &aios_core::channel::AppRuntime,
+        welcome_message: Option<String>,
+    ) -> Option<tokio::sync::broadcast::Sender<String>> {
+        let web_enabled = config.get_bool("channels.web.enabled", true);
+        if !web_enabled {
+            return None;
+        }
+
+        let web_port = config.get_str("channels.web.port", "80");
+        let port: u16 = web_port.parse().unwrap_or(80);
+        let web_tx = runtime.message_sender();
+
+        // Generate or load auth token for web access.
+        let web_token = config.get_str("channels.web.token", "");
+        let web_token = if web_token.is_empty() {
+            let token = uuid::Uuid::new_v4().to_string().replace("-", "")[..16].to_string();
+            let _ = config.set("channels.web.token", serde_json::json!(token));
+            info!("Generated web auth token: {token}");
+            Some(token)
+        } else {
+            Some(web_token)
+        };
+
+        let server = aios_web::server::WebServer::new(
+            port,
+            web_tx,
+            web_token,
+            Some(runtime.switcher.clone()),
+            welcome_message,
+        );
+        let response_tx = server.response_tx.clone();
+        server.start();
+        runtime.switcher.register_channel(
+            aios_core::channel::ChannelKind::Web,
+            aios_core::channel::ChannelContext::web(),
+        );
+        info!("Web channel started on port {port}");
+        Some(response_tx)
     }
 
     /// Initialize LLM providers from config.

@@ -12,6 +12,8 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, Align, Orientation};
 use tracing::info;
 
+use aios_core::config::ConfigManager;
+
 use super::chat_view::ChatView;
 
 // ---------------------------------------------------------------------------
@@ -103,15 +105,20 @@ impl Default for SetupState {
 pub struct SetupConversation {
     state: Rc<RefCell<SetupState>>,
     chat_view: ChatView,
+    config: Rc<RefCell<Option<ConfigManager>>>,
     on_complete_cb: Rc<RefCell<Option<Box<dyn Fn(SetupResult)>>>>,
 }
 
 impl SetupConversation {
     /// Create a new setup conversation that will display in the given chat view.
-    pub fn new(chat_view: ChatView) -> Self {
+    ///
+    /// If `config` is provided, API keys from the system config are used to
+    /// pre-fill entry fields and auto-select providers when only one has a key.
+    pub fn new(chat_view: ChatView, config: Option<ConfigManager>) -> Self {
         Self {
             state: Rc::new(RefCell::new(SetupState::default())),
             chat_view,
+            config: Rc::new(RefCell::new(config)),
             on_complete_cb: Rc::new(RefCell::new(None)),
         }
     }
@@ -513,6 +520,27 @@ impl SetupConversation {
     // -- Step 2: Choose Provider --------------------------------------------
 
     fn show_choose_provider(&self) {
+        // If only one provider has a key in config, auto-select it.
+        if let Some(ref config) = *self.config.borrow() {
+            let has_claude = !config.get_str("llm.claude_api_key", "").is_empty();
+            let has_openai = {
+                let k = config.get_str("llm.openai_api_key", "");
+                !k.is_empty() && k != "your-api-key-here"
+            };
+            if has_claude && !has_openai {
+                self.chat_view.add_message("system",
+                    "Claude API key found in system config \u{2014} using Claude.");
+                self.select_provider("claude");
+                return;
+            }
+            if has_openai && !has_claude {
+                self.chat_view.add_message("system",
+                    "ChatGPT API key found in system config \u{2014} using ChatGPT.");
+                self.select_provider("openai");
+                return;
+            }
+        }
+
         let input_box = gtk::Box::new(Orientation::Vertical, 8);
         input_box.set_margin_top(8);
 
@@ -642,6 +670,22 @@ impl SetupConversation {
             .hexpand(true)
             .build();
         entry.add_css_class("setup-input");
+
+        // Pre-fill from config if an API key already exists.
+        if let Some(ref config) = *self.config.borrow() {
+            let config_key = match provider.as_str() {
+                "claude" => "llm.claude_api_key",
+                "openai" => "llm.openai_api_key",
+                _ => "",
+            };
+            if !config_key.is_empty() {
+                let existing = config.get_str(config_key, "");
+                if !existing.is_empty() && existing != "your-api-key-here" {
+                    entry.set_text(&existing);
+                }
+            }
+        }
+
         input_box.append(&entry);
 
         let error_label = gtk::Label::new(None);
@@ -951,11 +995,29 @@ impl SetupConversation {
 
     fn show_add_backup(&self) {
         let primary = self.state.borrow().primary_provider.clone();
+        let other = if primary == "claude" { "openai" } else { "claude" };
         let other_name = if primary == "claude" {
             "ChatGPT (OpenAI)"
         } else {
             "Claude"
         };
+
+        // If the other provider has no key in config, skip straight to Complete.
+        let other_has_key = if let Some(ref config) = *self.config.borrow() {
+            let key_name = match other {
+                "claude" => "llm.claude_api_key",
+                "openai" => "llm.openai_api_key",
+                _ => "",
+            };
+            let k = config.get_str(key_name, "");
+            !k.is_empty() && k != "your-api-key-here"
+        } else {
+            false
+        };
+        if !other_has_key {
+            self.advance(SetupStep::Complete);
+            return;
+        }
 
         let input_box = gtk::Box::new(Orientation::Vertical, 8);
         input_box.set_margin_top(8);
@@ -1089,26 +1151,37 @@ impl SetupConversation {
     // -- Step: Complete -----------------------------------------------------
 
     fn show_complete(&self) {
-        let s = self.state.borrow();
+        use aios_core::types::{BootStatus, StatusLine, MessageLevel};
 
-        let mut summary_lines = Vec::new();
+        let s = self.state.borrow();
+        let mut status = BootStatus::new();
+
         for (i, p) in s.providers.iter().enumerate() {
             let role = if i == 0 { "Primary" } else { "Backup" };
             let display = match p.name.as_str() {
-                "claude" => "Claude (Anthropic)",
-                "openai" => "ChatGPT (OpenAI)",
+                "claude" => "Claude",
+                "openai" => "ChatGPT",
                 other => other,
             };
-            summary_lines.push(format!("\u{2713} {display} as {}", role.to_lowercase()));
+            status.add(StatusLine::new(
+                &format!("{role} provider"),
+                true,
+                format!("{display} (API key stored)"),
+            ));
         }
-        summary_lines.push("\u{2713} Secure vault created".to_string());
+        status.add(StatusLine::new("Master password", true, "set"));
+        status.add(StatusLine::new("Vault", true, "created"));
+        status.add(StatusLine::new("Web Channel", true, "http://aios.local"));
 
-        let description = format!(
-            "Your AI is configured and your data is secured.\n{}",
-            summary_lines.join("\n")
-        );
         drop(s);
 
+        // Show the INFO summary.
+        self.chat_view.add_level_message(
+            MessageLevel::Info,
+            &format!("First-Boot Setup Complete\n\n{}", status.format()),
+        );
+
+        // "Start Chatting" button via a setup card (no description needed).
         let btn = gtk::Button::with_label("Start Chatting \u{2192}");
         btn.add_css_class("suggested-action");
         btn.add_css_class("pill");
@@ -1124,14 +1197,11 @@ impl SetupConversation {
         self.chat_view.add_setup_card(
             "emblem-default-symbolic",
             "You're All Set!",
-            &description,
+            "Your AI assistant is ready. Just start talking or typing.",
             Some(btn.upcast_ref()),
         );
 
-        self.speak(
-            "You're all set! Your AI assistant is ready. \
-             Just start talking or typing.",
-        );
+        self.speak("You're all set! Your AI assistant is ready.");
     }
 
     /// Invoke the completion callback with the accumulated setup result.
