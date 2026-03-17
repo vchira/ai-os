@@ -169,8 +169,13 @@ impl WebServer {
     /// Start the server in the background.
     ///
     /// Returns a `JoinHandle` for the server task.
+    ///
+    /// If binding to the configured port fails (e.g. port 80 without
+    /// capabilities), automatically falls back to port 8080.
     pub fn start(self) -> tokio::task::JoinHandle<()> {
-        let addr = format!("{}:{}", self.bind_addr, self.port);
+        let primary_addr = format!("{}:{}", self.bind_addr, self.port);
+        let fallback_port = if self.port == 80 { 8080 } else { self.port + 1 };
+        let fallback_addr = format!("{}:{}", self.bind_addr, fallback_port);
         let state = self.state.clone();
 
         tokio::spawn(async move {
@@ -179,14 +184,25 @@ impl WebServer {
                 .route("/ws", get(ws_upgrade))
                 .with_state(state);
 
-            info!("Web server starting on {addr}");
+            info!("Web server starting on {primary_addr}");
 
-            let listener = match tokio::net::TcpListener::bind(&addr).await {
-                Ok(l) => l,
+            let listener = match tokio::net::TcpListener::bind(&primary_addr).await {
+                Ok(l) => {
+                    info!("Web server bound to {primary_addr}");
+                    l
+                }
                 Err(e) => {
-                    error!("Failed to bind web server on {addr}: {e}");
-                    error!("If port 80, ensure 'setcap cap_net_bind_service=+ep /usr/bin/aios' was run");
-                    return;
+                    warn!("Failed to bind on {primary_addr}: {e} — trying port {fallback_port}");
+                    match tokio::net::TcpListener::bind(&fallback_addr).await {
+                        Ok(l) => {
+                            info!("Web server bound to {fallback_addr} (fallback)");
+                            l
+                        }
+                        Err(e2) => {
+                            error!("Failed to bind web server on {fallback_addr}: {e2}");
+                            return;
+                        }
+                    }
                 }
             };
 

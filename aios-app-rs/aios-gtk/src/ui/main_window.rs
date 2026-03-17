@@ -94,6 +94,9 @@ const APP_CSS: &str = r#"
     color: alpha(@window_fg_color, 0.3);
 }
 
+/* Muted voice toggle */
+.muted { color: #ff4757; }
+
 /* Disabled prompt */
 .prompt-entry:disabled {
     opacity: 0.4;
@@ -263,7 +266,7 @@ pub fn build_main_window(
     header.pack_end(&mic_button);
 
     let speaker_button = gtk::ToggleButton::new();
-    speaker_button.set_icon_name("audio-speakers-symbolic");
+    speaker_button.set_icon_name("audio-volume-high-symbolic");
     speaker_button.set_tooltip_text(Some("Toggle speaker"));
     speaker_button.set_widget_name(SPEAKER_BUTTON_NAME);
     speaker_button.set_active(true);
@@ -272,6 +275,7 @@ pub fn build_main_window(
     let settings_button = gtk::Button::from_icon_name("emblem-system-symbolic");
     settings_button.set_tooltip_text(Some("Settings"));
     settings_button.set_widget_name(SETTINGS_BUTTON_NAME);
+    settings_button.set_visible(false); // Hidden until setup completes
     header.pack_end(&settings_button);
 
     // --- Main content ---
@@ -316,6 +320,7 @@ pub fn build_main_window(
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
+        .title("AiOS")
         .default_width(700)
         .default_height(800)
         .content(&outer_box)
@@ -333,6 +338,30 @@ pub fn build_main_window(
 }
 
 // ---------------------------------------------------------------------------
+// Visibility helpers
+// ---------------------------------------------------------------------------
+
+/// Show or hide the settings button.
+pub fn set_settings_button_visible(window: &adw::ApplicationWindow, visible: bool) {
+    if let Some(button) = find_widget_by_name::<gtk::Button>(window.upcast_ref(), SETTINGS_BUTTON_NAME) {
+        button.set_visible(visible);
+    }
+}
+
+/// Update the provider dropdown model with the given provider names.
+pub fn update_provider_dropdown(window: &adw::ApplicationWindow, providers: &[&str]) {
+    if let Some(dropdown) = find_widget_by_name::<gtk::DropDown>(window.upcast_ref(), PROVIDER_DROPDOWN_NAME) {
+        let names: Vec<&str> = if providers.is_empty() {
+            vec!["No provider"]
+        } else {
+            providers.to_vec()
+        };
+        let model = gtk::StringList::new(&names);
+        dropdown.set_model(Some(&model));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Signal connectors
 // ---------------------------------------------------------------------------
 
@@ -343,13 +372,22 @@ pub fn connect_provider_dropdown(
 ) {
     if let Some(dropdown) = find_widget_by_name::<gtk::DropDown>(window.upcast_ref(), PROVIDER_DROPDOWN_NAME) {
         dropdown.connect_selected_notify(move |dd| {
+            // Read the actual selected string from the model instead of
+            // hardcoding index → name, since the dropdown may only show
+            // providers that have API keys configured.
             let selected = dd.selected();
-            let name = match selected {
-                0 => "Claude",
-                1 => "OpenAI",
-                _ => "Claude",
-            };
-            callback(name);
+            let name = dd
+                .model()
+                .and_then(|m| m.downcast::<gtk::StringList>().ok())
+                .and_then(|sl| {
+                    if selected < sl.n_items() {
+                        sl.string(selected).map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "Claude".to_string());
+            callback(&name);
         });
     }
 }
@@ -367,25 +405,47 @@ pub fn connect_settings_button(
 }
 
 /// Find the mic toggle button and connect its toggled signal.
+///
+/// When toggled ON: microphone icon, green tint.
+/// When toggled OFF: muted icon, red "muted" CSS class.
 pub fn connect_mic_toggle(
     window: &adw::ApplicationWindow,
     callback: impl Fn(bool) + 'static,
 ) {
     if let Some(button) = find_widget_by_name::<gtk::ToggleButton>(window.upcast_ref(), MIC_BUTTON_NAME) {
         button.connect_toggled(move |btn| {
-            callback(btn.is_active());
+            let active = btn.is_active();
+            if active {
+                btn.set_icon_name("audio-input-microphone-symbolic");
+                btn.remove_css_class("muted");
+            } else {
+                btn.set_icon_name("microphone-sensitivity-muted-symbolic");
+                btn.add_css_class("muted");
+            }
+            callback(active);
         });
     }
 }
 
 /// Find the speaker toggle button and connect its toggled signal.
+///
+/// When toggled ON: speaker icon, normal color.
+/// When toggled OFF: muted speaker icon, red "muted" CSS class.
 pub fn connect_speaker_toggle(
     window: &adw::ApplicationWindow,
     callback: impl Fn(bool) + 'static,
 ) {
     if let Some(button) = find_widget_by_name::<gtk::ToggleButton>(window.upcast_ref(), SPEAKER_BUTTON_NAME) {
         button.connect_toggled(move |btn| {
-            callback(btn.is_active());
+            let active = btn.is_active();
+            if active {
+                btn.set_icon_name("audio-volume-high-symbolic");
+                btn.remove_css_class("muted");
+            } else {
+                btn.set_icon_name("audio-volume-muted-symbolic");
+                btn.add_css_class("muted");
+            }
+            callback(active);
         });
     }
 }

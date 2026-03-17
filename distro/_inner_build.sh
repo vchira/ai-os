@@ -930,7 +930,11 @@ cat > /home/aios/.config/labwc/rc.xml << RCEOF
     <!-- Super key or Ctrl+Space opens AiOS -->
     <keybind key="Super_L"><action name="Execute"><command>/usr/bin/aios</command></action></keybind>
     <keybind key="C-space"><action name="Execute"><command>/usr/bin/aios</command></action></keybind>
+    <!-- Alt-Tab window switcher -->
+    <keybind key="A-Tab"><action name="NextWindow"/></keybind>
+    <keybind key="A-S-Tab"><action name="PreviousWindow"/></keybind>
   </keyboard>
+  <windowSwitcher show="yes" preview="yes" outlines="yes"/>
   <mouse>
     <context name="TitleBar">
       <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
@@ -1076,10 +1080,10 @@ mkdir -p config/bootloaders/isolinux
 # This replaces the auto-generated menu entirely.
 cat > config/bootloaders/isolinux/isolinux.cfg << 'BOOTEOF'
 ui vesamenu.c32
-timeout 50
+timeout 30
 prompt 0
 
-menu title AiOS — AI-Native Operating System
+menu title AiOS
 menu background splash.png
 
 menu color screen  0;37;40 #00000000 #00000000 none

@@ -14,7 +14,7 @@ use gtk4::prelude::*;
 use libadwaita as adw;
 use tracing::{debug, error, info, warn};
 
-use aios_core::config::commands::{CommandHandler, CommandResult};
+use aios_core::config::commands::{CommandHandler, CommandResult, PanelFieldKind};
 use aios_core::config::ConfigManager;
 use aios_core::secure::Vault;
 use aios_core::secure::vault::{SecretEntry, SecretKind};
@@ -345,6 +345,9 @@ impl AiosApp {
 
         let window = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay, &["Setup..."]);
 
+        // Hide the prompt input during setup — it will be shown in transition_to_normal_mode.
+        prompt_input.widget().set_visible(false);
+
         // Load config and create channel infrastructure for setup mode.
         let mut config = match ConfigManager::new() {
             Ok(c) => c,
@@ -419,6 +422,12 @@ impl AiosApp {
 
         // Show boot status on Desktop.
         chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
+
+        // Apply theme from config at startup.
+        {
+            let theme = config.get_str("ui.theme", "dark");
+            Self::apply_theme(&theme);
+        }
 
         // Check for hostname collision (set by aios-hostname-check.service at boot).
         if std::path::Path::new("/tmp/aios-name-conflict").exists() {
@@ -688,6 +697,19 @@ impl AiosApp {
             }
         }));
 
+        // Collect configured providers before config is moved into the state.
+        let configured_providers: Vec<&str> = {
+            let mut providers = Vec::new();
+            if !config.get_str("llm.claude_api_key", "").is_empty() {
+                providers.push("Claude");
+            }
+            let openai_key = config.get_str("llm.openai_api_key", "");
+            if !openai_key.is_empty() && openai_key != "your-api-key-here" {
+                providers.push("ChatGPT");
+            }
+            providers
+        };
+
         // Create shared application state.
         let state = Rc::new(RefCell::new(AiosApp {
             config,
@@ -703,6 +725,15 @@ impl AiosApp {
             "Setup complete. How can I help?",
         );
 
+        // Show the settings button (hidden during setup).
+        main_window::set_settings_button_visible(window, true);
+
+        // Show the prompt input (hidden during setup).
+        prompt_input.widget().set_visible(true);
+
+        // Update the provider dropdown to show only configured providers.
+        main_window::update_provider_dropdown(window, &configured_providers);
+
         // --- Connect signals ---
 
         // Provider dropdown changed.
@@ -710,7 +741,10 @@ impl AiosApp {
         let chat_view_ref = chat_view.clone();
         main_window::connect_provider_dropdown(window, move |provider_name| {
             let mut s = state_ref.borrow_mut();
-            let name = provider_name.to_lowercase();
+            let name = match provider_name {
+                "ChatGPT" | "chatgpt" => "openai".to_string(),
+                other => other.to_lowercase(),
+            };
             let _ = s.config.set("llm.provider", serde_json::json!(name));
             if let Ok(mut llm) = s.llm.try_lock() {
                 if llm.set_active(&name).is_err() {
@@ -828,6 +862,9 @@ impl AiosApp {
             &provider_refs,
         );
 
+        // Normal boot — show settings button (it starts hidden for setup flow).
+        main_window::set_settings_button_visible(&window, true);
+
         // Create a UiPanelTool with the GTK panel renderer callback.
         let ui_panel_tool = Self::create_ui_panel_tool(&window);
 
@@ -937,6 +974,12 @@ impl AiosApp {
 
         // Show boot status on Desktop.
         chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
+
+        // Apply theme from config at startup.
+        {
+            let theme = config.get_str("ui.theme", "dark");
+            Self::apply_theme(&theme);
+        }
 
         // Check for hostname collision (set by aios-hostname-check.service at boot).
         if std::path::Path::new("/tmp/aios-name-conflict").exists() {
@@ -1275,7 +1318,10 @@ impl AiosApp {
         let chat_view_ref = chat_view.clone();
         main_window::connect_provider_dropdown(&window, move |provider_name| {
             let mut s = state_ref.borrow_mut();
-            let name = provider_name.to_lowercase();
+            let name = match provider_name {
+                "ChatGPT" | "chatgpt" => "openai".to_string(),
+                other => other.to_lowercase(),
+            };
             let _ = s.config.set("llm.provider", serde_json::json!(name));
             if let Ok(mut llm) = s.llm.try_lock() {
                 if llm.set_active(&name).is_err() {
@@ -1593,6 +1639,94 @@ impl AiosApp {
                     return;
                 }
             }
+            CommandResult::Panel { title, description, fields, config_key } => {
+                // Render the panel as an interactive card in the chat view.
+                let input_box = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+                input_box.set_margin_top(8);
+
+                if !description.is_empty() {
+                    let desc = gtk4::Label::new(Some(&description));
+                    desc.set_halign(gtk4::Align::Start);
+                    desc.set_opacity(0.7);
+                    input_box.append(&desc);
+                }
+
+                for field in &fields {
+                    match &field.kind {
+                        PanelFieldKind::Dropdown { options, selected } => {
+                            let label = gtk4::Label::new(Some(&field.label));
+                            label.set_halign(gtk4::Align::Start);
+                            label.add_css_class("heading");
+                            input_box.append(&label);
+
+                            let string_list = gtk4::StringList::new(
+                                &options.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+                            );
+                            let dropdown = gtk4::DropDown::new(
+                                Some(string_list),
+                                gtk4::Expression::NONE,
+                            );
+
+                            // Set the currently selected value.
+                            if let Some(sel) = selected {
+                                if let Some(idx) = options.iter().position(|o| o == sel) {
+                                    dropdown.set_selected(idx as u32);
+                                }
+                            }
+                            input_box.append(&dropdown);
+
+                            // Apply button.
+                            let apply_btn = gtk4::Button::with_label("Apply");
+                            apply_btn.add_css_class("suggested-action");
+                            apply_btn.set_halign(gtk4::Align::Start);
+                            apply_btn.set_margin_top(4);
+
+                            let options_clone = options.clone();
+                            let config_key_clone = config_key.clone();
+                            let state_for_panel = state.clone();
+                            let chat_for_panel = chat_view.clone();
+                            let dd_ref = dropdown.clone();
+                            let field_id = field.id.clone();
+                            apply_btn.connect_clicked(move |b| {
+                                b.set_sensitive(false);
+                                let idx = dd_ref.selected() as usize;
+                                if let Some(value) = options_clone.get(idx) {
+                                    let mut s = state_for_panel.borrow_mut();
+                                    let _ = s.config.set(
+                                        &config_key_clone,
+                                        serde_json::json!(value),
+                                    );
+
+                                    // Apply theme change immediately via libadwaita.
+                                    if config_key_clone == "ui.theme" {
+                                        Self::apply_theme(value);
+                                    }
+
+                                    // Apply resolution change.
+                                    if field_id == "resolution" {
+                                        aios_core::config::commands::CommandHandler::apply_resolution(value);
+                                    }
+
+                                    chat_for_panel.add_message(
+                                        "system",
+                                        &format!("Set to: {value}"),
+                                    );
+                                }
+                            });
+                            input_box.append(&apply_btn);
+                        }
+                    }
+                }
+
+                drop(s);
+                chat_view.add_setup_card(
+                    "preferences-system-symbolic",
+                    &title,
+                    "",
+                    Some(input_box.upcast_ref()),
+                );
+                return;
+            }
             CommandResult::Unknown(cmd) => {
                 chat_view.add_message(
                     "system",
@@ -1615,6 +1749,10 @@ impl AiosApp {
                 let _ = llm.set_api_key("openai", openai_key);
             }
         }
+
+        // Re-apply theme from config (handles /theme dark, /theme light, etc.).
+        let theme = s.config.get_str("ui.theme", "dark");
+        Self::apply_theme(&theme);
     }
 
     /// Run the self-test suite on the current channel.
@@ -1693,6 +1831,21 @@ impl AiosApp {
         } else {
             false
         }
+    }
+
+    /// Apply a theme setting via libadwaita's StyleManager.
+    fn apply_theme(theme: &str) {
+        let style_manager = adw::StyleManager::default();
+        match theme {
+            "dark" => style_manager.set_color_scheme(adw::ColorScheme::ForceDark),
+            "light" => style_manager.set_color_scheme(adw::ColorScheme::ForceLight),
+            "auto" | "system" => style_manager.set_color_scheme(adw::ColorScheme::Default),
+            _ => {
+                warn!("Unknown theme: {theme}, defaulting to dark");
+                style_manager.set_color_scheme(adw::ColorScheme::ForceDark);
+            }
+        }
+        info!("Theme applied: {theme}");
     }
 
     /// Send a user message to the LLM on the Tokio runtime.

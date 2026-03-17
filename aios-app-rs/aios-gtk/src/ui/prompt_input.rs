@@ -148,6 +148,11 @@ impl PromptInput {
         }
     }
 
+    /// Commands that take no arguments and should execute immediately on selection.
+    const IMMEDIATE_COMMANDS: &'static [&'static str] = &[
+        "/help", "/tools", "/info", "/clear", "/configure", "/selftest", "/sysinfo", "/close",
+    ];
+
     /// Wire up Enter key and Send button to the submit handler.
     fn connect_internal_signals(&self) {
         // Enter key in the entry.
@@ -268,9 +273,11 @@ impl PromptInput {
             popover_for_changed.popup();
         });
 
-        // When user clicks a row, insert the command.
+        // When user clicks a row, execute immediately for no-arg commands
+        // or insert the command text for commands that take arguments.
         let entry_for_activate = entry.clone();
         let popover_for_activate = popover.clone();
+        let cb_for_activate = self.on_submit_cb.clone();
         list_box.connect_row_activated(move |lb, row| {
             let idx = row.index();
             let text = entry_for_activate.text().to_string();
@@ -282,19 +289,24 @@ impl PromptInput {
                 .collect();
 
             if let Some(cmd) = matches.get(idx as usize) {
-                // Commands that take args get a trailing space.
-                let insert = if ["/help", "/tools", "/info", "/clear", "/configure"]
-                    .contains(&cmd.command)
-                {
-                    cmd.command.to_string()
+                if Self::IMMEDIATE_COMMANDS.contains(&cmd.command) {
+                    // Execute immediately — submit the command.
+                    entry_for_activate.set_text("");
+                    popover_for_activate.popdown();
+                    if let Some(ref f) = *cb_for_activate.borrow() {
+                        f(cmd.command.to_string());
+                    }
                 } else {
-                    format!("{} ", cmd.command)
-                };
-                entry_for_activate.set_text(&insert);
-                entry_for_activate.set_position(insert.len() as i32);
+                    // Commands that take arguments — insert with trailing space.
+                    let insert = format!("{} ", cmd.command);
+                    entry_for_activate.set_text(&insert);
+                    entry_for_activate.set_position(insert.len() as i32);
+                    popover_for_activate.popdown();
+                }
+            } else {
+                popover_for_activate.popdown();
             }
 
-            popover_for_activate.popdown();
             let _ = lb; // suppress unused
         });
 
@@ -303,6 +315,7 @@ impl PromptInput {
         let entry_for_key = entry.clone();
         let entry_for_controller = entry.clone();
         let list_box_for_key = list_box.clone();
+        let cb_for_key = self.on_submit_cb.clone();
         let key_controller = gtk::EventControllerKey::new();
         key_controller.connect_key_pressed(move |_, key, _, _| {
             if !popover_for_key.is_visible() {
@@ -315,7 +328,8 @@ impl PromptInput {
                     gtk::glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Return | gtk::gdk::Key::Tab => {
-                    // Accept selected row — insert command text.
+                    // Accept selected row — execute immediately for no-arg
+                    // commands, insert text for commands that take arguments.
                     if let Some(row) = list_box_for_key.selected_row() {
                         let idx = row.index();
                         let text = entry_for_key.text().to_string();
@@ -325,15 +339,19 @@ impl PromptInput {
                             .filter(|c| c.command.starts_with(&filter))
                             .collect();
                         if let Some(cmd) = matches.get(idx as usize) {
-                            let insert = if ["/help", "/tools", "/info", "/clear", "/configure"]
-                                .contains(&cmd.command)
-                            {
-                                cmd.command.to_string()
+                            if Self::IMMEDIATE_COMMANDS.contains(&cmd.command) {
+                                // Execute immediately.
+                                entry_for_key.set_text("");
+                                popover_for_key.popdown();
+                                if let Some(ref f) = *cb_for_key.borrow() {
+                                    f(cmd.command.to_string());
+                                }
+                                return gtk::glib::Propagation::Stop;
                             } else {
-                                format!("{} ", cmd.command)
-                            };
-                            entry_for_key.set_text(&insert);
-                            entry_for_key.set_position(insert.len() as i32);
+                                let insert = format!("{} ", cmd.command);
+                                entry_for_key.set_text(&insert);
+                                entry_for_key.set_position(insert.len() as i32);
+                            }
                         }
                     }
                     popover_for_key.popdown();

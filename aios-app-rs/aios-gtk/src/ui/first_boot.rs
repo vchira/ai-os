@@ -1181,22 +1181,8 @@ impl SetupConversation {
             "Claude"
         };
 
-        // If the other provider has no key in config, skip straight to Complete.
-        let other_has_key = if let Some(ref config) = *self.config.borrow() {
-            let key_name = match other {
-                "claude" => "llm.claude_api_key",
-                "openai" => "llm.openai_api_key",
-                _ => "",
-            };
-            let k = config.get_str(key_name, "");
-            !k.is_empty() && k != "your-api-key-here"
-        } else {
-            false
-        };
-        if !other_has_key {
-            self.advance(SetupStep::Complete);
-            return;
-        }
+        // Always show the backup provider question — the user can enter
+        // the key manually if one isn't pre-configured.
 
         let input_box = gtk::Box::new(Orientation::Vertical, 8);
         input_box.set_margin_top(8);

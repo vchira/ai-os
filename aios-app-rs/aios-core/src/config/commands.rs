@@ -53,6 +53,27 @@ pub fn command_list() -> Vec<CommandInfo> {
 // CommandResult
 // ---------------------------------------------------------------------------
 
+/// A field in a command-generated settings panel.
+#[derive(Debug, Clone)]
+pub struct PanelField {
+    /// Unique identifier for this field.
+    pub id: String,
+    /// Human-readable label.
+    pub label: String,
+    /// The type of input widget.
+    pub kind: PanelFieldKind,
+}
+
+/// Input widget types for command panels.
+#[derive(Debug, Clone)]
+pub enum PanelFieldKind {
+    /// A dropdown / combo box with a list of options.
+    Dropdown {
+        options: Vec<String>,
+        selected: Option<String>,
+    },
+}
+
 /// Outcome of executing a slash command.
 #[derive(Debug, Clone)]
 pub enum CommandResult {
@@ -71,6 +92,18 @@ pub enum CommandResult {
     ClosePanel,
     /// The user requested a self-update (`/update <url>`).
     Update(String),
+    /// A settings panel with interactive fields (dropdown, toggle, etc.).
+    ///
+    /// The GTK handler should render this as a card in the chat view with
+    /// the appropriate input widgets. The `config_key` is the config path
+    /// to update when the user makes a selection.
+    Panel {
+        title: String,
+        description: String,
+        fields: Vec<PanelField>,
+        /// The config key prefix to update when the user selects a value.
+        config_key: String,
+    },
     /// The command was not recognised.
     Unknown(String),
 }
@@ -233,10 +266,24 @@ Available commands:
     fn cmd_keyboard(&mut self, args: &str) -> CommandResult {
         let parts: Vec<&str> = args.trim().split_whitespace().collect();
         if parts.is_empty() {
-            return CommandResult::Response(
-                "Usage: /keyboard <layout> [variant]\nExamples: /keyboard de, /keyboard us intl"
-                    .into(),
-            );
+            let current = self.config.get_str("system.keyboard_layout", "us");
+            return CommandResult::Panel {
+                title: "Keyboard Layout".into(),
+                description: "Select your keyboard layout".into(),
+                fields: vec![PanelField {
+                    id: "layout".into(),
+                    label: "Layout".into(),
+                    kind: PanelFieldKind::Dropdown {
+                        options: vec![
+                            "us".into(), "de".into(), "fr".into(), "es".into(),
+                            "it".into(), "pt".into(), "gb".into(), "ro".into(),
+                            "ru".into(), "jp".into(), "kr".into(), "br".into(),
+                        ],
+                        selected: Some(current),
+                    },
+                }],
+                config_key: "system.keyboard_layout".into(),
+            };
         }
         let layout = parts[0];
         let variant = parts.get(1).copied().unwrap_or("");
@@ -252,18 +299,136 @@ Available commands:
 
     fn cmd_resolution(&self, args: &str) -> CommandResult {
         let res = args.trim();
-        if res.is_empty() || !res.to_lowercase().contains('x') {
+        if res.is_empty() {
+            // Detect available resolutions via wlr-randr.
+            let available = Self::detect_resolutions();
+            if available.is_empty() {
+                return CommandResult::Response(
+                    "No resolutions detected (wlr-randr not available).\n\
+                     Usage: /resolution <WxH>\nExample: /resolution 1920x1080"
+                        .into(),
+                );
+            }
+            let current = Self::detect_current_resolution();
+            return CommandResult::Panel {
+                title: "Screen Resolution".into(),
+                description: format!(
+                    "Current: {}",
+                    current.as_deref().unwrap_or("unknown"),
+                ),
+                fields: vec![PanelField {
+                    id: "resolution".into(),
+                    label: "Resolution".into(),
+                    kind: PanelFieldKind::Dropdown {
+                        options: available,
+                        selected: current,
+                    },
+                }],
+                config_key: "system.resolution".into(),
+            };
+        }
+        if !res.to_lowercase().contains('x') {
             return CommandResult::Response(
                 "Usage: /resolution <WxH>\nExample: /resolution 1920x1080".into(),
             );
         }
-        // Actual resolution change is handled by the GTK layer; we just
-        // validate and return the intent.
-        CommandResult::Response(format!("Resolution request: {res}"))
+        // Apply resolution via wlr-randr.
+        Self::apply_resolution(res);
+        CommandResult::Response(format!("Resolution set to {res}"))
+    }
+
+    /// Detect available resolutions using wlr-randr.
+    fn detect_resolutions() -> Vec<String> {
+        let output = std::process::Command::new("wlr-randr")
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    String::from_utf8(o.stdout).ok()
+                } else {
+                    None
+                }
+            });
+
+        let Some(text) = output else {
+            return Vec::new();
+        };
+
+        // Parse lines like "    1920x1080 px, 60.000000 Hz (preferred, current)"
+        let mut resolutions = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            // Resolution lines start with a digit and contain "px"
+            if trimmed.starts_with(|c: char| c.is_ascii_digit()) && trimmed.contains("px") {
+                if let Some(res) = trimmed.split_whitespace().next() {
+                    let res = res.trim_end_matches(',');
+                    if !resolutions.contains(&res.to_string()) {
+                        resolutions.push(res.to_string());
+                    }
+                }
+            }
+        }
+        resolutions
+    }
+
+    /// Detect the current resolution from wlr-randr output.
+    fn detect_current_resolution() -> Option<String> {
+        let output = std::process::Command::new("wlr-randr")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())?;
+
+        for line in output.lines() {
+            let trimmed = line.trim();
+            if trimmed.contains("current") && trimmed.contains("px") {
+                if let Some(res) = trimmed.split_whitespace().next() {
+                    return Some(res.trim_end_matches(',').to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Apply a resolution using wlr-randr.
+    pub fn apply_resolution(resolution: &str) {
+        // Find the output name first.
+        let output_name = std::process::Command::new("wlr-randr")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|text| {
+                // First non-indented line with a name like "HDMI-A-1" or "Virtual-1"
+                text.lines()
+                    .find(|l| !l.starts_with(' ') && !l.is_empty())
+                    .and_then(|l| l.split_whitespace().next())
+                    .map(|s| s.to_string())
+            });
+
+        if let Some(name) = output_name {
+            let _ = std::process::Command::new("wlr-randr")
+                .args(["--output", &name, "--mode", resolution])
+                .status();
+        }
     }
 
     fn cmd_theme(&mut self, args: &str) -> CommandResult {
         let theme = args.trim().to_lowercase();
+        if theme.is_empty() {
+            let current = self.config.get_str("ui.theme", "dark");
+            return CommandResult::Panel {
+                title: "UI Theme".into(),
+                description: "Choose the appearance theme".into(),
+                fields: vec![PanelField {
+                    id: "theme".into(),
+                    label: "Theme".into(),
+                    kind: PanelFieldKind::Dropdown {
+                        options: vec!["dark".into(), "light".into(), "auto".into()],
+                        selected: Some(current),
+                    },
+                }],
+                config_key: "ui.theme".into(),
+            };
+        }
         if !matches!(theme.as_str(), "dark" | "light" | "auto") {
             return CommandResult::Response("Usage: /theme <dark|light|auto>".into());
         }
