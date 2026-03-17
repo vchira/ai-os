@@ -198,9 +198,9 @@ useradd -m -G sudo,audio,video,input,render -s /bin/bash aios 2>/dev/null || tru
 echo "aios:aios" | chpasswd
 echo "aios ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/aios
 
-# ── Set hostname to 'aios' (makes it reachable as aios.local via mDNS) ──
-echo "aios" > /etc/hostname
-echo "127.0.0.1 aios" >> /etc/hosts
+# ── Set hostname to 'assistant' (makes it reachable as assistant.local via mDNS) ──
+echo "assistant" > /etc/hostname
+echo "127.0.0.1 assistant" >> /etc/hosts
 
 # ── Keyboard layout (from build config injected by _inner_build.sh) ──
 # KB_LAYOUT is already set from /tmp/aios-build-config (sourced above)
@@ -231,7 +231,7 @@ cat > /etc/avahi/services/aios-web.service << AVEOF
 <?xml version="1.0" standalone='no'?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>
-  <name>AiOS Web Interface</name>
+  <name>Assistant Web Interface</name>
   <service>
     <type>_http._tcp</type>
     <port>80</port>
@@ -282,7 +282,7 @@ cat > /etc/avahi/services/aios-ssh.service << SSHEOF
 <?xml version="1.0" standalone='no'?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>
-  <name>AiOS SSH</name>
+  <name>Assistant SSH</name>
   <service>
     <type>_ssh._tcp</type>
     <port>22</port>
@@ -681,6 +681,48 @@ fi
 echo -e "${BOLD}═══════════════════════════════════════${NC}"
 TESTEOF
 chmod +x /usr/bin/aios-test
+
+# ── Hostname collision check script ──
+cat > /usr/bin/aios-hostname-check << 'HCEOF'
+#!/bin/bash
+# Check if our hostname collides with another machine on the LAN.
+HOSTNAME=$(cat /etc/hostname 2>/dev/null || echo "assistant")
+
+# Wait for network to be ready
+sleep 2
+
+# Try to resolve <hostname>.local — if it resolves to a different IP, conflict
+OUR_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$')
+RESOLVED=$(avahi-resolve -n "${HOSTNAME}.local" -4 2>/dev/null | awk '{print $2}')
+
+if [ -n "$RESOLVED" ]; then
+    for ip in $OUR_IPS; do
+        [ "$ip" = "$RESOLVED" ] && exit 0
+    done
+    # Conflict detected
+    echo "$HOSTNAME" > /tmp/aios-name-conflict
+    exit 1
+fi
+exit 0
+HCEOF
+chmod +x /usr/bin/aios-hostname-check
+
+# ── Hostname collision check service ──
+cat > /etc/systemd/system/aios-hostname-check.service << 'HCSEOF'
+[Unit]
+Description=Check AiOS hostname for mDNS conflicts
+After=avahi-daemon.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/aios-hostname-check
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+HCSEOF
+systemctl enable aios-hostname-check.service
 
 # ── Install whisper.cpp for STT (build from source) ──
 echo "[AiOS] Building whisper.cpp from source..."
