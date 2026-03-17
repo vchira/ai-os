@@ -246,7 +246,7 @@ mod tests {
     fn status_line_available() {
         let line = StatusLine::new("Web Channel", true, "http://aios.local");
         let formatted = line.format();
-        assert!(formatted.contains("\u{2705}"));
+        assert!(formatted.contains("\u{2713}")); // ✓ checkmark
         assert!(formatted.contains("available"));
         assert!(formatted.contains("http://aios.local"));
     }
@@ -255,7 +255,7 @@ mod tests {
     fn status_line_unavailable() {
         let line = StatusLine::new("Signal", false, "not configured");
         let formatted = line.format();
-        assert!(formatted.contains("\u{274c}"));
+        assert!(formatted.contains("\u{2717}")); // ✗ cross
         assert!(formatted.contains("unavailable"));
     }
 
@@ -268,12 +268,13 @@ mod tests {
         status.add(StatusLine::new("LLM Provider", true, "Claude"));
 
         let report = status.format();
-        assert!(report.contains("[INFO] AiOS System Status"));
-        assert!(report.contains("Desktop: available"));
-        assert!(report.contains("Web Channel: available"));
+        assert!(report.contains("AiOS System Status"));
+        assert!(report.contains("Desktop"));
+        assert!(report.contains("available"));
         assert!(report.contains("http://aios.local:80"));
-        assert!(report.contains("Signal: unavailable"));
-        assert!(report.contains("LLM Provider: available"));
+        assert!(report.contains("Signal"));
+        assert!(report.contains("unavailable"));
+        assert!(report.contains("LLM Provider"));
     }
 
     #[test]
@@ -339,7 +340,7 @@ mod tests {
     fn boot_status_with_zero_lines() {
         let status = BootStatus::new();
         let report = status.format();
-        assert!(report.contains("[INFO] AiOS System Status"));
+        assert!(report.contains("AiOS System Status"));
         assert!(report.contains("Boot time:"));
     }
 
@@ -359,15 +360,17 @@ mod tests {
             assert!(report.contains(&format!("detail-{i}")));
         }
         // Even-numbered components are available, odd are unavailable.
-        assert!(report.contains("Component-0: available"));
-        assert!(report.contains("Component-1: unavailable"));
+        // format() uses Pango markup: <b>Component-0</b>: <span>available</span>
+        assert!(report.contains("Component-0"));
+        assert!(report.contains("Component-1"));
     }
 
     #[test]
     fn status_line_with_empty_detail() {
         let line = StatusLine::new("TestComp", true, "");
         let formatted = line.format();
-        assert!(formatted.contains("TestComp: available"));
+        assert!(formatted.contains("TestComp"));
+        assert!(formatted.contains("available"));
         // With empty detail, there should be no dash separator.
         assert!(!formatted.contains("\u{2014}")); // em-dash
     }

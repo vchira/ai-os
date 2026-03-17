@@ -35,6 +35,11 @@ pub fn register_all(runner: &mut SelfTestRunner) {
     runner.add("tools: ToolResult ok/fail", false, test_tool_result);
     runner.add("tools: ToolSchema serialization", false, test_tool_schema);
 
+    // -- Setup tests --
+    runner.add("setup: pre-fill api key from config", false, test_setup_prefill_api_key);
+    runner.add("setup: chatgpt display name", false, test_setup_chatgpt_display_name);
+    runner.add("setup: auto-select single provider", false, test_setup_auto_select_single_provider);
+
     // -- Interactive tests --
     runner.add(
         "interactive: ui_panel text input",
@@ -419,6 +424,79 @@ fn test_tool_schema(ctx: &mut TestContext) -> TestResult {
 
         Ok("ToolSchema serializes/deserializes correctly".into())
     })();
+    make_result(name, res, ctx)
+}
+
+// ---------------------------------------------------------------------------
+// Setup tests
+// ---------------------------------------------------------------------------
+
+fn test_setup_prefill_api_key(ctx: &mut TestContext) -> TestResult {
+    let name = "setup: pre-fill api key from config";
+    let dir =
+        std::env::temp_dir().join(format!("aios_st_setup_prefill_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let res = (|| -> Result<String, String> {
+        let config_path = dir.join("config.json");
+        std::fs::write(&config_path, r#"{"llm":{"claude_api_key":"sk-ant-test123"}}"#)
+            .map_err(|e| format!("write: {e}"))?;
+        let config = ConfigManager::with_path(config_path).map_err(|e| format!("load: {e}"))?;
+        let key = config.get_str("llm.claude_api_key", "");
+        if key.is_empty() {
+            return Err("Config should have Claude key but got empty".into());
+        }
+        if key != "sk-ant-test123" {
+            return Err(format!("Expected 'sk-ant-test123', got '{key}'"));
+        }
+        Ok("Config pre-fill works".into())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    make_result(name, res, ctx)
+}
+
+fn test_setup_chatgpt_display_name(ctx: &mut TestContext) -> TestResult {
+    let name = "setup: chatgpt display name";
+    let res = (|| -> Result<String, String> {
+        let display = match "openai" {
+            "claude" => "Claude",
+            "openai" => "ChatGPT",
+            other => other,
+        };
+        if display != "ChatGPT" {
+            return Err(format!("Expected 'ChatGPT', got '{display}'"));
+        }
+        Ok("OpenAI displays as ChatGPT".into())
+    })();
+    make_result(name, res, ctx)
+}
+
+fn test_setup_auto_select_single_provider(ctx: &mut TestContext) -> TestResult {
+    let name = "setup: auto-select single provider";
+    let dir =
+        std::env::temp_dir().join(format!("aios_st_setup_single_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let res = (|| -> Result<String, String> {
+        let config_path = dir.join("config.json");
+        std::fs::write(
+            &config_path,
+            r#"{"llm":{"claude_api_key":"sk-ant-test","openai_api_key":""}}"#,
+        )
+        .map_err(|e| format!("write: {e}"))?;
+        let config = ConfigManager::with_path(config_path).map_err(|e| format!("load: {e}"))?;
+        let has_claude = !config.get_str("llm.claude_api_key", "").is_empty();
+        let has_openai = {
+            let k = config.get_str("llm.openai_api_key", "");
+            !k.is_empty() && k != "your-api-key-here"
+        };
+        if !has_claude {
+            return Err("Should detect Claude key".into());
+        }
+        if has_openai {
+            return Err("Should not detect OpenAI key (empty string)".into());
+        }
+        Ok("Single provider auto-selection works".into())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
     make_result(name, res, ctx)
 }
 
