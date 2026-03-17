@@ -129,12 +129,12 @@ impl StatusLine {
         let status = if self.available { "available" } else { "unavailable" };
         if self.detail.is_empty() {
             format!(
-                r#"  <span style="color:{color}">\u25CF</span> <b>{}</b>: {status}"#,
+                "  <span style=\"color:{color}\">\u{25CF}</span> <b>{}</b>: {status}",
                 self.component
             )
         } else {
             format!(
-                r#"  <span style="color:{color}">\u25CF</span> <b>{}</b>: {status} — {}"#,
+                "  <span style=\"color:{color}\">\u{25CF}</span> <b>{}</b>: {status} \u{2014} {}",
                 self.component, self.detail
             )
         }
@@ -270,5 +270,162 @@ mod tests {
         assert_eq!(json, "\"warning\"");
         let back: MessageLevel = serde_json::from_str(&json).unwrap();
         assert_eq!(back, MessageLevel::Warning);
+    }
+
+    // -- Additional edge-case tests --
+
+    #[test]
+    fn all_five_levels_have_distinct_icons() {
+        let levels = [
+            MessageLevel::Info,
+            MessageLevel::Success,
+            MessageLevel::Warning,
+            MessageLevel::Important,
+            MessageLevel::Error,
+        ];
+        let icons: Vec<&str> = levels.iter().map(|l| l.icon()).collect();
+        // All icons must be distinct.
+        let mut unique = icons.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 5, "expected 5 distinct icons, got {:?}", icons);
+    }
+
+    #[test]
+    fn all_five_levels_have_distinct_colors() {
+        let levels = [
+            MessageLevel::Info,
+            MessageLevel::Success,
+            MessageLevel::Warning,
+            MessageLevel::Important,
+            MessageLevel::Error,
+        ];
+        let colors: Vec<&str> = levels.iter().map(|l| l.color()).collect();
+        let mut unique = colors.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 5, "expected 5 distinct colors, got {:?}", colors);
+    }
+
+    #[test]
+    fn all_five_levels_have_distinct_css_classes() {
+        let levels = [
+            MessageLevel::Info,
+            MessageLevel::Success,
+            MessageLevel::Warning,
+            MessageLevel::Important,
+            MessageLevel::Error,
+        ];
+        let classes: Vec<&str> = levels.iter().map(|l| l.css_class()).collect();
+        let mut unique = classes.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 5, "expected 5 distinct CSS classes, got {:?}", classes);
+    }
+
+    #[test]
+    fn boot_status_with_zero_lines() {
+        let status = BootStatus::new();
+        let report = status.format();
+        assert!(report.contains("[INFO] AiOS System Status"));
+        assert!(report.contains("Boot time:"));
+    }
+
+    #[test]
+    fn boot_status_with_ten_lines() {
+        let mut status = BootStatus::new();
+        for i in 0..10 {
+            status.add(StatusLine::new(
+                format!("Component-{i}"),
+                i % 2 == 0,
+                format!("detail-{i}"),
+            ));
+        }
+        let report = status.format();
+        for i in 0..10 {
+            assert!(report.contains(&format!("Component-{i}")));
+            assert!(report.contains(&format!("detail-{i}")));
+        }
+        // Even-numbered components are available, odd are unavailable.
+        assert!(report.contains("Component-0: available"));
+        assert!(report.contains("Component-1: unavailable"));
+    }
+
+    #[test]
+    fn status_line_with_empty_detail() {
+        let line = StatusLine::new("TestComp", true, "");
+        let formatted = line.format();
+        assert!(formatted.contains("TestComp: available"));
+        // With empty detail, there should be no dash separator.
+        assert!(!formatted.contains("\u{2014}")); // em-dash
+    }
+
+    #[test]
+    fn status_line_format_contains_component_name() {
+        let line = StatusLine::new("LLM Provider", true, "Claude");
+        let formatted = line.format();
+        assert!(formatted.contains("LLM Provider"));
+        assert!(formatted.contains("Claude"));
+    }
+
+    #[test]
+    fn message_level_display_trait() {
+        assert_eq!(format!("{}", MessageLevel::Info), "INFO");
+        assert_eq!(format!("{}", MessageLevel::Success), "SUCCESS");
+        assert_eq!(format!("{}", MessageLevel::Warning), "WARNING");
+        assert_eq!(format!("{}", MessageLevel::Important), "IMPORTANT");
+        assert_eq!(format!("{}", MessageLevel::Error), "ERROR");
+    }
+
+    #[test]
+    fn message_level_format_includes_icon_and_label() {
+        let formatted = MessageLevel::Error.format("something broke");
+        assert!(formatted.contains("[ERROR]"));
+        assert!(formatted.contains("something broke"));
+        assert!(formatted.contains(MessageLevel::Error.icon()));
+    }
+
+    #[test]
+    fn status_line_html_format() {
+        let line = StatusLine::new("Web", true, "localhost:80");
+        let html = line.format_html();
+        assert!(html.contains("Web"));
+        assert!(html.contains("available"));
+        assert!(html.contains("localhost:80"));
+        assert!(html.contains("#2ed573")); // green color for available
+    }
+
+    #[test]
+    fn status_line_html_unavailable() {
+        let line = StatusLine::new("Signal", false, "");
+        let html = line.format_html();
+        assert!(html.contains("unavailable"));
+        assert!(html.contains("#ff4757")); // red color for unavailable
+    }
+
+    #[test]
+    fn boot_status_html_format() {
+        let mut status = BootStatus::new();
+        status.add(StatusLine::new("Desktop", true, "GTK4"));
+        let html = status.format_html();
+        assert!(html.contains("[INFO] AiOS System Status"));
+        assert!(html.contains("Desktop"));
+        assert!(html.contains("GTK4"));
+    }
+
+    #[test]
+    fn message_level_all_serialize_roundtrip() {
+        let levels = [
+            MessageLevel::Info,
+            MessageLevel::Success,
+            MessageLevel::Warning,
+            MessageLevel::Important,
+            MessageLevel::Error,
+        ];
+        for level in &levels {
+            let json = serde_json::to_string(level).unwrap();
+            let back: MessageLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(*level, back);
+        }
     }
 }

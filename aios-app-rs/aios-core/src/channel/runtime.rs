@@ -101,9 +101,15 @@ impl AppRuntime {
     /// (for conversation continuity — Desktop always shows all messages).
     pub async fn dispatch_response(&self, role: &str, content: &str) {
         let active = self.switcher.active_kind();
-        let callbacks = self.response_callbacks.lock().await;
 
-        for (kind, cb) in callbacks.iter() {
+        // Clone callbacks and drop the lock before invoking them to avoid
+        // deadlocks if a callback tries to call on_response/dispatch_response.
+        let snapshot: Vec<_> = {
+            let callbacks = self.response_callbacks.lock().await;
+            callbacks.clone()
+        };
+
+        for (kind, cb) in snapshot.iter() {
             // Always send to the active channel.
             if *kind == active {
                 cb(active, role, content);
@@ -236,5 +242,135 @@ mod tests {
         // Both should get the message.
         assert_eq!(signal_count.load(Ordering::SeqCst), 1);
         assert_eq!(desktop_count.load(Ordering::SeqCst), 1);
+    }
+
+    // -- Integration / stress tests --
+
+    #[tokio::test]
+    async fn send_100_messages_and_receive_all() {
+        let rt = AppRuntime::new();
+        let mut rx = rt.take_message_rx().await.unwrap();
+
+        for i in 0..100 {
+            rt.send_message(
+                ChannelKind::Desktop,
+                format!("msg-{i}"),
+                None,
+            );
+        }
+
+        for i in 0..100 {
+            let msg = rx.recv().await.unwrap();
+            assert_eq!(msg.text, format!("msg-{i}"));
+            assert_eq!(msg.channel, ChannelKind::Desktop);
+        }
+    }
+
+    #[tokio::test]
+    async fn multiple_senders_web_and_signal() {
+        let rt = AppRuntime::new();
+        rt.switcher
+            .register_channel(ChannelKind::Web, ChannelContext::web());
+        rt.switcher
+            .register_channel(ChannelKind::Signal, ChannelContext::signal());
+        let mut rx = rt.take_message_rx().await.unwrap();
+
+        let tx_web = rt.message_sender();
+        let tx_signal = rt.message_sender();
+
+        // Simulate web client sending messages.
+        for i in 0..5 {
+            let _ = tx_web.send(IncomingMessage {
+                channel: ChannelKind::Web,
+                text: format!("web-{i}"),
+                sender_id: Some("browser-1".to_string()),
+            });
+        }
+
+        // Simulate signal client sending messages.
+        for i in 0..5 {
+            let _ = tx_signal.send(IncomingMessage {
+                channel: ChannelKind::Signal,
+                text: format!("signal-{i}"),
+                sender_id: Some("+1234567890".to_string()),
+            });
+        }
+
+        let mut received = Vec::new();
+        for _ in 0..10 {
+            received.push(rx.recv().await.unwrap());
+        }
+
+        let web_msgs: Vec<_> = received
+            .iter()
+            .filter(|m| m.channel == ChannelKind::Web)
+            .collect();
+        let signal_msgs: Vec<_> = received
+            .iter()
+            .filter(|m| m.channel == ChannelKind::Signal)
+            .collect();
+
+        assert_eq!(web_msgs.len(), 5);
+        assert_eq!(signal_msgs.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn dispatch_response_with_no_callbacks_does_not_panic() {
+        let rt = AppRuntime::new();
+        // No callbacks registered — should not panic.
+        rt.dispatch_response("assistant", "Hello, nobody").await;
+        // If we reach here, the test passes.
+    }
+
+    #[tokio::test]
+    async fn switch_if_needed_with_unregistered_channel_is_noop() {
+        let rt = AppRuntime::new();
+        // Voice is not registered — switch_if_needed should silently fail.
+        rt.switch_if_needed(ChannelKind::Voice);
+        // Active channel should still be Desktop.
+        assert_eq!(rt.switcher.active_kind(), ChannelKind::Desktop);
+    }
+
+    #[tokio::test]
+    async fn dispatch_response_content_is_passed_correctly() {
+        let rt = AppRuntime::new();
+        let captured_role = Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_content = Arc::new(std::sync::Mutex::new(String::new()));
+
+        let r = captured_role.clone();
+        let c = captured_content.clone();
+        rt.on_response(
+            ChannelKind::Desktop,
+            Arc::new(move |_kind, role, content| {
+                *r.lock().unwrap() = role.to_string();
+                *c.lock().unwrap() = content.to_string();
+            }),
+        )
+        .await;
+
+        rt.dispatch_response("tool", "result data").await;
+
+        assert_eq!(*captured_role.lock().unwrap(), "tool");
+        assert_eq!(*captured_content.lock().unwrap(), "result data");
+    }
+
+    #[tokio::test]
+    async fn multiple_callbacks_on_same_channel() {
+        let rt = AppRuntime::new();
+        let count = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..5 {
+            let c = count.clone();
+            rt.on_response(
+                ChannelKind::Desktop,
+                Arc::new(move |_, _, _| {
+                    c.fetch_add(1, Ordering::SeqCst);
+                }),
+            )
+            .await;
+        }
+
+        rt.dispatch_response("system", "test").await;
+        assert_eq!(count.load(Ordering::SeqCst), 5);
     }
 }

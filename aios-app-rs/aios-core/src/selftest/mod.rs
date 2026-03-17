@@ -18,7 +18,9 @@
 //! /selftest interactive  Run only interactive tests
 //! ```
 
+pub mod conversation_sim;
 pub mod runner;
 pub mod scenarios;
 
+pub use conversation_sim::{Dialog, DialogResult, DialogStep, run_dialog, run_all_dialogs};
 pub use runner::{SelfTestRunner, TestResult};

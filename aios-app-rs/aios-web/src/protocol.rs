@@ -128,4 +128,146 @@ mod tests {
             _ => panic!("wrong variant"),
         }
     }
+
+    // -- Additional roundtrip tests --
+
+    #[test]
+    fn client_switch_channel_roundtrip() {
+        let msg = ClientMessage::SwitchChannel {
+            target: "signal".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"switch_channel\""));
+        let back: ClientMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            ClientMessage::SwitchChannel { target } => assert_eq!(target, "signal"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_panel_request_roundtrip() {
+        let msg = ServerMessage::PanelRequest {
+            id: "req-42".to_string(),
+            request: serde_json::json!({
+                "title": "Enter API Key",
+                "fields": [{ "id": "key", "type": "password" }]
+            }),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"panel_request\""));
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            ServerMessage::PanelRequest { id, request } => {
+                assert_eq!(id, "req-42");
+                assert_eq!(request.get("title").unwrap(), "Enter API Key");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_notification_roundtrip() {
+        let msg = ServerMessage::Notification {
+            title: "Update".to_string(),
+            message: "New version available".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"notification\""));
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            ServerMessage::Notification { title, message } => {
+                assert_eq!(title, "Update");
+                assert_eq!(message, "New version available");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_channel_status_roundtrip() {
+        let msg = ServerMessage::ChannelStatus {
+            active: "desktop".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"channel_status\""));
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            ServerMessage::ChannelStatus { active } => {
+                assert_eq!(active, "desktop");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_system_roundtrip() {
+        let msg = ServerMessage::System {
+            content: "System shutting down".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"system\""));
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            ServerMessage::System { content } => {
+                assert_eq!(content, "System shutting down");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_image_roundtrip() {
+        let msg = ServerMessage::Image {
+            path: "/tmp/screenshot.png".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"image\""));
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            ServerMessage::Image { path } => {
+                assert_eq!(path, "/tmp/screenshot.png");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_with_level_field() {
+        let msg = ServerMessage::Message {
+            role: "system".to_string(),
+            content: "Warning issued".to_string(),
+            level: Some("warning".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"level\":\"warning\""));
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            ServerMessage::Message { role, content, level } => {
+                assert_eq!(role, "system");
+                assert_eq!(content, "Warning issued");
+                assert_eq!(level, Some("warning".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn server_message_without_level_field_absent_in_json() {
+        let msg = ServerMessage::Message {
+            role: "assistant".to_string(),
+            content: "Hello".to_string(),
+            level: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // level is None and skip_serializing_if ensures it's absent.
+        assert!(!json.contains("\"level\""));
+        let back: ServerMessage = serde_json::from_str(&json).unwrap();
+        match back {
+            ServerMessage::Message { level, .. } => {
+                assert!(level.is_none());
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
 }

@@ -348,7 +348,11 @@ fn read_processes() -> Vec<ProcessInfo> {
 /// Read total uptime in clock ticks (uptime_secs * CLK_TCK).
 fn read_uptime_ticks() -> f64 {
     let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
-    let uptime_secs = read_uptime_secs() as f64;
+    // Read uptime directly as f64 to avoid integer truncation from read_uptime_secs().
+    let uptime_secs = fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|c| c.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()))
+        .unwrap_or(0.0);
     uptime_secs * ticks_per_sec
 }
 
@@ -464,18 +468,18 @@ fn progress_bar(percent: f64, width: usize) -> String {
         ""
     };
     let fill: String = std::iter::repeat(bar_char).take(if tip.is_empty() { filled } else { filled.saturating_sub(1) }).collect();
-    let space: String = std::iter::repeat(' ').take(if tip.is_empty() { empty } else { empty }) .collect();
+    let space: String = std::iter::repeat(' ').take(empty).collect();
 
     format!("[{fill}{tip}{space}]")
 }
 
 /// Truncate a string to `max_len` characters, appending "..." if truncated.
 fn truncate_str(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        let end = max_len.saturating_sub(3);
-        format!("{}...", &s[..end])
+        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{truncated}...")
     }
 }
 
@@ -638,5 +642,160 @@ mod tests {
         assert_eq!(parse_meminfo_kb("  16384000 kB"), 16384000);
         assert_eq!(parse_meminfo_kb("0 kB"), 0);
         assert_eq!(parse_meminfo_kb("garbage"), 0);
+    }
+
+    // -- Additional edge-case tests --
+
+    #[test]
+    fn format_text_contains_expected_sections() {
+        let info = SystemInfo {
+            hostname: "myhost".to_string(),
+            os_version: "Test OS".to_string(),
+            kernel: "5.15.0".to_string(),
+            uptime_secs: 7200,
+            cpu_count: 8,
+            total_memory_kb: 16_000_000,
+            used_memory_kb: 8_000_000,
+            disk_total_gb: 500.0,
+            disk_used_gb: 250.0,
+            processes: vec![ProcessInfo {
+                pid: 1,
+                name: "init".to_string(),
+                cpu_percent: 0.1,
+                memory_kb: 1024,
+                user: "root".to_string(),
+            }],
+        };
+        let text = info.format_text();
+        assert!(text.contains("System Monitor"), "missing System Monitor heading");
+        assert!(text.contains("Memory:"), "missing Memory section");
+        assert!(text.contains("Disk (/):"), "missing Disk section");
+        assert!(text.contains("Top Processes"), "missing Processes section");
+        assert!(text.contains("myhost"));
+        assert!(text.contains("5.15.0"));
+    }
+
+    #[test]
+    fn process_info_with_utf8_names() {
+        let p = ProcessInfo {
+            pid: 123,
+            name: "prosess\u{00f8}r".to_string(), // Norwegian ø
+            cpu_percent: 1.0,
+            memory_kb: 2048,
+            user: "\u{00fc}ser".to_string(), // German ü
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: ProcessInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "prosess\u{00f8}r");
+        assert_eq!(back.user, "\u{00fc}ser");
+    }
+
+    #[test]
+    fn kill_process_with_invalid_pid_returns_error() {
+        // PID 0 or a very high non-existent PID should fail.
+        let result = SystemInfo::kill_process(999_999_999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn gather_does_not_panic() {
+        // Even in test environments where /proc may differ, gather should not panic.
+        let info = SystemInfo::gather();
+        // Basic sanity checks.
+        assert!(info.cpu_count >= 1);
+        assert!(info.total_memory_kb > 0);
+        assert!(!info.hostname.is_empty());
+    }
+
+    #[test]
+    fn truncate_str_with_emoji() {
+        let emoji_str = "\u{1f600}\u{1f601}\u{1f602}\u{1f603}\u{1f604}\u{1f605}"; // 6 emoji chars
+        let truncated = truncate_str(emoji_str, 5);
+        // 5 - 3 = 2 chars kept, + "..."
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.chars().count(), 5); // 2 emoji + 3 dots
+    }
+
+    #[test]
+    fn truncate_str_exact_max_len() {
+        assert_eq!(truncate_str("12345", 5), "12345");
+    }
+
+    #[test]
+    fn truncate_str_len_less_than_3() {
+        // With max_len < 3, saturating_sub(3) = 0, so we get just "..."
+        let result = truncate_str("hello", 2);
+        assert_eq!(result, "...");
+    }
+
+    #[test]
+    fn progress_bar_at_zero() {
+        let bar = progress_bar(0.0, 20);
+        assert!(bar.starts_with('['));
+        assert!(bar.ends_with(']'));
+        assert!(!bar.contains('='));
+    }
+
+    #[test]
+    fn progress_bar_at_fifty() {
+        let bar = progress_bar(50.0, 20);
+        assert!(bar.contains('='));
+        assert!(bar.contains('>'));
+    }
+
+    #[test]
+    fn progress_bar_at_hundred() {
+        let bar = progress_bar(100.0, 20);
+        assert!(bar.starts_with('['));
+        assert!(bar.ends_with(']'));
+        // All filled, no spaces.
+        assert!(!bar.contains(' '));
+    }
+
+    #[test]
+    fn progress_bar_width_zero() {
+        // Edge case: width 0 should still return brackets.
+        let bar = progress_bar(50.0, 0);
+        assert_eq!(bar, "[]");
+    }
+
+    #[test]
+    fn format_text_no_processes() {
+        let info = SystemInfo {
+            hostname: "empty".to_string(),
+            os_version: "Linux".to_string(),
+            kernel: "6.0".to_string(),
+            uptime_secs: 60,
+            cpu_count: 1,
+            total_memory_kb: 1000,
+            used_memory_kb: 500,
+            disk_total_gb: 10.0,
+            disk_used_gb: 5.0,
+            processes: vec![],
+        };
+        let text = info.format_text();
+        assert!(text.contains("System Monitor"));
+        // Should NOT contain Top Processes section since there are none.
+        assert!(!text.contains("Top Processes"));
+    }
+
+    #[test]
+    fn format_uptime_zero() {
+        assert_eq!(format_uptime(0), "0m");
+    }
+
+    #[test]
+    fn format_uptime_large() {
+        // 10 days, 5 hours, 30 minutes.
+        let secs = 10 * 86400 + 5 * 3600 + 30 * 60;
+        assert_eq!(format_uptime(secs), "10d 5h 30m");
+    }
+
+    #[test]
+    fn progress_bar_over_100_clamps() {
+        let bar = progress_bar(150.0, 10);
+        // Should not panic; filled should be clamped to width.
+        assert!(bar.starts_with('['));
+        assert!(bar.ends_with(']'));
     }
 }

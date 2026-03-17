@@ -324,4 +324,112 @@ mod tests {
         let tools = reg.get_tools_by_category("nonexistent");
         assert!(tools.is_empty());
     }
+
+    // -- Additional edge-case tests --
+
+    /// A second dummy tool for testing multiple registrations.
+    struct DummyTool2;
+
+    impl Tool for DummyTool2 {
+        fn name(&self) -> &str {
+            "dummy2"
+        }
+        fn description(&self) -> &str {
+            "Another dummy tool."
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object", "properties": {} })
+        }
+        fn execute(&self, _args: serde_json::Value) -> ToolResult {
+            ToolResult::ok("dummy2 ok")
+        }
+        fn category(&self) -> &str {
+            "test_category"
+        }
+    }
+
+    #[test]
+    fn execute_on_channel_with_desktop_channel_delegates_to_execute() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();
+
+        let channel = ChannelContext::desktop();
+        let result = reg.execute_on_channel("dummy", serde_json::json!({}), &channel);
+        assert!(result.success);
+        assert_eq!(result.output, "dummy ok");
+    }
+
+    #[test]
+    fn execute_on_channel_missing_tool_returns_fail() {
+        let reg = ToolRegistry::new();
+        let channel = ChannelContext::desktop();
+        let result = reg.execute_on_channel("nonexistent", serde_json::json!({}), &channel);
+        assert!(!result.success);
+        assert!(result.error.as_deref().unwrap().contains("not found"));
+    }
+
+    #[test]
+    fn execute_on_channel_signal_still_works_for_non_ui_tools() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();
+
+        let channel = ChannelContext::signal();
+        let result = reg.execute_on_channel("dummy", serde_json::json!({}), &channel);
+        // DummyTool doesn't override execute_on_channel, so it delegates to execute.
+        assert!(result.success);
+        assert_eq!(result.output, "dummy ok");
+    }
+
+    #[test]
+    fn execute_on_channel_voice() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();
+
+        let channel = ChannelContext::voice();
+        let result = reg.execute_on_channel("dummy", serde_json::json!({}), &channel);
+        assert!(result.success);
+    }
+
+    #[test]
+    fn get_schemas_by_custom_category() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool2)).unwrap();
+
+        let schemas = reg.get_schemas_by_categories(&["test_category"]);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].name, "dummy2");
+    }
+
+    #[test]
+    fn categories_include_custom() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool2)).unwrap();
+
+        let cats = reg.categories();
+        assert!(cats.contains(&"test_category".to_string()));
+    }
+
+    #[test]
+    fn execute_existing_tool_returns_success() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();
+        let result = reg.execute("dummy", serde_json::json!({}));
+        assert!(result.success);
+        assert_eq!(result.output, "dummy ok");
+    }
+
+    #[test]
+    fn default_registry_is_empty() {
+        let reg = ToolRegistry::default();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn load_builtins_registers_expected_count() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        // Should have 12 built-in tools.
+        assert_eq!(reg.len(), 12);
+    }
 }

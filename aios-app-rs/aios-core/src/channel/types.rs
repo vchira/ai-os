@@ -100,17 +100,9 @@ impl ChannelCapabilities {
         }
     }
 
-    /// Full-featured web capabilities (browser).
+    /// Full-featured web capabilities (browser) — same as desktop.
     pub fn web() -> Self {
-        Self {
-            rich_panels: true,
-            images: true,
-            markdown: true,
-            notifications: true,
-            structured_input: true,
-            password_input: true,
-            max_text_length: None,
-        }
+        Self::desktop()
     }
 
     /// Limited Signal messenger capabilities.
@@ -333,5 +325,170 @@ mod tests {
             sender_id: None,
         };
         assert!(msg.sender_id.is_none());
+    }
+
+    // -- Additional edge-case tests --
+
+    #[test]
+    fn channel_kind_from_str_opt_all_four_variants() {
+        // Verify every variant round-trips through from_str_opt.
+        let cases = [
+            ("desktop", ChannelKind::Desktop),
+            ("web", ChannelKind::Web),
+            ("signal", ChannelKind::Signal),
+            ("voice", ChannelKind::Voice),
+        ];
+        for (input, expected) in &cases {
+            assert_eq!(
+                ChannelKind::from_str_opt(input),
+                Some(*expected),
+                "from_str_opt(\"{input}\") failed"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_kind_from_str_opt_case_insensitive_mixed() {
+        assert_eq!(ChannelKind::from_str_opt("DeSKtoP"), Some(ChannelKind::Desktop));
+        assert_eq!(ChannelKind::from_str_opt("wEb"), Some(ChannelKind::Web));
+        assert_eq!(ChannelKind::from_str_opt("SIGNAL"), Some(ChannelKind::Signal));
+        assert_eq!(ChannelKind::from_str_opt("VoIcE"), Some(ChannelKind::Voice));
+    }
+
+    #[test]
+    fn channel_kind_from_str_opt_rejects_invalid_strings() {
+        assert!(ChannelKind::from_str_opt("telegram").is_none());
+        assert!(ChannelKind::from_str_opt("").is_none());
+        assert!(ChannelKind::from_str_opt("  desktop  ").is_none()); // whitespace
+        assert!(ChannelKind::from_str_opt("DESKTOP ").is_none());
+    }
+
+    #[test]
+    fn capabilities_for_kind_desktop() {
+        let caps = ChannelCapabilities::for_kind(ChannelKind::Desktop);
+        assert!(caps.rich_panels);
+        assert!(caps.images);
+        assert!(caps.markdown);
+        assert!(caps.notifications);
+        assert!(caps.structured_input);
+        assert!(caps.password_input);
+        assert!(caps.max_text_length.is_none());
+    }
+
+    #[test]
+    fn capabilities_for_kind_web() {
+        let caps = ChannelCapabilities::for_kind(ChannelKind::Web);
+        assert!(caps.rich_panels);
+        assert!(caps.images);
+        assert!(caps.markdown);
+        assert!(caps.notifications);
+        assert!(caps.structured_input);
+        assert!(caps.password_input);
+        assert!(caps.max_text_length.is_none());
+    }
+
+    #[test]
+    fn capabilities_for_kind_signal() {
+        let caps = ChannelCapabilities::for_kind(ChannelKind::Signal);
+        assert!(!caps.rich_panels);
+        assert!(caps.images);
+        assert!(!caps.markdown);
+        assert!(!caps.notifications);
+        assert!(!caps.structured_input);
+        assert!(!caps.password_input);
+        assert_eq!(caps.max_text_length, Some(4096));
+    }
+
+    #[test]
+    fn capabilities_for_kind_voice() {
+        let caps = ChannelCapabilities::for_kind(ChannelKind::Voice);
+        assert!(!caps.rich_panels);
+        assert!(!caps.images);
+        assert!(!caps.markdown);
+        assert!(!caps.notifications);
+        assert!(!caps.structured_input);
+        assert!(!caps.password_input);
+        assert!(caps.max_text_length.is_none());
+    }
+
+    #[test]
+    fn channel_context_with_custom_capabilities() {
+        let custom_caps = ChannelCapabilities {
+            rich_panels: false,
+            images: true,
+            markdown: false,
+            notifications: true,
+            structured_input: false,
+            password_input: false,
+            max_text_length: Some(1000),
+        };
+        let ctx = ChannelContext::with_capabilities(ChannelKind::Signal, custom_caps);
+        assert_eq!(ctx.kind, ChannelKind::Signal);
+        // Custom caps override defaults.
+        assert!(!ctx.capabilities.rich_panels);
+        assert!(ctx.capabilities.images);
+        assert!(ctx.capabilities.notifications); // overridden to true
+        assert_eq!(ctx.capabilities.max_text_length, Some(1000));
+    }
+
+    #[test]
+    fn incoming_message_is_not_serialize() {
+        // IncomingMessage is Clone + Debug but NOT Serialize.
+        // We verify this by constructing it and checking Debug output.
+        let msg = IncomingMessage {
+            channel: ChannelKind::Web,
+            text: "test".to_string(),
+            sender_id: Some("session-42".to_string()),
+        };
+        let debug = format!("{msg:?}");
+        assert!(debug.contains("IncomingMessage"));
+        assert!(debug.contains("Web"));
+        assert!(debug.contains("session-42"));
+    }
+
+    #[test]
+    fn incoming_message_clone_is_independent() {
+        let msg1 = IncomingMessage {
+            channel: ChannelKind::Voice,
+            text: "original".to_string(),
+            sender_id: None,
+        };
+        let mut msg2 = msg1.clone();
+        msg2.text = "modified".to_string();
+        assert_eq!(msg1.text, "original");
+        assert_eq!(msg2.text, "modified");
+    }
+
+    #[test]
+    fn channel_kind_hash_is_distinct() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ChannelKind::Desktop);
+        set.insert(ChannelKind::Web);
+        set.insert(ChannelKind::Signal);
+        set.insert(ChannelKind::Voice);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn channel_kind_deserialize_all_variants() {
+        let cases = [
+            ("\"desktop\"", ChannelKind::Desktop),
+            ("\"web\"", ChannelKind::Web),
+            ("\"signal\"", ChannelKind::Signal),
+            ("\"voice\"", ChannelKind::Voice),
+        ];
+        for (json, expected) in &cases {
+            let kind: ChannelKind = serde_json::from_str(json).unwrap();
+            assert_eq!(kind, *expected, "deserialize {json} failed");
+        }
+    }
+
+    #[test]
+    fn channel_context_shorthand_constructors() {
+        assert_eq!(ChannelContext::desktop().kind, ChannelKind::Desktop);
+        assert_eq!(ChannelContext::web().kind, ChannelKind::Web);
+        assert_eq!(ChannelContext::signal().kind, ChannelKind::Signal);
+        assert_eq!(ChannelContext::voice().kind, ChannelKind::Voice);
     }
 }

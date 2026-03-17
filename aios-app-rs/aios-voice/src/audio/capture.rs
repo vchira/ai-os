@@ -128,6 +128,14 @@ impl AudioCapture {
         self.recording
     }
 
+    /// Access the shared recording buffer for real-time processing.
+    ///
+    /// Callers can lock the buffer, drain samples, and process them
+    /// (e.g. for VAD) without stopping the recording.
+    pub fn buffer(&self) -> &Buffer {
+        &self.buffer
+    }
+
     /// Duration of audio currently in the buffer, in seconds.
     pub fn buffered_duration(&self) -> f32 {
         if let Ok(buf) = self.buffer.lock() {

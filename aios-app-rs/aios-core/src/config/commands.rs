@@ -42,6 +42,7 @@ pub fn command_list() -> Vec<CommandInfo> {
         CommandInfo { command: "/info", description: "Show system information" },
         CommandInfo { command: "/sysinfo", description: "Show system monitor" },
         CommandInfo { command: "/close", description: "Close topmost panel/dialog" },
+        CommandInfo { command: "/update", description: "Self-update from URL" },
         CommandInfo { command: "/configure", description: "Open settings dialog" },
         CommandInfo { command: "/wake", description: "Set wake word phrase" },
         CommandInfo { command: "/clear", description: "Clear chat history" },
@@ -68,6 +69,8 @@ pub enum CommandResult {
     SysInfo,
     /// The user asked to close the topmost panel/dialog (`/close`).
     ClosePanel,
+    /// The user requested a self-update (`/update <url>`).
+    Update(String),
     /// The command was not recognised.
     Unknown(String),
 }
@@ -131,6 +134,7 @@ impl<'a> CommandHandler<'a> {
             "/selftest" => CommandResult::SelfTest(args),
             "/sysinfo" => CommandResult::SysInfo,
             "/close" => CommandResult::ClosePanel,
+            "/update" => CommandResult::Update(args),
             "/clear" => CommandResult::Clear,
             "/configure" => CommandResult::Configure,
             "/info" => self.cmd_info(),
@@ -164,6 +168,7 @@ Available commands:
 /sysinfo                    Show system monitor (CPU, memory, disk, processes)
 /info                       Show system information
 /close                      Close the topmost panel or dialog
+/update <url>               Self-update AiOS binary from URL
 /configure                  Open settings dialog
 /clear                      Clear chat history
 /help                       Show this help"
@@ -181,6 +186,10 @@ Available commands:
 
         let provider = parts[0].to_lowercase();
         let key = parts[1];
+
+        if key.is_empty() {
+            return CommandResult::Response("API key cannot be empty.".to_string());
+        }
 
         match provider.as_str() {
             "claude" => {
@@ -442,8 +451,13 @@ Usage:
                 CommandResult::Response("Web channel disabled. Restart required.".to_string())
             }
             ("web", "port") if !value.is_empty() => {
-                let _ = self.config.set("channels.web.port", json!(value));
-                CommandResult::Response(format!("Web port set to {value}. Restart required."))
+                match value.parse::<u16>() {
+                    Ok(port) => {
+                        let _ = self.config.set("channels.web.port", json!(port));
+                        CommandResult::Response(format!("Web port set to {port}. Restart required."))
+                    }
+                    Err(_) => CommandResult::Response(format!("Invalid port number: {value}")),
+                }
             }
             ("signal", "on") => {
                 let _ = self.config.set("channels.signal.enabled", json!(true));
@@ -769,5 +783,409 @@ mod tests {
             }
             other => panic!("expected Response, got {other:?}"),
         }
+    }
+
+    // -- Comprehensive command tests --
+
+    #[test]
+    fn help_contains_all_command_names() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/help");
+        match result {
+            CommandResult::Response(text) => {
+                let expected = [
+                    "/key", "/provider", "/model", "/keyboard", "/resolution",
+                    "/theme", "/voice", "/mic", "/speaker", "/language", "/wake",
+                    "/tools", "/effort", "/mode", "/channel", "/selftest",
+                    "/sysinfo", "/info", "/close", "/update", "/configure", "/clear",
+                    "/help",
+                ];
+                for cmd in &expected {
+                    assert!(text.contains(cmd), "help text missing {cmd}");
+                }
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_with_empty_args_returns_usage() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/key");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Usage"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_with_valid_provider_stores_it() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/key openai sk-test-key-12345");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("OpenAI API key set"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("llm.openai_api_key", ""), "sk-test-key-12345");
+    }
+
+    #[test]
+    fn key_with_empty_key_returns_usage() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/key claude");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Usage"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provider_with_unknown_name() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/provider gemini");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Usage"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_shows_status() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/channel");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Channel Settings"));
+                assert!(text.contains("Web:"));
+                assert!(text.contains("Signal:"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn channel_web_on_enables() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/channel web on");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("enabled"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert!(cfg.get_bool("channels.web.enabled", false));
+    }
+
+    #[test]
+    fn channel_web_off_disables() {
+        let (_dir, mut cfg) = temp_config();
+        {
+            let mut handler = CommandHandler::new(&mut cfg);
+            handler.execute("/channel web on");
+        }
+        assert!(cfg.get_bool("channels.web.enabled", false));
+        {
+            let mut handler = CommandHandler::new(&mut cfg);
+            let result = handler.execute("/channel web off");
+            match result {
+                CommandResult::Response(text) => {
+                    assert!(text.contains("disabled"));
+                }
+                other => panic!("expected Response, got {other:?}"),
+            }
+        }
+        assert!(!cfg.get_bool("channels.web.enabled", true));
+    }
+
+    #[test]
+    fn channel_signal_phone_sets_phone() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/channel signal phone +1234567890");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("+1234567890"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("channels.signal.phone", ""), "+1234567890");
+    }
+
+    #[test]
+    fn wake_shows_current_wake_word() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/wake");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Wake word:"));
+                assert!(text.contains("hey aios"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wake_sets_new_wake_word() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/wake ok computer");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("ok computer"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("voice.wake_word", ""), "ok computer");
+    }
+
+    #[test]
+    fn wake_off_disables() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/wake off");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("disabled"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert!(!cfg.get_bool("voice.wake_enabled", true));
+    }
+
+    #[test]
+    fn wake_on_enables() {
+        let (_dir, mut cfg) = temp_config();
+        {
+            let mut handler = CommandHandler::new(&mut cfg);
+            handler.execute("/wake off");
+        }
+        {
+            let mut handler = CommandHandler::new(&mut cfg);
+            let result = handler.execute("/wake on");
+            match result {
+                CommandResult::Response(text) => {
+                    assert!(text.contains("enabled"));
+                }
+                other => panic!("expected Response, got {other:?}"),
+            }
+        }
+        assert!(cfg.get_bool("voice.wake_enabled", false));
+    }
+
+    #[test]
+    fn selftest_returns_selftest_variant() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        match handler.execute("/selftest") {
+            CommandResult::SelfTest(filter) => assert!(filter.is_empty()),
+            other => panic!("expected SelfTest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn selftest_with_filter() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        match handler.execute("/selftest quick") {
+            CommandResult::SelfTest(filter) => assert_eq!(filter, "quick"),
+            other => panic!("expected SelfTest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sysinfo_returns_sysinfo_variant() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        assert!(matches!(handler.execute("/sysinfo"), CommandResult::SysInfo));
+    }
+
+    #[test]
+    fn close_returns_closepanel_variant() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        assert!(matches!(handler.execute("/close"), CommandResult::ClosePanel));
+    }
+
+    #[test]
+    fn update_returns_update_variant() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        match handler.execute("/update") {
+            CommandResult::Update(url) => assert!(url.is_empty()),
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_with_url() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        match handler.execute("/update https://example.com/aios.bin") {
+            CommandResult::Update(url) => assert_eq!(url, "https://example.com/aios.bin"),
+            other => panic!("expected Update, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_command_returns_unknown() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        match handler.execute("/foobar") {
+            CommandResult::Unknown(cmd) => assert_eq!(cmd, "/foobar"),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_command_case_insensitive() {
+        let (cmd, _) = CommandHandler::parse("/HELP").unwrap();
+        assert_eq!(cmd, "/help");
+    }
+
+    #[test]
+    fn parse_command_with_leading_space_not_command() {
+        let result = CommandHandler::parse("/ help");
+        assert!(result.is_some());
+        let (cmd, _) = result.unwrap();
+        assert_eq!(cmd, "/");
+    }
+
+    #[test]
+    fn empty_input_is_not_command() {
+        assert!(CommandHandler::parse("").is_none());
+        assert!(CommandHandler::parse("   ").is_none());
+        assert!(CommandHandler::parse("hello").is_none());
+    }
+
+    #[test]
+    fn execute_speaker_on_off() {
+        let (_dir, mut cfg) = temp_config();
+        {
+            let mut handler = CommandHandler::new(&mut cfg);
+            handler.execute("/speaker off");
+        }
+        assert!(!cfg.get_bool("voice.tts_enabled", true));
+        {
+            let mut handler = CommandHandler::new(&mut cfg);
+            handler.execute("/speaker on");
+        }
+        assert!(cfg.get_bool("voice.tts_enabled", false));
+    }
+
+    #[test]
+    fn execute_language_set_and_auto() {
+        let (_dir, mut cfg) = temp_config();
+        {
+            let mut handler = CommandHandler::new(&mut cfg);
+            let result = handler.execute("/language ro");
+            match result {
+                CommandResult::Response(text) => assert!(text.contains("ro")),
+                other => panic!("expected Response, got {other:?}"),
+            }
+        }
+        assert_eq!(cfg.get_str("voice.stt_language", ""), "ro");
+
+        {
+            let mut handler = CommandHandler::new(&mut cfg);
+            let result = handler.execute("/language");
+            match result {
+                CommandResult::Response(text) => assert!(text.contains("auto-detect")),
+                other => panic!("expected Response, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn execute_model_set() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/model gpt-4o-mini");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("gpt-4o-mini"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_model_empty_args() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/model");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Usage"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_voice_set() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/voice en_US-ryan-medium");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("en_US-ryan-medium"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("voice.tts_voice", ""), "en_US-ryan-medium");
+    }
+
+    #[test]
+    fn execute_resolution_valid() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/resolution 1920x1080");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("1920x1080"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn execute_resolution_invalid() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/resolution blah");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Usage"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_list_returns_all_commands() {
+        let list = command_list();
+        assert!(list.len() >= 20, "expected at least 20 commands, got {}", list.len());
+        let names: Vec<&str> = list.iter().map(|c| c.command).collect();
+        assert!(names.contains(&"/help"));
+        assert!(names.contains(&"/key"));
+        assert!(names.contains(&"/channel"));
+        assert!(names.contains(&"/selftest"));
+        assert!(names.contains(&"/wake"));
     }
 }

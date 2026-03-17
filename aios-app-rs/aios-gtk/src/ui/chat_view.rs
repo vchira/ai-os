@@ -8,6 +8,40 @@ use gtk4::prelude::*;
 use gtk4::{self as gtk, Align, Orientation};
 
 // ---------------------------------------------------------------------------
+// CardHandle — allows a card to dismiss its own interactive input
+// ---------------------------------------------------------------------------
+
+/// Handle to a setup card's interactive input area.
+///
+/// When a button in the card is clicked, call [`dismiss`] to replace all
+/// interactive elements with a compact label showing what was chosen.
+#[derive(Clone)]
+pub struct CardHandle {
+    input_area: gtk::Box,
+    parent_card: gtk::Box,
+}
+
+impl CardHandle {
+    /// Remove all interactive widgets from this card and show what was chosen.
+    pub fn dismiss(&self, choice_text: &str) {
+        // Remove the input area from the card.
+        self.parent_card.remove(&self.input_area);
+
+        // Show a compact summary of what was chosen.
+        let chosen = gtk::Label::new(None);
+        let escaped = choice_text
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        chosen.set_markup(&format!("<i>\u{2714} {escaped}</i>"));
+        chosen.set_xalign(0.0);
+        chosen.set_margin_top(4);
+        chosen.set_opacity(0.7);
+        self.parent_card.append(&chosen);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ChatView
 // ---------------------------------------------------------------------------
 
@@ -19,6 +53,8 @@ use gtk4::{self as gtk, Align, Orientation};
 pub struct ChatView {
     container: gtk::Box,
     scroll_window: std::cell::RefCell<Option<gtk::ScrolledWindow>>,
+    /// The input area of the last setup card (so we can remove it once answered).
+    last_card_input: std::cell::RefCell<Option<gtk::Box>>,
 }
 
 impl ChatView {
@@ -33,6 +69,7 @@ impl ChatView {
         Self {
             container,
             scroll_window: std::cell::RefCell::new(None),
+            last_card_input: std::cell::RefCell::new(None),
         }
     }
 
@@ -150,13 +187,13 @@ impl ChatView {
         let bubble = gtk::Box::new(Orientation::Vertical, 4);
         bubble.add_css_class("message-bubble");
 
-        let label = gtk::Label::new(Some(content));
+        let pango = aios_core::types::to_pango(content);
+        let label = gtk::Label::new(None);
+        label.set_markup(&pango);
         label.set_wrap(true);
         label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         label.set_xalign(0.0);
         label.set_selectable(true);
-        // Use Pango markup so we can render bold/italic.
-        label.set_use_markup(true);
         bubble.append(&label);
 
         row.append(&bubble);
@@ -182,7 +219,7 @@ impl ChatView {
         title: &str,
         description: &str,
         input_widget: Option<&gtk::Widget>,
-    ) {
+    ) -> Option<CardHandle> {
         let row = gtk::Box::new(Orientation::Vertical, 2);
         row.add_css_class("message-row");
         row.add_css_class("message-assistant");
@@ -228,19 +265,65 @@ impl ChatView {
         desc_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
         card.append(&desc_label);
 
-        // Optional input widget.
-        if let Some(widget) = input_widget {
+        // Optional input widget — returns a CardHandle for self-dismissal.
+        let handle = if let Some(widget) = input_widget {
             let input_area = gtk::Box::new(Orientation::Vertical, 0);
             input_area.add_css_class("setup-card-input");
             input_area.set_margin_top(8);
             input_area.append(widget);
             card.append(&input_area);
-        }
+            *self.last_card_input.borrow_mut() = Some(input_area.clone());
+            Some(CardHandle {
+                input_area,
+                parent_card: card.clone(),
+            })
+        } else {
+            *self.last_card_input.borrow_mut() = None;
+            None
+        };
 
         row.append(&card);
         self.container.append(&row);
-
         self.scroll_to_bottom();
+
+        handle
+    }
+
+    /// Remove the interactive input area from the last setup card.
+    ///
+    /// Call this after the user has answered a setup step. The card's
+    /// title and description remain visible, but the buttons/inputs
+    /// are removed so the user can't click them again.
+    pub fn dismiss_last_card_input(&self) {
+        self.dismiss_last_card_input_with_choice(None);
+    }
+
+    /// Dismiss the last card's interactive input area and optionally replace
+    /// it with a label showing what the user chose.
+    pub fn dismiss_last_card_input_with_choice(&self, choice_text: Option<&str>) {
+        if let Some(input_area) = self.last_card_input.borrow_mut().take() {
+            if let Some(parent) = input_area.parent() {
+                if let Some(parent_box) = parent.downcast_ref::<gtk::Box>() {
+                    parent_box.remove(&input_area);
+
+                    // Show a compact summary of what was chosen.
+                    if let Some(text) = choice_text {
+                        let chosen = gtk::Label::new(None);
+                        let escaped = text
+                            .replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;");
+                        chosen.set_markup(&format!(
+                            "<i>\u{2714} {escaped}</i>"
+                        ));
+                        chosen.set_xalign(0.0);
+                        chosen.set_margin_top(4);
+                        chosen.set_opacity(0.7);
+                        parent_box.append(&chosen);
+                    }
+                }
+            }
+        }
     }
 
     /// Remove all messages from the chat view.

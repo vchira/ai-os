@@ -165,9 +165,7 @@ fn resolve_path(path_str: &str) -> Result<PathBuf, String> {
 }
 
 fn home_dir() -> PathBuf {
-    directories::BaseDirs::new()
-        .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+    crate::home_dir()
 }
 
 // ---------------------------------------------------------------------------

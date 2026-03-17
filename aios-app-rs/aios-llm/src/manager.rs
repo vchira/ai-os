@@ -649,14 +649,9 @@ impl LlmManager {
                     Some(tools.as_slice())
                 };
 
-                // Check if the provider was recently used.
-                if let Some(last) = warmup_provider.last_request_at() {
-                    if last.elapsed() < interval {
-                        debug!("keep-warm: skipping — recent request within interval");
-                        continue;
-                    }
-                }
-
+                // Note: last_request_at() on the warmup provider is always None
+                // (freshly constructed), so we skip the stale check and always
+                // send the ping. The real provider's usage is not accessible here.
                 debug!("keep-warm: sending ping for '{}'", provider_name);
                 match warmup_provider.warmup(sp, tools_ref).await {
                     Ok(()) => {
@@ -741,8 +736,8 @@ impl LlmManager {
         self.user_retry_pending = false;
 
         // -- 0b. Semantic cache check -----------------------------------------
-        // Skip cache for slash commands and when tools are available (dynamic).
-        if !user_message.starts_with('/') && tools.is_empty() {
+        // Skip cache for slash commands, when tools are available, and on retry.
+        if !user_message.starts_with('/') && tools.is_empty() && !user_requested_retry {
             if let Some(cached) = self.semantic_cache.get(user_message) {
                 info!(
                     "Semantic cache hit for: {}",
@@ -884,7 +879,7 @@ impl LlmManager {
                 // Store in semantic cache if applicable.
                 // (We only cache text-only responses, not tool-call responses.)
                 if let Some(content) = &response.content {
-                    if !user_message.starts_with('/') {
+                    if !user_message.starts_with('/') && tools.is_empty() {
                         self.semantic_cache.put(user_message, content);
                     }
                 }
@@ -947,8 +942,8 @@ impl LlmManager {
 
             // Execute each tool and feed results back.
             let mut tool_error_occurred = false;
-            let channel = self.active_channel.clone();
             for tc in &response.tool_calls {
+                let channel = self.active_channel.clone();
                 let result = std::panic::catch_unwind(
                     std::panic::AssertUnwindSafe(|| {
                         executor(tc.name.clone(), tc.arguments.clone(), channel.clone())

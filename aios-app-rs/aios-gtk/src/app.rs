@@ -12,7 +12,7 @@ use std::sync::Arc;
 use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 use aios_core::config::commands::{CommandHandler, CommandResult};
 use aios_core::config::ConfigManager;
@@ -33,6 +33,244 @@ use crate::ui::settings_dialog;
 // ---------------------------------------------------------------------------
 // AiosApp
 // ---------------------------------------------------------------------------
+
+/// Start a background voice listener thread that continuously captures audio,
+/// detects speech via VAD, and transcribes using whisper-cpp (or sends raw
+/// audio to the STT engine). Transcribed text is sent back to the GTK thread
+/// via the provided glib sender.
+fn start_voice_listener(
+    stt_tx: std::sync::mpsc::Sender<String>,
+    stt_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    use aios_voice::audio::capture::AudioCapture;
+    use aios_voice::audio::vad::{VadConfig, VoiceActivityDetector, DEFAULT_FRAME_SIZE};
+
+    std::thread::spawn(move || {
+        info!("Voice listener thread started");
+
+        let mut capture = AudioCapture::new();
+        let mut vad = VoiceActivityDetector::new(VadConfig {
+            threshold: 0.015,
+            min_speech_frames: 4,
+            min_silence_frames: 20, // ~600ms of silence to end utterance
+        });
+
+        // Buffer to accumulate speech audio
+        let mut speech_buffer: Vec<f32> = Vec::new();
+        let mut was_active = false;
+
+        // Try to start recording — may fail in VMs where mic is not available
+        if let Err(e) = capture.start_recording() {
+            warn!("Voice listener: no microphone available: {e}");
+            let _ = stt_tx.send(String::new()); // empty = no error shown
+            // Check if we're in a VM (no mic through SPICE)
+            let is_vm = std::path::Path::new("/sys/class/dmi/id/product_name")
+                .read_dir().is_ok()
+                || std::fs::read_to_string("/sys/class/dmi/id/chassis_type")
+                    .map(|s| s.trim() == "1") // "1" = Other (VM)
+                    .unwrap_or(false);
+            if is_vm {
+                info!("Voice listener: running in VM — microphone not available via SPICE. STT will work on real hardware.");
+            }
+            return;
+        }
+        info!("Voice listener: recording started, waiting for speech...");
+
+        loop {
+            // Check if STT is still enabled
+            if !stt_enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                continue;
+            }
+
+            // Read accumulated samples from the capture buffer
+            std::thread::sleep(std::time::Duration::from_millis(30));
+
+            // Access the capture buffer directly
+            let samples = {
+                if let Ok(mut buf) = capture.buffer().lock() {
+                    let s = std::mem::take(&mut *buf);
+                    s
+                } else {
+                    continue;
+                }
+            };
+
+            if samples.is_empty() {
+                continue;
+            }
+
+            // Process frames through VAD
+            for chunk in samples.chunks(DEFAULT_FRAME_SIZE) {
+                let is_active = vad.process_frame(chunk);
+
+                if is_active {
+                    speech_buffer.extend_from_slice(chunk);
+                } else if was_active && !is_active {
+                    // Speech just ended — transcribe the buffer
+                    let audio_duration = speech_buffer.len() as f32 / 16000.0;
+
+                    if audio_duration > 0.5 && audio_duration < 30.0 {
+                        info!("Voice listener: speech detected ({audio_duration:.1}s), transcribing...");
+
+                        // Try whisper-cpp-cli first
+                        match transcribe_with_whisper(&speech_buffer) {
+                            Ok(text) if !text.is_empty() => {
+                                info!("Voice listener: transcribed: {}", &text[..text.len().min(50)]);
+                                let _ = stt_tx.send(text);
+                            }
+                            Ok(_) => {
+                                debug!("Voice listener: empty transcription, ignoring");
+                            }
+                            Err(e) => {
+                                warn!("Voice listener: transcription failed: {e}");
+                            }
+                        }
+                    }
+
+                    speech_buffer.clear();
+                    vad.reset();
+                }
+                was_active = is_active;
+            }
+
+            // Prevent unbounded buffer growth
+            if speech_buffer.len() > 16000 * 30 {
+                warn!("Voice listener: speech buffer too large, clearing");
+                speech_buffer.clear();
+                vad.reset();
+            }
+        }
+    })
+}
+
+/// Transcribe audio samples using whisper-cpp-cli.
+fn transcribe_with_whisper(samples: &[f32]) -> Result<String, String> {
+    // Write samples as WAV to a temp file
+    let tmp_path = "/tmp/aios-stt-input.wav";
+    let sample_rate: u32 = 16000;
+    let num_samples = samples.len() as u32;
+    let data_size = num_samples * 2; // 16-bit samples
+
+    let mut buf: Vec<u8> = Vec::with_capacity(44 + data_size as usize);
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes());
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&1u16.to_le_bytes()); // mono
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+    buf.extend_from_slice(&2u16.to_le_bytes()); // block align
+    buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+
+    for &s in samples {
+        let sample = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        buf.extend_from_slice(&sample.to_le_bytes());
+    }
+
+    std::fs::write(tmp_path, &buf).map_err(|e| format!("Failed to write WAV: {e}"))?;
+
+    // Try whisper-cpp-cli
+    let output = std::process::Command::new("whisper-cpp-cli")
+        .args(["-m", "/home/aios/.aios/models/whisper/ggml-tiny.bin"])
+        .args(["-f", tmp_path])
+        .args(["--no-timestamps", "-nt"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("whisper-cpp-cli not available: {e}"))?;
+
+    let _ = std::fs::remove_file(tmp_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("whisper failed: {stderr}"));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+
+    Ok(text)
+}
+
+/// Speak text using espeak-ng if TTS is enabled.
+///
+/// Runs in a background thread so it doesn't block the GTK main loop.
+fn speak_if_enabled(text: &str, config: &ConfigManager) {
+    let tts_enabled = config.get_bool("voice.tts_enabled", true);
+    if !tts_enabled {
+        return;
+    }
+    let text = text.to_string();
+    std::thread::spawn(move || {
+        // Truncate very long responses for TTS (read first ~500 chars)
+        let speak_text = if text.len() > 500 {
+            format!("{}... and more.", &text[..text.floor_char_boundary(500)])
+        } else {
+            text
+        };
+
+        // Try Piper first (high-quality, natural sounding voice)
+        let piper_model = "/home/aios/.aios/models/piper/en_US-amy-medium.onnx";
+        if std::path::Path::new(piper_model).exists() {
+            let mut child = match std::process::Command::new("piper")
+                .args(["--model", piper_model, "--output_raw"])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => {
+                    // Piper not available, fall through to espeak
+                    let _ = std::process::Command::new("espeak-ng")
+                        .args(["-v", "en", "-s", "170"])
+                        .arg(&speak_text)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    return;
+                }
+            };
+
+            // Write text to piper's stdin
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write;
+                let _ = stdin.write_all(speak_text.as_bytes());
+                drop(stdin); // Close stdin to signal EOF
+            }
+
+            // Pipe piper's raw audio output to aplay
+            if let Some(stdout) = child.stdout.take() {
+                let _ = std::process::Command::new("aplay")
+                    .args(["-r", "22050", "-f", "S16_LE", "-t", "raw", "-c", "1"])
+                    .stdin(stdout)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            let _ = child.wait();
+            return;
+        }
+
+        // Fallback: espeak-ng (robotic but always available)
+        let _ = std::process::Command::new("espeak-ng")
+            .args(["-v", "en", "-s", "170"])
+            .arg(&speak_text)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
 
 /// Application-level state shared across signal handlers.
 ///
@@ -204,8 +442,13 @@ impl AiosApp {
             Ok(c) => c,
             Err(e) => {
                 warn!("Failed to load config, using defaults: {e}");
-                ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json"))
-                    .expect("fallback config path must work")
+                match ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json")) {
+                    Ok(c) => c,
+                    Err(e2) => {
+                        error!("Fallback config also failed: {e2}");
+                        panic!("Cannot initialize configuration from any path");
+                    }
+                }
             }
         };
 
@@ -330,8 +573,13 @@ impl AiosApp {
             Ok(c) => c,
             Err(e) => {
                 warn!("Failed to load config, using defaults: {e}");
-                ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json"))
-                    .expect("fallback config path must work")
+                match ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json")) {
+                    Ok(c) => c,
+                    Err(e2) => {
+                        error!("Fallback config also failed: {e2}");
+                        panic!("Cannot initialize configuration from any path");
+                    }
+                }
             }
         };
 
@@ -590,16 +838,16 @@ impl AiosApp {
                     // Always show in Desktop chat (conversation continuity).
                     chat_for_loop.add_message("user", &msg.text);
 
-                    // Record in conversation history.
-                    {
-                        let mut s = state_for_loop.borrow_mut();
-                        s.conversation.push(aios_core::types::Message::user(&msg.text));
-                    }
-
-                    // Handle slash commands from remote channels.
+                    // Handle slash commands from remote channels (don't add to LLM history).
                     if msg.text.starts_with('/') {
                         Self::handle_command(&state_for_loop, &chat_for_loop, &msg.text);
                         continue;
+                    }
+
+                    // Record in conversation history (after slash command check).
+                    {
+                        let mut s = state_for_loop.borrow_mut();
+                        s.conversation.push(aios_core::types::Message::user(&msg.text));
                     }
 
                     // Send to LLM and route response to active channel (item 4).
@@ -607,7 +855,7 @@ impl AiosApp {
                     let history = state_for_loop.borrow().conversation.clone();
                     let text = msg.text.clone();
                     let sender_id = msg.sender_id.clone();
-                    let active_channel = switcher_for_loop.active_kind();
+                    let active_channel = msg.channel;
                     let (resp_tx, resp_rx) = std::sync::mpsc::channel::<LlmResult>();
                     let web_tx_inner = web_tx.clone();
                     let sig_inner = sig_sender.clone();
@@ -623,7 +871,7 @@ impl AiosApp {
 
                         match result {
                             Ok(response) => {
-                                let content = response.content.unwrap_or_default();
+                                let content = response.content.unwrap_or_else(|| "I received your message but have no response text.".to_string());
                                 // Route to active channel.
                                 match active_channel {
                                     aios_core::channel::ChannelKind::Web => {
@@ -665,6 +913,7 @@ impl AiosApp {
                         match resp_rx.try_recv() {
                             Ok(LlmResult::Success { content, updated_history }) => {
                                 chat_for_resp.add_message("assistant", &content);
+                                speak_if_enabled(&content, &state_for_resp.borrow().config);
                                 let mut s = state_for_resp.borrow_mut();
                                 s.conversation = updated_history;
                                 s.conversation.push(aios_core::types::Message::assistant(&content));
@@ -710,12 +959,41 @@ impl AiosApp {
             settings_dialog::show_settings(&win_ref, &s.config);
         });
 
-        // Mic toggle.
+        // Mic toggle + voice listener.
+        let stt_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            state.borrow().config.get_bool("voice.stt_enabled", true),
+        ));
+        let stt_flag = stt_enabled.clone();
         let state_ref = state.clone();
         main_window::connect_mic_toggle(&window, move |active| {
             let mut s = state_ref.borrow_mut();
             let _ = s.config.set("voice.stt_enabled", serde_json::json!(active));
+            stt_flag.store(active, std::sync::atomic::Ordering::Relaxed);
             info!("Mic toggled: {active}");
+        });
+
+        // Start voice listener thread — receives transcribed text via mpsc channel.
+        let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
+        let _voice_handle = start_voice_listener(stt_tx, stt_enabled);
+
+        // Poll for transcribed text from the voice listener (GTK main thread).
+        let state_ref = state.clone();
+        let chat_view_ref = chat_view.clone();
+        let prompt_ref = prompt_input.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            while let Ok(text) = stt_rx.try_recv() {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+
+                info!("STT transcription received: {}", &text[..text.len().min(50)]);
+                chat_view_ref.add_message("user", &format!("\u{1f3a4} {text}"));
+
+                // Send to LLM
+                Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
+            }
+            glib::ControlFlow::Continue
         });
 
         // Speaker toggle.
@@ -865,11 +1143,13 @@ impl AiosApp {
                 );
             }
             CommandResult::SysInfo => {
+                drop(s);
                 let info = aios_core::system_monitor::SystemInfo::gather();
                 chat_view.add_level_message(
                     aios_core::types::MessageLevel::Info,
                     &info.format_text(),
                 );
+                return;
             }
             CommandResult::ClosePanel => {
                 drop(s);
@@ -885,6 +1165,41 @@ impl AiosApp {
                 drop(s);
                 Self::run_selftest(state, chat_view, &filter);
                 return;
+            }
+            CommandResult::Update(url) => {
+                let url = url.trim().to_string();
+                if url.is_empty() {
+                    chat_view.add_message("system",
+                        "Usage: /update <url>\n\
+                         Example: /update https://example.com/aios\n\n\
+                         Or from your dev machine:\n\
+                         ./deploy.sh aios.local");
+                } else {
+                    chat_view.add_level_message(
+                        aios_core::types::MessageLevel::Warning,
+                        &format!("Updating AiOS from: **{url}**\nThis will restart the app..."),
+                    );
+                    // Run aios-update in the background.
+                    let rt = s.rt.clone();
+                    drop(s);
+                    rt.spawn(async move {
+                        let output = tokio::process::Command::new("aios-update")
+                            .arg(&url)
+                            .output()
+                            .await;
+                        match output {
+                            Ok(o) => {
+                                let stdout = String::from_utf8_lossy(&o.stdout);
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                tracing::info!("aios-update: {stdout}{stderr}");
+                            }
+                            Err(e) => {
+                                tracing::error!("aios-update failed: {e}");
+                            }
+                        }
+                    });
+                    return;
+                }
             }
             CommandResult::Unknown(cmd) => {
                 chat_view.add_message(
@@ -1050,6 +1365,7 @@ impl AiosApp {
             match rx.try_recv() {
                 Ok(LlmResult::Success { content, updated_history }) => {
                     chat_view_ref.add_message("assistant", &content);
+                    speak_if_enabled(&content, &state_ref.borrow().config);
                     let mut s = state_ref.borrow_mut();
                     s.conversation = updated_history;
                     s.conversation

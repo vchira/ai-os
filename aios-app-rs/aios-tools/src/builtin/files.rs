@@ -81,11 +81,9 @@ fn resolve_safe(path_str: &str, root: &Path) -> Result<PathBuf, String> {
     Ok(resolved)
 }
 
-/// Get the user's home directory.
+/// Get the user's home directory (shared implementation).
 fn home_dir() -> PathBuf {
-    directories::BaseDirs::new()
-        .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+    crate::home_dir()
 }
 
 /// File-system operations scoped to the user's home directory.

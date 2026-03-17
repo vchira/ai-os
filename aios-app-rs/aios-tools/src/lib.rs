@@ -41,3 +41,10 @@ pub use error::ToolError;
 pub use registry::ToolRegistry;
 pub use sandbox::{Sandbox, SandboxType};
 pub use tool::Tool;
+
+/// Return the user's home directory, falling back to `/tmp`.
+pub fn home_dir() -> std::path::PathBuf {
+    directories::BaseDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+}

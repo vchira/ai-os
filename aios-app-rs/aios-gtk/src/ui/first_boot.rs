@@ -62,6 +62,8 @@ enum SetupStep {
 
 struct SetupState {
     step: SetupStep,
+    /// Monotonic counter bumped on every step change — used to detect stale callbacks.
+    step_version: u32,
     /// Providers configured so far.
     providers: Vec<ProviderSetup>,
     /// The master password (set during CreatePassword).
@@ -76,6 +78,7 @@ impl Default for SetupState {
     fn default() -> Self {
         Self {
             step: SetupStep::Welcome,
+            step_version: 0,
             providers: Vec::new(),
             master_password: String::new(),
             pending_password: String::new(),
@@ -217,7 +220,26 @@ impl SetupConversation {
     }
 
     /// Advance to the next step.
+    ///
+    /// Dismisses the interactive widgets from the previous step's card
+    /// so the user can't click old buttons.
     fn advance(&self, next: SetupStep) {
+        self.advance_with_choice(next, None);
+    }
+
+    /// Advance to the next step, showing what the user chose in the previous card.
+    fn advance_with_choice(&self, next: SetupStep, choice: Option<&str>) {
+        // Prevent double-click race — only advance if the step actually changes.
+        {
+            let mut s = self.state.borrow_mut();
+            if s.step == next {
+                return; // Already on this step (duplicate click)
+            }
+            // Bump version so stale closures from the old step are ignored.
+            let new_ver = s.step_version.wrapping_add(1);
+            s.step_version = new_ver;
+        }
+        self.chat_view.dismiss_last_card_input_with_choice(choice);
         self.show_step(next);
     }
 
@@ -230,18 +252,19 @@ impl SetupConversation {
         btn.set_halign(Align::Start);
         btn.set_margin_top(8);
 
-        let this = self.clone();
-        btn.connect_clicked(move |_| {
-            this.advance(SetupStep::TestAudioOutput);
-        });
-
-        self.chat_view.add_setup_card(
+        let handle = self.chat_view.add_setup_card(
             "starred-symbolic",
             "Welcome to AiOS!",
             "I'm your AI assistant. Let's set up your system together.\n\
              First, let's check your audio.",
             Some(btn.upcast_ref()),
         );
+
+        let this = self.clone();
+        btn.connect_clicked(move |_| {
+            if let Some(ref h) = handle { h.dismiss("Let's go!"); }
+            this.advance(SetupStep::TestAudioOutput);
+        });
 
         self.speak(
             "Welcome to AiOS! I'm your AI assistant. \
@@ -271,31 +294,36 @@ impl SetupConversation {
 
         let yes_btn = gtk::Button::with_label("\u{2705} Yes, I can hear");
         yes_btn.add_css_class("suggested-action");
-        let this = self.clone();
-        yes_btn.connect_clicked(move |_| {
-            this.chat_view.add_message("user", "Yes, I can hear the audio");
-            this.advance(SetupStep::TestAudioInput);
-        });
         btn_box.append(&yes_btn);
 
         let no_btn = gtk::Button::with_label("\u{274c} No audio / Skip");
-        let this = self.clone();
-        no_btn.connect_clicked(move |_| {
-            this.chat_view.add_message("user", "Skip audio test");
-            this.chat_view.add_message("system",
-                "Audio output skipped. You can configure it later in Settings.");
-            this.advance(SetupStep::ChooseProvider);
-        });
         btn_box.append(&no_btn);
         input_box.append(&btn_box);
 
-        self.chat_view.add_setup_card(
+        let handle = self.chat_view.add_setup_card(
             "audio-speakers-symbolic",
             "Test Audio Output",
             "Let's check if you can hear me.\n\
              I'll play a test message. Click Replay if you need to hear it again.",
             Some(input_box.upcast_ref()),
         );
+
+        let this = self.clone();
+        let h = handle.clone();
+        yes_btn.connect_clicked(move |_| {
+            if let Some(ref h) = h { h.dismiss("Audio works"); }
+            this.chat_view.add_message("user", "Yes, I can hear the audio");
+            this.advance(SetupStep::TestAudioInput);
+        });
+
+        let this = self.clone();
+        no_btn.connect_clicked(move |_| {
+            if let Some(ref h) = handle { h.dismiss("Skipped audio test"); }
+            this.chat_view.add_message("user", "Skip audio test");
+            this.chat_view.add_message("system",
+                "Audio output skipped. You can configure it later in Settings.");
+            this.advance(SetupStep::ChooseProvider);
+        });
 
         // Speak the test phrase.
         self.speak("Can you hear me? This is AiOS speaking.");
@@ -319,22 +347,24 @@ impl SetupConversation {
         skip_btn.set_halign(Align::Start);
         skip_btn.set_margin_top(8);
 
-        let this = self.clone();
-        skip_btn.connect_clicked(move |_| {
-            this.chat_view.add_message("user", "Skip mic test");
-            this.chat_view.add_message("system",
-                "Mic test skipped. You can configure voice input later in Settings.");
-            this.advance(SetupStep::ChooseProvider);
-        });
         input_box.append(&skip_btn);
 
-        self.chat_view.add_setup_card(
+        let handle = self.chat_view.add_setup_card(
             "audio-input-microphone-symbolic",
             "Test Microphone",
             "Now let's check your microphone.\n\
              Say something \u{2014} I'll show you what I hear.",
             Some(input_box.upcast_ref()),
         );
+
+        let this = self.clone();
+        skip_btn.connect_clicked(move |_| {
+            if let Some(ref h) = handle { h.dismiss("Skipped mic test"); }
+            this.chat_view.add_message("user", "Skip mic test");
+            this.chat_view.add_message("system",
+                "Mic test skipped. You can configure voice input later in Settings.");
+            this.advance(SetupStep::ChooseProvider);
+        });
 
         self.speak(
             "Now let's test your microphone. Please say something.",
@@ -353,10 +383,6 @@ impl SetupConversation {
             "Advanced reasoning and analysis, strong at coding tasks",
         );
 
-        let this = self.clone();
-        claude_btn.connect_clicked(move |_| {
-            this.select_provider("claude");
-        });
         input_box.append(&claude_btn);
 
         // OpenAI button.
@@ -364,19 +390,27 @@ impl SetupConversation {
             "OpenAI",
             "GPT-4o with broad general knowledge and tool use",
         );
-
-        let this = self.clone();
-        openai_btn.connect_clicked(move |_| {
-            this.select_provider("openai");
-        });
         input_box.append(&openai_btn);
 
-        self.chat_view.add_setup_card(
+        let handle = self.chat_view.add_setup_card(
             "network-server-symbolic",
             "Choose Your AI Provider",
             "Which AI would you like to use as your primary assistant?",
             Some(input_box.upcast_ref()),
         );
+
+        let this = self.clone();
+        let h = handle.clone();
+        claude_btn.connect_clicked(move |_| {
+            if let Some(ref h) = h { h.dismiss("Claude (Anthropic)"); }
+            this.select_provider("claude");
+        });
+
+        let this = self.clone();
+        openai_btn.connect_clicked(move |_| {
+            if let Some(ref h) = handle { h.dismiss("OpenAI"); }
+            this.select_provider("openai");
+        });
 
         self.speak(
             "Which AI provider would you like to use? \
@@ -427,7 +461,7 @@ impl SetupConversation {
         let next = SetupStep::EnterApiKey {
             provider: provider.to_owned(),
         };
-        self.advance(next);
+        self.advance_with_choice(next, Some(display));
     }
 
     // -- Step 3 / Step 7: Enter API Key ------------------------------------
@@ -475,13 +509,14 @@ impl SetupConversation {
         let entry_ref = entry.clone();
         let error_ref = error_label.clone();
         let provider_clone = provider.clone();
-        next_btn.connect_clicked(move |_| {
+        next_btn.connect_clicked(move |b| {
             let api_key = entry_ref.text().to_string().trim().to_owned();
             if api_key.is_empty() {
                 error_ref.set_text("Please enter an API key");
                 error_ref.set_visible(true);
                 return;
             }
+            b.set_sensitive(false);
             error_ref.set_visible(false);
 
             this.store_api_key(&provider_clone, api_key, is_backup);
@@ -610,13 +645,14 @@ impl SetupConversation {
             let this = self.clone();
             let entry_ref = entry.clone();
             let error_ref = error_label.clone();
-            next_btn.connect_clicked(move |_| {
+            next_btn.connect_clicked(move |b| {
                 let password = entry_ref.text().to_string();
                 if password.len() < 8 {
                     error_ref.set_text("Password must be at least 8 characters");
                     error_ref.set_visible(true);
                     return;
                 }
+                b.set_sensitive(false);
                 error_ref.set_visible(false);
 
                 {
@@ -698,7 +734,7 @@ impl SetupConversation {
             let this = self.clone();
             let entry_ref = entry.clone();
             let error_ref = error_label.clone();
-            next_btn.connect_clicked(move |_| {
+            next_btn.connect_clicked(move |b| {
                 let confirm = entry_ref.text().to_string();
                 let pending = this.state.borrow().pending_password.clone();
 
@@ -707,6 +743,7 @@ impl SetupConversation {
                     error_ref.set_visible(true);
                     return;
                 }
+                b.set_sensitive(false);
                 error_ref.set_visible(false);
 
                 {
@@ -779,7 +816,8 @@ impl SetupConversation {
         yes_btn.set_halign(Align::Start);
 
         let this = self.clone();
-        yes_btn.connect_clicked(move |_| {
+        yes_btn.connect_clicked(move |b| {
+            b.set_sensitive(false);
             this.handle_add_backup(true);
         });
         input_box.append(&yes_btn);
@@ -788,7 +826,8 @@ impl SetupConversation {
         no_btn.set_halign(Align::Start);
 
         let this = self.clone();
-        no_btn.connect_clicked(move |_| {
+        no_btn.connect_clicked(move |b| {
+            b.set_sensitive(false);
             this.handle_add_backup(false);
         });
         input_box.append(&no_btn);
@@ -818,12 +857,13 @@ impl SetupConversation {
                 if backup == "claude" { "Claude" } else { "OpenAI" }
             ));
 
-            self.advance(SetupStep::EnterBackupKey {
+            let display = if backup == "claude" { "Claude" } else { "OpenAI" };
+            self.advance_with_choice(SetupStep::EnterBackupKey {
                 provider: backup.to_owned(),
-            });
+            }, Some(&format!("Add {display}")));
         } else {
             self.chat_view.add_message("user", "No, I'm good");
-            self.advance(SetupStep::Complete);
+            self.advance_with_choice(SetupStep::Complete, Some("No backup provider"));
         }
     }
 
@@ -853,7 +893,8 @@ impl SetupConversation {
 
             let this = self.clone();
             let name = p.name.clone();
-            btn.connect_clicked(move |_| {
+            btn.connect_clicked(move |b| {
+                b.set_sensitive(false);
                 this.set_primary_order(&name);
             });
             input_box.append(&btn);
@@ -926,7 +967,8 @@ impl SetupConversation {
         btn.set_margin_top(8);
 
         let this = self.clone();
-        btn.connect_clicked(move |_| {
+        btn.connect_clicked(move |b| {
+            b.set_sensitive(false);
             this.finish();
         });
 
@@ -945,6 +987,7 @@ impl SetupConversation {
 
     /// Invoke the completion callback with the accumulated setup result.
     fn finish(&self) {
+        self.chat_view.dismiss_last_card_input();
         let s = self.state.borrow();
         let result = SetupResult {
             providers: s.providers.clone(),
@@ -968,21 +1011,120 @@ impl SetupConversation {
 
     /// Attempt to speak text via TTS. Currently just logs — real TTS integration
     /// will be wired in via the voice controller.
-    fn speak(&self, _text: &str) {
-        // TTS is optional during setup. When the voice controller is
-        // available, this will delegate to it.
-        // For now, we just log.
-        #[cfg(debug_assertions)]
-        {
-            info!(tts = _text, "setup TTS (not yet wired)");
-        }
-        let _ = _text;
+    fn speak(&self, text: &str) {
+        // Use Piper (natural voice) or espeak-ng (fallback) for TTS.
+        let text = text.to_string();
+        std::thread::spawn(move || {
+            info!(tts = %text, "setup TTS");
+
+            // Try Piper first
+            let piper_model = "/home/aios/.aios/models/piper/en_US-amy-medium.onnx";
+            if std::path::Path::new(piper_model).exists() {
+                if let Ok(mut child) = std::process::Command::new("piper")
+                    .args(["--model", piper_model, "--output_raw"])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        let _ = stdin.write_all(text.as_bytes());
+                        drop(stdin);
+                    }
+                    if let Some(stdout) = child.stdout.take() {
+                        let _ = std::process::Command::new("aplay")
+                            .args(["-r", "22050", "-f", "S16_LE", "-t", "raw", "-c", "1"])
+                            .stdin(stdout)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                    }
+                    let _ = child.wait();
+                    return;
+                }
+            }
+
+            // Fallback: espeak-ng
+            let result = std::process::Command::new("espeak-ng")
+                .args(["-v", "en", "-s", "160", "-p", "50"])
+                .arg(&text)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+
+            if let Err(e) = result {
+                info!("TTS failed ({e}), falling back to test beep");
+                if let Ok(wav) = generate_test_beep() {
+                    let tmp = "/tmp/aios-test-beep.wav";
+                    if std::fs::write(tmp, &wav).is_ok() {
+                        let _ = std::process::Command::new("aplay")
+                            .arg(tmp)
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                        let _ = std::fs::remove_file(tmp);
+                    }
+                }
+            }
+        });
     }
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Generate a 1-second 440Hz sine wave as a WAV file in memory.
+fn generate_test_beep() -> Result<Vec<u8>, std::io::Error> {
+    let sample_rate: u32 = 44100;
+    let duration_secs: f32 = 1.0;
+    let frequency: f32 = 440.0;
+    let num_samples = (sample_rate as f32 * duration_secs) as u32;
+    let bits_per_sample: u16 = 16;
+    let num_channels: u16 = 1;
+    let byte_rate = sample_rate * u32::from(num_channels) * u32::from(bits_per_sample) / 8;
+    let block_align = num_channels * bits_per_sample / 8;
+    let data_size = num_samples * u32::from(block_align);
+
+    let mut buf: Vec<u8> = Vec::with_capacity(44 + data_size as usize);
+
+    // WAV header
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(36 + data_size).to_le_bytes());
+    buf.extend_from_slice(b"WAVE");
+    buf.extend_from_slice(b"fmt ");
+    buf.extend_from_slice(&16u32.to_le_bytes()); // chunk size
+    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    buf.extend_from_slice(&num_channels.to_le_bytes());
+    buf.extend_from_slice(&sample_rate.to_le_bytes());
+    buf.extend_from_slice(&byte_rate.to_le_bytes());
+    buf.extend_from_slice(&block_align.to_le_bytes());
+    buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+    buf.extend_from_slice(b"data");
+    buf.extend_from_slice(&data_size.to_le_bytes());
+
+    // Generate sine wave samples with fade-in/out to avoid clicks
+    let fade_samples = (sample_rate as f32 * 0.05) as u32; // 50ms fade
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate as f32;
+        let mut amplitude = (2.0 * std::f32::consts::PI * frequency * t).sin();
+
+        // Fade in
+        if i < fade_samples {
+            amplitude *= i as f32 / fade_samples as f32;
+        }
+        // Fade out
+        if i > num_samples - fade_samples {
+            amplitude *= (num_samples - i) as f32 / fade_samples as f32;
+        }
+
+        let sample = (amplitude * 0.5 * i16::MAX as f32) as i16;
+        buf.extend_from_slice(&sample.to_le_bytes());
+    }
+
+    Ok(buf)
+}
 
 /// Simple password strength score (0.0 to 4.0) based on length and
 /// character class diversity.

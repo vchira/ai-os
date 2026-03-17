@@ -48,7 +48,11 @@ fi
 
 # ─── Always rebuild the Rust binary ──────────────────────────
 # This ensures code changes are always picked up.
+# Touch main.rs to invalidate cargo's fingerprint cache — otherwise
+# cargo inside Docker may skip recompilation if the target/ dir has
+# stale fingerprints from a previous Docker build.
 echo "[*] Building AiOS Rust binary (inside Bookworm container)..."
+touch "${REPO_DIR}/aios-app-rs/aios-gtk/src/main.rs"
 docker run --rm \
     -v "${REPO_DIR}:/work" \
     -v "${CARGO_CACHE}:/root/.cargo/registry" \
@@ -71,37 +75,78 @@ if [ "${ARG}" = "--code-rebuild" ]; then
         exit 1
     fi
 
-    # Copy the new binary into the chroot
+    # Replace the binary inside the existing ISO directly.
+    # We unsquash the filesystem, replace the binary, re-squash, and rebuild the ISO.
+    # This avoids live-build's state machine entirely.
     docker run --rm --privileged \
         -v "${REPO_DIR}:/work" \
         -v "${CACHE_VOL}:/cache" \
-        "${IMAGE}" bash -c "
-            cp /work/aios-app-rs/target/release/aios /work/distro/build/chroot/usr/bin/aios
-            chmod +x /work/distro/build/chroot/usr/bin/aios
-            echo '[*] Binary replaced in chroot'
+        "${IMAGE}" bash -c '
+            set -e
             cd /work/distro/build
-            lb binary 2>&1
-        "
+
+            # Find the existing ISO
+            OLD_ISO=$(find . -maxdepth 1 -name "*.iso" -type f | head -1)
+            if [ -z "${OLD_ISO}" ]; then
+                echo "ERROR: No existing ISO to patch."
+                exit 1
+            fi
+
+            echo "[*] Patching binary in existing ISO: ${OLD_ISO}"
+
+            # Mount the ISO to extract the squashfs
+            mkdir -p /tmp/iso_mount /tmp/iso_repack
+            mount -o loop "${OLD_ISO}" /tmp/iso_mount
+            cp -a /tmp/iso_mount/. /tmp/iso_repack/
+            umount /tmp/iso_mount
+
+            # Unsquash, replace binary, re-squash
+            SQFS="/tmp/iso_repack/live/filesystem.squashfs"
+            if [ ! -f "${SQFS}" ]; then
+                echo "ERROR: squashfs not found in ISO"
+                exit 1
+            fi
+
+            mkdir -p /tmp/sqfs_root
+            unsquashfs -d /tmp/sqfs_root -f "${SQFS}"
+            cp /work/aios-app-rs/target/release/aios /tmp/sqfs_root/usr/bin/aios
+            chmod +x /tmp/sqfs_root/usr/bin/aios
+            echo "[*] Binary replaced in squashfs"
+
+            rm "${SQFS}"
+            mksquashfs /tmp/sqfs_root "${SQFS}" -comp xz -Xbcj x86 -b 1M -no-progress
+            rm -rf /tmp/sqfs_root
+            echo "[*] Squashfs repacked"
+
+            # Rebuild ISO
+            rm -f "${OLD_ISO}"
+            xorriso -as mkisofs \
+                -o "${OLD_ISO}" \
+                -isohybrid-mbr /usr/lib/ISOLINUX/isohdpfx.bin \
+                -c isolinux/boot.cat \
+                -b isolinux/isolinux.bin \
+                -no-emul-boot -boot-load-size 4 -boot-info-table \
+                /tmp/iso_repack
+
+            rm -rf /tmp/iso_mount /tmp/iso_repack
+            echo "[*] ISO rebuilt"
+        '
 
     ISO=$(find "${BUILD_DIR}" -maxdepth 1 -name "*.iso" -type f 2>/dev/null || true)
     if [ -n "${ISO}" ]; then
+        SIZE=$(du -h "${ISO}" | cut -f1)
         echo ""
         echo "========================================"
         echo "  Fast rebuild complete!"
         echo "  ISO: ${ISO}"
-        SIZE=$(du -h "${ISO}" | cut -f1)
         echo "  Size: ${SIZE}"
         echo "========================================"
-    else
-        echo "WARNING: lb binary failed. Falling back to full rebuild..."
-        # Fall through to full build below
-        ARG="--fallback"
-    fi
-
-    if [ "${ARG}" = "--code-rebuild" ]; then
         echo ""
         echo "ISO ready: ${ISO}"
         exit 0
+    else
+        echo "ERROR: ISO repacking failed."
+        exit 1
     fi
 fi
 

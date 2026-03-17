@@ -294,4 +294,151 @@ mod tests {
         assert!(report.contains("1 test(s) FAILED"));
         assert!(report.contains("[FAIL] b"));
     }
+
+    // -- Additional edge-case tests --
+
+    #[test]
+    fn run_tagged_with_matching_tag() {
+        let mut runner = SelfTestRunner { scenarios: Vec::new() };
+        runner.add("channel: test1", false, |_ctx| TestResult {
+            name: "channel: test1".into(),
+            passed: true,
+            detail: "ok".into(),
+            interactive: false,
+        });
+        runner.add("tools: test2", false, |_ctx| TestResult {
+            name: "tools: test2".into(),
+            passed: true,
+            detail: "ok".into(),
+            interactive: false,
+        });
+        runner.add("channel: test3", false, |_ctx| TestResult {
+            name: "channel: test3".into(),
+            passed: true,
+            detail: "ok".into(),
+            interactive: false,
+        });
+
+        let results = runner.run_tagged("channel", dummy_ctx);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.name.contains("channel")));
+    }
+
+    #[test]
+    fn run_tagged_with_non_matching_tag() {
+        let mut runner = SelfTestRunner { scenarios: Vec::new() };
+        runner.add("channel: test1", false, |_ctx| TestResult {
+            name: "channel: test1".into(),
+            passed: true,
+            detail: "ok".into(),
+            interactive: false,
+        });
+        runner.add("tools: test2", false, |_ctx| TestResult {
+            name: "tools: test2".into(),
+            passed: true,
+            detail: "ok".into(),
+            interactive: false,
+        });
+
+        let results = runner.run_tagged("nonexistent_tag", dummy_ctx);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn format_report_with_zero_results() {
+        let results: Vec<TestResult> = vec![];
+        let report = SelfTestRunner::format_report(&results);
+        assert!(report.contains("All tests passed!"));
+        assert!(report.contains("Total: 0"));
+        assert!(report.contains("Passed: 0"));
+        assert!(report.contains("Failed: 0"));
+    }
+
+    #[test]
+    fn format_report_with_mix_of_pass_fail_interactive() {
+        let results = vec![
+            TestResult {
+                name: "auto_pass".into(),
+                passed: true,
+                detail: "ok".into(),
+                interactive: false,
+            },
+            TestResult {
+                name: "auto_fail".into(),
+                passed: false,
+                detail: "error".into(),
+                interactive: false,
+            },
+            TestResult {
+                name: "interactive_pass".into(),
+                passed: true,
+                detail: "ok".into(),
+                interactive: true,
+            },
+        ];
+        let report = SelfTestRunner::format_report(&results);
+        assert!(report.contains("Total: 3"));
+        assert!(report.contains("Passed: 2"));
+        assert!(report.contains("Failed: 1"));
+        assert!(report.contains("[interactive]"));
+        assert!(report.contains("[PASS] auto_pass"));
+        assert!(report.contains("[FAIL] auto_fail"));
+    }
+
+    #[test]
+    fn test_result_display_pass() {
+        let r = TestResult {
+            name: "my_test".into(),
+            passed: true,
+            detail: "all good".into(),
+            interactive: false,
+        };
+        let display = format!("{r}");
+        assert!(display.contains("[PASS]"));
+        assert!(display.contains("my_test"));
+        assert!(display.contains("all good"));
+    }
+
+    #[test]
+    fn test_result_display_fail_interactive() {
+        let r = TestResult {
+            name: "ui_test".into(),
+            passed: false,
+            detail: "panel failed".into(),
+            interactive: true,
+        };
+        let display = format!("{r}");
+        assert!(display.contains("[FAIL]"));
+        assert!(display.contains("[interactive]"));
+        assert!(display.contains("ui_test"));
+    }
+
+    #[test]
+    fn run_tagged_is_case_insensitive() {
+        let mut runner = SelfTestRunner { scenarios: Vec::new() };
+        runner.add("Channel: big test", false, |_ctx| TestResult {
+            name: "Channel: big test".into(),
+            passed: true,
+            detail: "ok".into(),
+            interactive: false,
+        });
+
+        let results = runner.run_tagged("CHANNEL", dummy_ctx);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn runner_add_and_count() {
+        let mut runner = SelfTestRunner { scenarios: Vec::new() };
+        for i in 0..5 {
+            runner.add(format!("test_{i}"), false, |_ctx| TestResult {
+                name: "test".into(),
+                passed: true,
+                detail: "ok".into(),
+                interactive: false,
+            });
+        }
+        let results = runner.run_all(dummy_ctx);
+        assert_eq!(results.len(), 5);
+    }
 }

@@ -329,4 +329,146 @@ mod tests {
         sw2.switch_to(ChannelKind::Web).unwrap();
         assert_eq!(sw1.active_kind(), ChannelKind::Web);
     }
+
+    // -- Stress / edge-case tests --
+
+    #[test]
+    fn switch_to_same_channel_multiple_times_is_noop() {
+        let sw = ChannelSwitcher::new();
+        let call_count = Arc::new(AtomicU32::new(0));
+        let c = call_count.clone();
+        sw.on_switch(Arc::new(move |_, _| {
+            c.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Switching to Desktop (already active) 10 times should be a no-op.
+        for _ in 0..10 {
+            assert!(sw.switch_to(ChannelKind::Desktop).is_ok());
+        }
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn register_same_channel_twice_overwrites() {
+        let sw = ChannelSwitcher::new();
+
+        // First registration with default signal caps.
+        sw.register_channel(ChannelKind::Signal, ChannelContext::signal());
+        assert!(sw.is_registered(ChannelKind::Signal));
+
+        // Second registration with custom caps — should overwrite.
+        let custom_caps = super::super::types::ChannelCapabilities {
+            rich_panels: true, // unusual for signal
+            images: false,
+            markdown: false,
+            notifications: false,
+            structured_input: false,
+            password_input: false,
+            max_text_length: Some(100),
+        };
+        let custom_ctx = super::super::types::ChannelContext::with_capabilities(
+            ChannelKind::Signal,
+            custom_caps,
+        );
+        sw.register_channel(ChannelKind::Signal, custom_ctx);
+
+        // Switch to signal and verify the overwritten context.
+        sw.switch_to(ChannelKind::Signal).unwrap();
+        let ctx = sw.active_context();
+        assert!(ctx.capabilities.rich_panels); // custom value
+        assert_eq!(ctx.capabilities.max_text_length, Some(100));
+    }
+
+    #[test]
+    fn switch_rapidly_between_three_channels() {
+        let sw = ChannelSwitcher::new();
+        sw.register_channel(ChannelKind::Web, ChannelContext::web());
+        sw.register_channel(ChannelKind::Signal, ChannelContext::signal());
+
+        let history = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let h = history.clone();
+        sw.on_switch(Arc::new(move |old, new| {
+            h.lock().unwrap().push((old, new));
+        }));
+
+        // Rapidly switch.
+        sw.switch_to(ChannelKind::Web).unwrap();
+        sw.switch_to(ChannelKind::Signal).unwrap();
+        sw.switch_to(ChannelKind::Desktop).unwrap();
+        sw.switch_to(ChannelKind::Web).unwrap();
+        sw.switch_to(ChannelKind::Signal).unwrap();
+
+        let switches = history.lock().unwrap();
+        assert_eq!(switches.len(), 5);
+        assert_eq!(switches[0], (ChannelKind::Desktop, ChannelKind::Web));
+        assert_eq!(switches[1], (ChannelKind::Web, ChannelKind::Signal));
+        assert_eq!(switches[2], (ChannelKind::Signal, ChannelKind::Desktop));
+        assert_eq!(switches[3], (ChannelKind::Desktop, ChannelKind::Web));
+        assert_eq!(switches[4], (ChannelKind::Web, ChannelKind::Signal));
+    }
+
+    #[test]
+    fn callbacks_fire_in_registration_order() {
+        let sw = ChannelSwitcher::new();
+        sw.register_channel(ChannelKind::Web, ChannelContext::web());
+
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        for i in 0..5u32 {
+            let o = order.clone();
+            sw.on_switch(Arc::new(move |_, _| {
+                o.lock().unwrap().push(i);
+            }));
+        }
+
+        sw.switch_to(ChannelKind::Web).unwrap();
+        let fired = order.lock().unwrap();
+        assert_eq!(*fired, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn unregister_all_channels_except_desktop() {
+        let sw = ChannelSwitcher::new();
+        sw.register_channel(ChannelKind::Web, ChannelContext::web());
+        sw.register_channel(ChannelKind::Signal, ChannelContext::signal());
+        sw.register_channel(ChannelKind::Voice, ChannelContext::voice());
+
+        // Unregister all non-Desktop channels.
+        sw.unregister_channel(ChannelKind::Web);
+        sw.unregister_channel(ChannelKind::Signal);
+        sw.unregister_channel(ChannelKind::Voice);
+
+        assert!(!sw.is_registered(ChannelKind::Web));
+        assert!(!sw.is_registered(ChannelKind::Signal));
+        assert!(!sw.is_registered(ChannelKind::Voice));
+        assert!(sw.is_registered(ChannelKind::Desktop));
+        assert_eq!(sw.registered_channels().len(), 1);
+        assert_eq!(sw.active_kind(), ChannelKind::Desktop);
+    }
+
+    #[test]
+    fn unregister_active_with_multiple_callbacks() {
+        let sw = ChannelSwitcher::new();
+        sw.register_channel(ChannelKind::Voice, ChannelContext::voice());
+        sw.switch_to(ChannelKind::Voice).unwrap();
+
+        let count = Arc::new(AtomicU32::new(0));
+        for _ in 0..3 {
+            let c = count.clone();
+            sw.on_switch(Arc::new(move |_, _| {
+                c.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        sw.unregister_channel(ChannelKind::Voice);
+        assert_eq!(sw.active_kind(), ChannelKind::Desktop);
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn default_impl_same_as_new() {
+        let sw = ChannelSwitcher::default();
+        assert_eq!(sw.active_kind(), ChannelKind::Desktop);
+        assert!(sw.is_registered(ChannelKind::Desktop));
+    }
 }

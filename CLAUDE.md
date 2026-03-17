@@ -45,6 +45,15 @@ AiOS has **one AI brain, one conversation, multiple output surfaces**. The activ
 
 ### Tool Channel Awareness
 
+Tools check per-channel capabilities (`ChannelCapabilities` struct) to adapt their output:
+- `rich_panels` — GTK dialogs, HTML forms (Desktop, Web only)
+- `images` — image display (Desktop, Web, Signal — not Voice)
+- `markdown` — rich text formatting (Desktop, Web — not Signal, Voice)
+- `notifications` — popups/toasts (Desktop, Web only)
+- `structured_input` — multi-field forms (Desktop, Web only)
+- `password_input` — masked entry (Desktop, Web only)
+- `max_text_length` — message size limits (Signal: 4096 chars)
+
 Most tools (10/12) are channel-agnostic — they return text regardless. Two tools adapt:
 - **`ui_panel`**: GTK dialog on Desktop, HTML form on Web, numbered text choices on Signal
 - **`display`**: Native rendering on Desktop/Web, text fallbacks on Signal/Voice
@@ -176,11 +185,15 @@ API keys are stored in the encrypted vault (`~/.aios/vault.enc`).
 | `/tools` | List available tools |
 | `/channel` | Show/configure channels (web on/off, signal on/off, port, phone) |
 | `/selftest [filter]` | Run self-tests (quick, channel, tools, interactive) |
+| `/sysinfo` | Show system monitor (CPU, memory, disk, processes) |
+| `/close` | Close topmost panel/dialog |
+| `/update <url>` | Self-update AiOS binary from URL |
+| `/wake <phrase>` | Set wake word phrase |
 | `/configure` | Re-run first-boot setup wizard |
 | `/clear` | Clear chat history |
 | `/info` | Show system information |
 
-## Built-in Tools (11)
+## Built-in Tools (12)
 
 | Tool | Category | Description |
 |------|----------|-------------|

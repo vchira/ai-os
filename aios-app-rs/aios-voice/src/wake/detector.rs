@@ -107,12 +107,24 @@ impl WakeWordDetector {
     /// ```
     pub fn matches_wake_word(&self, transcription: &str) -> bool {
         let lower = transcription.to_lowercase();
-        // All keywords must appear in order in the transcription.
-        let mut pos = 0;
+        // Strip punctuation from each word, then match whole words in order.
+        let words: Vec<String> = lower
+            .split_whitespace()
+            .map(|w| w.chars().filter(|c| c.is_alphanumeric()).collect())
+            .collect();
+        let mut word_idx = 0;
         for kw in &self.keywords {
-            match lower[pos..].find(kw.as_str()) {
-                Some(idx) => pos += idx + kw.len(),
-                None => return false,
+            let mut found = false;
+            while word_idx < words.len() {
+                if words[word_idx] == *kw {
+                    word_idx += 1;
+                    found = true;
+                    break;
+                }
+                word_idx += 1;
+            }
+            if !found {
+                return false;
             }
         }
         true
@@ -275,5 +287,108 @@ mod tests {
         assert!(detector.matches_wake_word("hey there aios what's up"));
         assert!(!detector.matches_wake_word("hey aios"));
         assert!(!detector.matches_wake_word("there hey aios"));
+    }
+
+    // -- Additional edge-case tests --
+
+    #[test]
+    fn matches_with_punctuation() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        // Punctuation doesn't break the substring match.
+        assert!(detector.matches_wake_word("hey, aios!"));
+        assert!(detector.matches_wake_word("hey... aios?"));
+        assert!(detector.matches_wake_word("\"hey aios\""));
+    }
+
+    #[test]
+    fn very_long_transcription_with_wake_word_buried() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        let prefix = "a ".repeat(500);
+        let transcription = format!("{prefix}hey aios do something");
+        assert!(detector.matches_wake_word(&transcription));
+    }
+
+    #[test]
+    fn empty_wake_phrase_matches_everything() {
+        let config = WakeWordConfig {
+            wake_phrase: "".into(),
+            ..Default::default()
+        };
+        let detector = WakeWordDetector::new(config);
+        // Empty keyword list means all keywords are trivially found.
+        assert!(detector.matches_wake_word("anything at all"));
+        assert!(detector.matches_wake_word(""));
+    }
+
+    #[test]
+    fn config_with_zero_energy_threshold() {
+        let config = WakeWordConfig {
+            energy_threshold: 0.0,
+            ..Default::default()
+        };
+        let detector = WakeWordDetector::new(config);
+        assert!((detector.energy_threshold() - 0.0).abs() < f32::EPSILON);
+        // Should still match wake words.
+        assert!(detector.matches_wake_word("hey aios"));
+    }
+
+    #[test]
+    fn config_with_very_high_max_capture_ms() {
+        let config = WakeWordConfig {
+            max_capture_ms: 600_000, // 10 minutes
+            ..Default::default()
+        };
+        let detector = WakeWordDetector::new(config);
+        assert_eq!(detector.max_capture_ms(), 600_000);
+    }
+
+    #[test]
+    fn words_with_extra_in_between_may_match_as_substrings() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        // "hey um aios" — "hey" is found, then scanning from position after "hey"
+        // finds "aios" in "um aios". The keywords appear in order so it matches.
+        // This tests the actual behavior of the substring-based matching.
+        assert!(detector.matches_wake_word("hey um aios"));
+    }
+
+    #[test]
+    fn wake_word_not_at_start() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(detector.matches_wake_word("I said hey aios please help"));
+    }
+
+    #[test]
+    fn wake_phrase_repeated_twice() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(detector.matches_wake_word("hey aios hey aios"));
+    }
+
+    #[test]
+    fn config_is_accessible_via_config_method() {
+        let config = WakeWordConfig {
+            wake_phrase: "test phrase".into(),
+            energy_threshold: 0.1,
+            post_wake_delay_ms: 200,
+            max_capture_ms: 10000,
+            silence_timeout_ms: 1000,
+        };
+        let detector = WakeWordDetector::new(config);
+        let cfg = detector.config();
+        assert_eq!(cfg.wake_phrase, "test phrase");
+        assert!((cfg.energy_threshold - 0.1).abs() < f32::EPSILON);
+        assert_eq!(cfg.post_wake_delay_ms, 200);
+        assert_eq!(cfg.max_capture_ms, 10000);
+        assert_eq!(cfg.silence_timeout_ms, 1000);
+    }
+
+    #[test]
+    fn wake_word_with_unicode_phrase() {
+        let config = WakeWordConfig {
+            wake_phrase: "h\u{00e9} aios".into(), // "hé aios"
+            ..Default::default()
+        };
+        let detector = WakeWordDetector::new(config);
+        assert!(detector.matches_wake_word("h\u{00e9} aios do something"));
+        assert!(!detector.matches_wake_word("hey aios")); // 'e' != 'é'
     }
 }

@@ -333,4 +333,192 @@ mod tests {
         let result = parse_reply(&req, "hello");
         assert!(result.as_object().unwrap().is_empty());
     }
+
+    // -- Additional edge-case tests --
+
+    #[test]
+    fn format_multiple_fields_combined() {
+        let req = serde_json::json!({
+            "title": "Settings",
+            "fields": [
+                {
+                    "id": "provider",
+                    "type": "choice",
+                    "label": "Provider",
+                    "options": [
+                        { "value": "claude", "label": "Claude" },
+                        { "value": "openai", "label": "OpenAI" }
+                    ]
+                },
+                {
+                    "id": "name",
+                    "type": "text",
+                    "label": "Username"
+                },
+                {
+                    "id": "notifications",
+                    "type": "toggle",
+                    "label": "Enable notifications"
+                }
+            ]
+        });
+
+        let text = format_panel_as_text(&req);
+        assert!(text.contains("--- Settings ---"));
+        assert!(text.contains("Provider:"));
+        assert!(text.contains("1 — Claude"));
+        assert!(text.contains("2 — OpenAI"));
+        assert!(text.contains("Username: Reply with your answer."));
+        assert!(text.contains("Enable notifications: Reply yes or no."));
+    }
+
+    #[test]
+    fn parse_reply_toggle_various_yes_no() {
+        let req = serde_json::json!({
+            "fields": [{ "id": "ok", "type": "toggle", "label": "OK?" }]
+        });
+
+        // Yes variants.
+        assert_eq!(parse_reply(&req, "yes").get("ok").unwrap(), true);
+        assert_eq!(parse_reply(&req, "y").get("ok").unwrap(), true);
+        assert_eq!(parse_reply(&req, "true").get("ok").unwrap(), true);
+        assert_eq!(parse_reply(&req, "1").get("ok").unwrap(), true);
+        assert_eq!(parse_reply(&req, "on").get("ok").unwrap(), true);
+        assert_eq!(parse_reply(&req, "YES").get("ok").unwrap(), true);
+        assert_eq!(parse_reply(&req, "True").get("ok").unwrap(), true);
+
+        // No variants.
+        assert_eq!(parse_reply(&req, "no").get("ok").unwrap(), false);
+        assert_eq!(parse_reply(&req, "false").get("ok").unwrap(), false);
+        assert_eq!(parse_reply(&req, "0").get("ok").unwrap(), false);
+        assert_eq!(parse_reply(&req, "off").get("ok").unwrap(), false);
+        assert_eq!(parse_reply(&req, "nah").get("ok").unwrap(), false);
+    }
+
+    #[test]
+    fn parse_reply_number_42() {
+        let req = serde_json::json!({
+            "fields": [{ "id": "count", "type": "number", "label": "Count" }]
+        });
+
+        let result = parse_reply(&req, "42");
+        assert_eq!(result.get("count").unwrap(), 42.0);
+    }
+
+    #[test]
+    fn parse_reply_text_returns_raw_text() {
+        let req = serde_json::json!({
+            "fields": [{ "id": "msg", "type": "text", "label": "Message" }]
+        });
+
+        let result = parse_reply(&req, "Hello, world!");
+        assert_eq!(result.get("msg").unwrap(), "Hello, world!");
+    }
+
+    #[test]
+    fn format_panel_empty_fields() {
+        let req = serde_json::json!({
+            "title": "Empty Panel",
+            "fields": []
+        });
+
+        let text = format_panel_as_text(&req);
+        assert!(text.contains("--- Empty Panel ---"));
+        // No field instructions should appear.
+        assert!(!text.contains("Reply"));
+    }
+
+    #[test]
+    fn format_panel_with_nested_option_descriptions() {
+        let req = serde_json::json!({
+            "fields": [{
+                "id": "model",
+                "type": "dropdown",
+                "label": "Model",
+                "options": [
+                    { "value": "haiku", "label": "Haiku", "description": "Fast and cheap" },
+                    { "value": "sonnet", "label": "Sonnet", "description": "Balanced" },
+                    { "value": "opus", "label": "Opus", "description": "Most capable" }
+                ]
+            }]
+        });
+
+        let text = format_panel_as_text(&req);
+        assert!(text.contains("1 — Haiku (Fast and cheap)"));
+        assert!(text.contains("2 — Sonnet (Balanced)"));
+        assert!(text.contains("3 — Opus (Most capable)"));
+        assert!(text.contains("Reply with a number (1-3)."));
+    }
+
+    #[test]
+    fn parse_reply_out_of_range_choice_number() {
+        let req = serde_json::json!({
+            "fields": [{
+                "id": "color",
+                "type": "choice",
+                "options": [
+                    { "value": "red", "label": "Red" },
+                    { "value": "blue", "label": "Blue" }
+                ]
+            }]
+        });
+
+        // 99 is way out of range — falls back to raw text.
+        let result = parse_reply(&req, "99");
+        assert_eq!(result.get("color").unwrap(), "99");
+    }
+
+    #[test]
+    fn parse_reply_choice_zero_is_out_of_range() {
+        let req = serde_json::json!({
+            "fields": [{
+                "id": "x",
+                "type": "choice",
+                "options": [{ "value": "a", "label": "A" }]
+            }]
+        });
+
+        // 0 is not >= 1, so it falls back to raw text.
+        let result = parse_reply(&req, "0");
+        assert_eq!(result.get("x").unwrap(), "0");
+    }
+
+    #[test]
+    fn parse_reply_password_field() {
+        let req = serde_json::json!({
+            "fields": [{ "id": "pw", "type": "password", "label": "Password" }]
+        });
+
+        let result = parse_reply(&req, "s3cret!");
+        assert_eq!(result.get("pw").unwrap(), "s3cret!");
+    }
+
+    #[test]
+    fn format_number_field() {
+        let req = serde_json::json!({
+            "fields": [{ "id": "port", "type": "number", "label": "Port number" }]
+        });
+        let text = format_panel_as_text(&req);
+        assert!(text.contains("Port number: Reply with a number."));
+    }
+
+    #[test]
+    fn parse_reply_trims_whitespace() {
+        let req = serde_json::json!({
+            "fields": [{ "id": "name", "type": "text", "label": "Name" }]
+        });
+
+        let result = parse_reply(&req, "  Alice  ");
+        assert_eq!(result.get("name").unwrap(), "Alice");
+    }
+
+    #[test]
+    fn format_panel_no_title_no_description() {
+        let req = serde_json::json!({
+            "fields": [{ "id": "x", "type": "text", "label": "Input" }]
+        });
+        let text = format_panel_as_text(&req);
+        assert!(!text.contains("---"));
+        assert!(text.contains("Input: Reply with your answer."));
+    }
 }
