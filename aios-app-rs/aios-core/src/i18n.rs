@@ -10,6 +10,7 @@ use serde_json::Value;
 
 // Embed translation files at compile time.
 const EN_JSON: &str = include_str!("../i18n/en.json");
+const DE_JSON: &str = include_str!("../i18n/de.json");
 
 // Thread-local state: current language + loaded translations.
 thread_local! {
@@ -20,7 +21,7 @@ thread_local! {
 /// Initialize the i18n system. Call once at startup.
 pub fn init() {
     load_language("en", EN_JSON);
-    // Load other languages here as they're added.
+    load_language("de", DE_JSON);
 }
 
 /// Load a language from JSON.
