@@ -8,7 +8,8 @@
 /// so that any newly added keys are automatically present.
 pub const DEFAULTS_JSON: &str = r#"{
     "assistant": {
-        "name": "Assistant"
+        "name": "Assistant",
+        "language": "en"
     },
     "llm": {
         "provider": "claude",
