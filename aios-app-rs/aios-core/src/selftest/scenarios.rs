@@ -40,6 +40,9 @@ pub fn register_all(runner: &mut SelfTestRunner) {
     runner.add("setup: chatgpt display name", false, test_setup_chatgpt_display_name);
     runner.add("setup: auto-select single provider", false, test_setup_auto_select_single_provider);
 
+    // -- Hostname tests --
+    runner.add("hostname: validation", false, test_hostname_validation);
+
     // -- Interactive tests --
     runner.add(
         "interactive: ui_panel text input",
@@ -497,6 +500,58 @@ fn test_setup_auto_select_single_provider(ctx: &mut TestContext) -> TestResult {
         Ok("Single provider auto-selection works".into())
     })();
     let _ = std::fs::remove_dir_all(&dir);
+    make_result(name, res, ctx)
+}
+
+// ---------------------------------------------------------------------------
+// Hostname tests
+// ---------------------------------------------------------------------------
+
+fn test_hostname_validation(ctx: &mut TestContext) -> TestResult {
+    let name = "hostname: validation";
+
+    fn is_valid_hostname(name: &str) -> bool {
+        !name.is_empty()
+            && name.len() <= 63
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !name.starts_with('-')
+            && !name.ends_with('-')
+    }
+
+    let res = (|| -> Result<String, String> {
+        if !is_valid_hostname("assistant") {
+            return Err("'assistant' should be valid".into());
+        }
+        if !is_valid_hostname("my-pc") {
+            return Err("'my-pc' should be valid".into());
+        }
+        if !is_valid_hostname("jarvis-2") {
+            return Err("'jarvis-2' should be valid".into());
+        }
+        if !is_valid_hostname("a") {
+            return Err("'a' should be valid".into());
+        }
+        if is_valid_hostname("") {
+            return Err("empty string should be invalid".into());
+        }
+        if is_valid_hostname("-bad") {
+            return Err("'-bad' should be invalid (leading hyphen)".into());
+        }
+        if is_valid_hostname("bad-") {
+            return Err("'bad-' should be invalid (trailing hyphen)".into());
+        }
+        if is_valid_hostname("has spaces") {
+            return Err("'has spaces' should be invalid".into());
+        }
+        if is_valid_hostname(&"a".repeat(64)) {
+            return Err("64-char name should be invalid (too long)".into());
+        }
+        if !is_valid_hostname(&"a".repeat(63)) {
+            return Err("63-char name should be valid (max length)".into());
+        }
+        Ok("All hostname validation rules work".into())
+    })();
+
     make_result(name, res, ctx)
 }
 

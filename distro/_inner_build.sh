@@ -630,6 +630,9 @@ if [ "$FILTER" = "all" ] || [ "$FILTER" = "system" ]; then
     KB=$(cat /etc/default/keyboard 2>/dev/null | grep XKBLAYOUT | cut -d'"' -f2 || echo "unknown")
     pass "Keyboard layout: $KB"
 
+    HOSTNAME=$(cat /etc/hostname 2>/dev/null || echo "unknown")
+    pass "Hostname: $HOSTNAME"
+
     TZ=$(cat /etc/timezone 2>/dev/null || echo "unknown")
     pass "Timezone: $TZ"
 
