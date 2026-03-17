@@ -367,6 +367,16 @@ const panelContent = document.getElementById('panelContent');
 
 let ws = null;
 let reconnectTimer = null;
+let assistantName = 'Assistant';
+
+function roleDisplayName(role) {
+    switch(role) {
+        case 'user': return 'You';
+        case 'assistant': return assistantName;
+        case 'tool': return 'Tool';
+        default: return role;
+    }
+}
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -413,6 +423,13 @@ function handleServerMessage(msg) {
       addMessage('system', `[${msg.title}] ${msg.message}`);
       break;
     case 'system':
+      // If a system message includes assistant name config, update it
+      try {
+        const cfg = JSON.parse(msg.content);
+        if (cfg.assistant_name) {
+          assistantName = cfg.assistant_name;
+        }
+      } catch(e) { /* not JSON config, ignore */ }
       addMessage('system', msg.content);
       break;
     case 'channel_status':
@@ -437,7 +454,7 @@ function addMessage(role, content, level) {
   } else if (role !== 'system') {
     const roleLabel = document.createElement('div');
     roleLabel.className = 'role';
-    roleLabel.textContent = role;
+    roleLabel.textContent = roleDisplayName(role);
     div.appendChild(roleLabel);
   }
 
