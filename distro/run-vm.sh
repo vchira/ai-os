@@ -1,9 +1,9 @@
 #!/bin/bash
-# AiOS VM launcher using libvirt/KVM with audio + clipboard support
+# AiOS VM launcher — direct QEMU with KVM, audio + clipboard support
 #
-# Strategy: create the domain XML directly (not via virt-install) so we can
-# include sound card, audio backend, SPICE clipboard channel, and security
-# labels correctly from the start — no destroy/redefine dance needed.
+# Uses QEMU directly (not libvirt) so the process inherits the user's
+# full environment — PipeWire/PulseAudio audio works without fighting
+# libvirt's sandbox.
 
 set -euo pipefail
 
@@ -16,164 +16,115 @@ if [ ! -f "${ISO}" ]; then
 fi
 
 ISO="$(cd "$(dirname "${ISO}")" && pwd)/$(basename "${ISO}")"
-VM_NAME="aios-live"
-UID_NUM=$(id -u)
+
+# ─── Virtual hard drive ──────────────────────────────────────
+# Store outside build/ (which is root-owned from Docker)
+DISK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DISK_IMG="${DISK_DIR}/aios-disk.qcow2"
+DISK_SIZE="32G"
+
+if [ ! -f "${DISK_IMG}" ]; then
+    echo "[*] Creating ${DISK_SIZE} virtual hard drive: ${DISK_IMG}"
+    qemu-img create -f qcow2 "${DISK_IMG}" "${DISK_SIZE}"
+fi
 
 # ─── Check dependencies ──────────────────────────────────────
-for cmd in virsh virt-viewer; do
-    if ! command -v "${cmd}" &>/dev/null; then
-        echo "${cmd} not installed. Install with:"
-        echo "  sudo apt install virt-manager virt-viewer"
-        exit 1
-    fi
-done
-
-# Make sure libvirtd is running
-if ! systemctl is-active --quiet libvirtd 2>/dev/null; then
-    echo "[*] Starting libvirtd..."
-    sudo systemctl start libvirtd
+if ! command -v qemu-system-x86_64 &>/dev/null; then
+    echo "qemu-system-x86_64 not installed. Install with:"
+    echo "  sudo apt install qemu-system-x86"
+    exit 1
 fi
 
-# ─── Clean up previous VM ────────────────────────────────────
-if virsh --connect qemu:///system list --all --name 2>/dev/null | grep -q "^${VM_NAME}$"; then
-    echo "[*] Removing previous ${VM_NAME} VM..."
-    virsh --connect qemu:///system destroy "${VM_NAME}" 2>/dev/null || true
-    virsh --connect qemu:///system undefine "${VM_NAME}" 2>/dev/null || true
+# Check KVM access
+if [ ! -w /dev/kvm ]; then
+    echo "[!] No write access to /dev/kvm. Add yourself to the kvm group:"
+    echo "    sudo usermod -aG kvm $(whoami)"
+    echo "    (then log out and back in)"
+    exit 1
 fi
 
-# ─── Check QEMU user config ──────────────────────────────────
-QEMU_CONF="/etc/libvirt/qemu.conf"
-CURRENT_USER=$(whoami)
-if [ -f "${QEMU_CONF}" ]; then
-    if ! grep -q "^user = \"${CURRENT_USER}\"" "${QEMU_CONF}" 2>/dev/null; then
-        echo ""
-        echo "[!] AUDIO FIX NEEDED: QEMU needs to run as your user for audio."
-        echo "    Run once:"
-        echo "      sudo sed -i 's/^#user = \"libvirt-qemu\"/user = \"${CURRENT_USER}\"/' ${QEMU_CONF}"
-        echo "      sudo sed -i 's/^#group = \"libvirt-qemu\"/group = \"${CURRENT_USER}\"/' ${QEMU_CONF}"
-        echo "      sudo systemctl restart libvirtd"
-        echo ""
-    fi
+# ─── Kill previous instance ──────────────────────────────────
+# Also clean up any libvirt-managed instance from before.
+if command -v virsh &>/dev/null; then
+    virsh --connect qemu:///system destroy aios-live 2>/dev/null || true
+    virsh --connect qemu:///system undefine aios-live 2>/dev/null || true
 fi
+# Kill any leftover direct QEMU instance
+pkill -f "qemu-system-x86_64.*aios-live" 2>/dev/null || true
+sleep 0.5
 
-# ─── Audio strategy ───────────────────────────────────────────
-# Try PipeWire first (supports mic input), fall back to SPICE.
-UID_NUM=$(id -u)
-QEMU_CONF="/etc/libvirt/qemu.conf"
-CURRENT_USER=$(whoami)
-QEMU_USER_OK=false
-if [ -f "${QEMU_CONF}" ] && grep -q "^user = \"${CURRENT_USER}\"" "${QEMU_CONF}" 2>/dev/null; then
-    QEMU_USER_OK=true
-fi
-
-if [ "${QEMU_USER_OK}" = true ] && [ -S "/run/user/${UID_NUM}/pipewire-0" ]; then
+# ─── Audio backend ────────────────────────────────────────────
+# QEMU inherits our environment, so PipeWire/PulseAudio just works.
+AUDIO_ARGS=""
+if [ -S "/run/user/$(id -u)/pipewire-0" ]; then
     echo "[*] Audio: PipeWire (mic + speaker)"
-    AUDIO_XML="<audio id='1' type='pipewire' runtimeDir='/run/user/${UID_NUM}'/>"
-elif [ "${QEMU_USER_OK}" = true ] && [ -S "/run/user/${UID_NUM}/pulse/native" ]; then
+    AUDIO_ARGS="-audiodev pipewire,id=audio0,in.stream-name=aios-mic,out.stream-name=aios-speaker -device intel-hda -device hda-duplex,audiodev=audio0"
+elif [ -S "/run/user/$(id -u)/pulse/native" ]; then
     echo "[*] Audio: PulseAudio (mic + speaker)"
-    AUDIO_XML="<audio id='1' type='pulseaudio' serverName='/run/user/${UID_NUM}/pulse/native'/>"
+    AUDIO_ARGS="-audiodev pa,id=audio0,server=/run/user/$(id -u)/pulse/native -device intel-hda -device hda-duplex,audiodev=audio0"
 else
-    echo "[*] Audio: SPICE (speaker only, no mic)"
-    echo "    For mic support, run:"
-    echo "      sudo sed -i 's/^#user = \"libvirt-qemu\"/user = \"${CURRENT_USER}\"/' /etc/libvirt/qemu.conf"
-    echo "      sudo sed -i 's/^#group = \"libvirt-qemu\"/group = \"${CURRENT_USER}\"/' /etc/libvirt/qemu.conf"
-    echo "      sudo systemctl restart libvirtd"
-    AUDIO_XML="<audio id='1' type='spice'/>"
+    echo "[*] Audio: none (no PipeWire or PulseAudio detected)"
+    AUDIO_ARGS="-device intel-hda -device hda-duplex"
 fi
 
-# ─── Build domain XML directly ───────────────────────────────
-echo "[*] Creating AiOS VM..."
+# ─── Network: TAP via bridge (if available) or user-mode ──────
+NET_ARGS=""
+if ip link show virbr0 &>/dev/null; then
+    # Create a TAP device for bridged networking
+    TAP_NAME="aios-tap0"
+    # Try to use the helper for rootless TAP
+    QEMU_BRIDGE_HELPER="/usr/lib/qemu/qemu-bridge-helper"
+    if [ -x "${QEMU_BRIDGE_HELPER}" ]; then
+        NET_ARGS="-netdev bridge,id=net0,br=virbr0,helper=${QEMU_BRIDGE_HELPER} -device virtio-net-pci,netdev=net0"
+    else
+        echo "[!] No qemu-bridge-helper — using user-mode networking (no LAN access)"
+        NET_ARGS="-netdev user,id=net0,hostfwd=tcp::8080-:80 -device virtio-net-pci,netdev=net0"
+    fi
+else
+    echo "[!] No virbr0 bridge — using user-mode networking"
+    NET_ARGS="-netdev user,id=net0,hostfwd=tcp::8080-:80 -device virtio-net-pci,netdev=net0"
+fi
+
+# ─── SPICE for clipboard + display ───────────────────────────
+SPICE_PORT=5900
+SPICE_ARGS="-spice port=${SPICE_PORT},addr=127.0.0.1,disable-ticketing=on"
+SPICE_ARGS+=" -device virtio-serial-pci"
+SPICE_ARGS+=" -chardev spicevmc,id=vdagent,name=vdagent"
+SPICE_ARGS+=" -device virtserialport,chardev=vdagent,name=com.redhat.spice.0"
+
+# ─── Launch QEMU ─────────────────────────────────────────────
+echo "[*] Starting AiOS VM..."
 echo "[*] ISO: ${ISO}"
 
-TMPXML=$(mktemp /tmp/aios-vm-XXXXX.xml)
-cat > "${TMPXML}" << XMLEOF
-<domain type='kvm'>
-  <name>${VM_NAME}</name>
-  <memory unit='MiB'>4096</memory>
-  <vcpu>4</vcpu>
-
-  <os>
-    <type arch='x86_64' machine='q35'>hvm</type>
-    <boot dev='cdrom'/>
-  </os>
-
-  <features>
-    <acpi/>
-    <apic/>
-  </features>
-
-  <cpu mode='host-passthrough'/>
-
-  <devices>
-    <!-- Boot ISO -->
-    <disk type='file' device='cdrom'>
-      <driver name='qemu' type='raw'/>
-      <source file='${ISO}'/>
-      <target dev='sda' bus='sata'/>
-      <readonly/>
-    </disk>
-
-    <!-- Network -->
-    <interface type='network'>
-      <source network='default'/>
-      <model type='virtio'/>
-    </interface>
-
-    <!-- Graphics: SPICE with clipboard/paste support -->
-    <graphics type='spice' autoport='yes'>
-      <clipboard copypaste='yes'/>
-      <filetransfer enable='yes'/>
-    </graphics>
-
-    <!-- Video -->
-    <video>
-      <model type='qxl' ram='65536' vram='65536'/>
-    </video>
-
-    <!-- SPICE agent channel (clipboard sharing) -->
-    <channel type='spicevmc'>
-      <target type='virtio' name='com.redhat.spice.0'/>
-    </channel>
-
-    <!-- Sound card: Intel HDA -->
-    <sound model='ich9'>
-      <audio id='1'/>
-    </sound>
-
-    <!-- Audio backend: connects QEMU to host audio -->
-    ${AUDIO_XML}
-
-    <!-- Tablet for better mouse integration -->
-    <input type='tablet' bus='usb'/>
-
-  </devices>
-
-  <!-- Disable security labels so QEMU runs as the configured user -->
-  <seclabel type='none' model='none'/>
-</domain>
-XMLEOF
-
-# Define and start
-virsh --connect qemu:///system define "${TMPXML}" > /dev/null
-rm -f "${TMPXML}"
-
-echo "[*] Starting VM..."
-virsh --connect qemu:///system start "${VM_NAME}"
+qemu-system-x86_64 \
+    -name aios-live \
+    -machine q35,accel=kvm \
+    -cpu host \
+    -m 4096 \
+    -smp 4 \
+    -cdrom "${ISO}" \
+    -drive file="${DISK_IMG}",format=qcow2,if=virtio,id=disk0 \
+    -boot order=dc \
+    -display none \
+    -device qxl-vga,ram_size=67108864,vram_size=67108864,vgamem_mb=16 \
+    -device qemu-xhci,id=usb \
+    -device usb-tablet,bus=usb.0 \
+    ${AUDIO_ARGS} \
+    ${NET_ARGS} \
+    ${SPICE_ARGS} \
+    -daemonize
 
 echo "[*] VM started"
-echo "[*] Audio + clipboard enabled via SPICE"
 
 # ─── Connect viewer ──────────────────────────────────────────
-sleep 2
+sleep 10
 
-SPICE_URI=$(virsh --connect qemu:///system domdisplay "${VM_NAME}" 2>/dev/null || true)
-
-if [ -n "${SPICE_URI}" ] && command -v remote-viewer &>/dev/null; then
-    echo "[*] Connecting: ${SPICE_URI}"
-    exec remote-viewer "${SPICE_URI}"
+if command -v remote-viewer &>/dev/null; then
+    echo "[*] Connecting: spice://127.0.0.1:${SPICE_PORT}"
+    exec remote-viewer "spice://127.0.0.1:${SPICE_PORT}"
 elif command -v virt-viewer &>/dev/null; then
     echo "[*] Connecting with virt-viewer..."
-    exec virt-viewer --connect qemu:///system "${VM_NAME}"
+    exec virt-viewer "spice://127.0.0.1:${SPICE_PORT}"
 else
-    echo "[*] Connect manually with: virt-manager --connect qemu:///system"
+    echo "[*] Connect manually: remote-viewer spice://127.0.0.1:${SPICE_PORT}"
 fi

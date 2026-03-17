@@ -9,10 +9,53 @@ MIRROR_SEC="http://security.debian.org/debian-security"
 mkdir -p "${BUILD_DIR}"
 cd "${BUILD_DIR}"
 
-# Restore cached packages
+# Restore cached packages — check Docker image prefetch, then volume cache
 mkdir -p cache/packages.chroot
+if [ -d /cache/prefetch ] && [ "$(ls -A /cache/prefetch 2>/dev/null)" ]; then
+    echo "[*] Restoring pre-downloaded packages from Docker image..."
+    cp -n /cache/prefetch/*.deb cache/packages.chroot/ 2>/dev/null || true
+fi
 if [ -d /cache/packages.chroot ] && [ "$(ls -A /cache/packages.chroot 2>/dev/null)" ]; then
-    cp -a /cache/packages.chroot/* cache/packages.chroot/ 2>/dev/null || true
+    cp -n /cache/packages.chroot/*.deb cache/packages.chroot/ 2>/dev/null || true
+fi
+
+# Restore bootstrap cache from volume
+if [ ! -d cache/bootstrap ] && [ -f /cache/bootstrap.tar ]; then
+    echo "[*] Restoring bootstrap cache from volume..."
+    mkdir -p cache
+    tar xf /cache/bootstrap.tar -C cache/ 2>/dev/null || true
+fi
+
+# Restore cached external downloads (whisper model, piper, voices)
+if [ -d /cache/external ]; then
+    echo "[*] Restoring cached external downloads..."
+    if [ -f /cache/external/ggml-tiny.bin ]; then
+        mkdir -p chroot/home/aios/.aios/models/whisper
+        cp /cache/external/ggml-tiny.bin chroot/home/aios/.aios/models/whisper/ 2>/dev/null || true
+    fi
+    if [ -f /cache/external/piper.tar ]; then
+        mkdir -p chroot/opt
+        tar xf /cache/external/piper.tar -C chroot/opt 2>/dev/null || true
+        ln -sf /opt/piper/piper chroot/usr/bin/piper 2>/dev/null || true
+    fi
+    if [ -f /cache/external/piper-voices.tar ]; then
+        mkdir -p chroot/home/aios/.aios/models
+        tar xf /cache/external/piper-voices.tar -C chroot/home/aios/.aios/models 2>/dev/null || true
+    fi
+    if [ -f /cache/external/labwc ]; then
+        mkdir -p chroot/usr/bin
+        cp /cache/external/labwc chroot/usr/bin/labwc 2>/dev/null || true
+        chmod +x chroot/usr/bin/labwc 2>/dev/null || true
+        if [ -f /cache/external/labwc-share.tar ]; then
+            mkdir -p chroot/usr/share
+            tar xf /cache/external/labwc-share.tar -C chroot/usr/share 2>/dev/null || true
+        fi
+    fi
+    if [ -f /cache/external/whisper-cpp-cli ]; then
+        mkdir -p chroot/usr/bin
+        cp /cache/external/whisper-cpp-cli chroot/usr/bin/whisper-cpp-cli 2>/dev/null || true
+        chmod +x chroot/usr/bin/whisper-cpp-cli 2>/dev/null || true
+    fi
 fi
 
 # Force full chroot rebuild if our marker is missing
@@ -130,18 +173,22 @@ libseat-dev
 squashfs-tools
 gdisk
 dosfstools
-grub-efi-amd64
-grub-pc
+grub-efi-amd64-bin
+grub-pc-bin
 EOF
 
 # ─── Hooks ──────────────────────────────────────────────────
 echo "[*] Setting up hooks..."
 mkdir -p config/hooks/live
 
-# Hook 1: Build labwc from source
+# Hook 1: Build labwc from source (skip if already installed)
 cat > config/hooks/live/0050-build-labwc.hook.chroot << 'EOF'
 #!/bin/bash
 set -e
+if command -v labwc &>/dev/null && labwc --version 2>&1 | grep -q "0.6.6"; then
+    echo "[AiOS] labwc 0.6.6 already installed — skipping build"
+    exit 0
+fi
 echo "[AiOS] Building labwc from source..."
 cd /tmp
 git clone --depth 1 --branch 0.6.6 https://github.com/labwc/labwc.git
@@ -660,14 +707,12 @@ if [ "$FILTER" = "all" ] || [ "$FILTER" = "system" ]; then
         fi
     fi
 
-    if pgrep -x spice-vdagent &>/dev/null; then
-        pass "SPICE user agent running"
+    if pgrep -x spice-vdagentd &>/dev/null; then
+        pass "SPICE agent daemon running (clipboard via virtio-serial)"
+    elif [ -e /dev/virtio-ports/com.redhat.spice.0 ]; then
+        warn "spice-vdagentd not running — clipboard sharing may not work"
     else
-        if [ "$XDG_SESSION_TYPE" = "wayland" ] || [ -n "$WAYLAND_DISPLAY" ]; then
-            warn "spice-vdagent not running — X11 agent, Wayland not supported"
-        else
-            warn "spice-vdagent not running"
-        fi
+        pass "No SPICE device — running on real hardware"
     fi
 
     if [ -f /home/aios/.aios/vault.enc ]; then
@@ -920,7 +965,10 @@ ENVEOF
 cat > /home/aios/.config/labwc/rc.xml << RCEOF
 <?xml version="1.0"?>
 <labwc_config>
-  <core><gap>0</gap></core>
+  <core>
+    <decoration>server</decoration>
+    <gap>0</gap>
+  </core>
   <theme>
     <name>AiOS</name>
     <cornerRadius>0</cornerRadius>
@@ -1184,9 +1232,34 @@ rm -f *.iso 2>/dev/null || true
 echo "[*] Building AiOS ISO..."
 lb build 2>&1 | tee build.log
 
-# Save cache
+# Save caches
 mkdir -p /cache/packages.chroot
 cp -a cache/packages.chroot/* /cache/packages.chroot/ 2>/dev/null || true
+
+# Save bootstrap cache (the debootstrap tarball — avoids re-downloading base system)
+if [ -d cache/bootstrap ] && [ ! -f /cache/bootstrap.tar ]; then
+    echo "[*] Saving bootstrap cache..."
+    tar cf /cache/bootstrap.tar -C cache bootstrap 2>/dev/null || true
+fi
+
+# Save external downloads + compiled binaries for next clean build
+mkdir -p /cache/external
+if [ -f chroot/home/aios/.aios/models/whisper/ggml-tiny.bin ]; then
+    cp chroot/home/aios/.aios/models/whisper/ggml-tiny.bin /cache/external/ 2>/dev/null || true
+fi
+if [ -d chroot/opt/piper ]; then
+    tar cf /cache/external/piper.tar -C chroot/opt piper 2>/dev/null || true
+fi
+if [ -d chroot/home/aios/.aios/models/piper ]; then
+    tar cf /cache/external/piper-voices.tar -C chroot/home/aios/.aios/models piper 2>/dev/null || true
+fi
+if [ -f chroot/usr/bin/labwc ]; then
+    cp chroot/usr/bin/labwc /cache/external/ 2>/dev/null || true
+    tar cf /cache/external/labwc-share.tar -C chroot/usr/share labwc 2>/dev/null || true
+fi
+if [ -f chroot/usr/bin/whisper-cpp-cli ]; then
+    cp chroot/usr/bin/whisper-cpp-cli /cache/external/ 2>/dev/null || true
+fi
 
 ISO=$(find . -maxdepth 1 -name "*.iso" -type f | head -1)
 if [ -n "${ISO}" ]; then

@@ -1,6 +1,8 @@
 # Build artifacts
 distro/build/
 *.iso
+*.qcow2
+*.vdi
 
 # Rust
 aios-app-rs/target/

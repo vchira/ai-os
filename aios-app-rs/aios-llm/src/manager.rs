@@ -468,6 +468,16 @@ impl LlmManager {
              you decide how to fulfill it."
                 .to_string(),
             format!("Current date/time: {now}"),
+            "IMPORTANT tool usage rules:\n\
+             - When the user asks you to remember, memorize, or store something, you MUST use the \
+             'memory' tool with action 'memorize'. Do NOT just say you will remember — actually \
+             call the tool.\n\
+             - When the user asks what you remember, or asks about something they previously told \
+             you to remember, use the 'memory' tool with action 'recall' or 'list_keys'.\n\
+             - When the user asks you to forget something, use the 'memory' tool with action 'forget'.\n\
+             - Always use tools to perform actions. Never claim to have done something without \
+             actually calling the appropriate tool."
+                .to_string(),
         ];
 
         if !available_tools.is_empty() {

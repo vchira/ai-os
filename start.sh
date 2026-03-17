@@ -1,19 +1,41 @@
 #!/bin/bash
-# AiOS — Build (if needed) and boot the OS in QEMU
+# AiOS — Build (if needed) and boot the OS
 #
 # Usage:
-#   ./start.sh              # just boot (rebuild code if source changed)
-#   ./start.sh --code-rebuild       # rebuild Rust code only + boot (fast, ~1 min)
-#   ./start.sh --clean      # full clean rebuild + boot (slow, ~20 min)
-#   DEBUG=1 ./start.sh      # boot with serial logging
+#   ./start.sh                  # boot with QEMU/KVM
+#   ./start.sh --vbox           # boot with VirtualBox (mic + speaker)
+#   ./start.sh --code-rebuild   # rebuild Rust code only + boot
+#   ./start.sh --clean          # clean rebuild (keeps caches)
+#   ./start.sh --deep           # clean rebuild + purge all caches
+#   ./start.sh --nuke           # scorched earth — delete everything + rebuild
+#   DEBUG=1 ./start.sh          # boot with serial logging
+#
+# Flags can be combined: ./start.sh --clean --vbox
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ARG="${1:-}"
 
-if [ "${ARG}" = "--clean" ]; then
-    echo "[*] Clean build requested..."
+# Parse args: extract flags
+USE_VBOX=false
+ARG=""
+for arg in "$@"; do
+    case "${arg}" in
+        --vbox) USE_VBOX=true ;;
+        *) ARG="${arg}" ;;
+    esac
+done
+
+if [ "${ARG}" = "--nuke" ]; then
+    echo "[*] NUKE: deleting everything and rebuilding from scratch..."
+    "${SCRIPT_DIR}/clean.sh" --nuke
+    "${SCRIPT_DIR}/distro/build.sh" --clean
+elif [ "${ARG}" = "--deep" ]; then
+    echo "[*] Deep clean: purging all caches and rebuilding..."
+    "${SCRIPT_DIR}/clean.sh" --deep
+    "${SCRIPT_DIR}/distro/build.sh" --clean
+elif [ "${ARG}" = "--clean" ]; then
+    echo "[*] Clean build (keeping caches)..."
     "${SCRIPT_DIR}/clean.sh"
     "${SCRIPT_DIR}/distro/build.sh" --clean
 elif [ "${ARG}" = "--code-rebuild" ]; then
@@ -42,12 +64,17 @@ if [ -z "${ISO}" ]; then
 fi
 
 echo "[*] Booting AiOS: ${ISO}"
-if [ "${DEBUG:-}" = "1" ]; then
-    echo "[*] Debug mode on — after boot, check /tmp/aios-serial.log"
+
+if [ "${USE_VBOX}" = true ]; then
+    echo "[*] Using VirtualBox (mic + speaker)"
+    cd "${SCRIPT_DIR}/distro" && exec ./run-vm-vbox.sh "${ISO}"
+else
+    if [ "${DEBUG:-}" = "1" ]; then
+        echo "[*] Debug mode on — after boot, check /tmp/aios-serial.log"
+    fi
+    echo "[*] Using QEMU/KVM"
+    # Clean up stale libvirt VM
+    virsh --connect qemu:///system destroy aios-live 2>/dev/null || true
+    virsh --connect qemu:///system undefine aios-live 2>/dev/null || true
+    cd "${SCRIPT_DIR}/distro" && exec ./run-vm.sh "${ISO}"
 fi
-
-# Clean up stale VM before starting
-virsh --connect qemu:///system destroy aios-live 2>/dev/null || true
-virsh --connect qemu:///system undefine aios-live 2>/dev/null || true
-
-cd "${SCRIPT_DIR}/distro" && exec ./run-vm.sh "${ISO}"

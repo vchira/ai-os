@@ -45,7 +45,7 @@ const ANTHROPIC_BETA: &str = "prompt-caching-2024-07-31";
 /// Default model identifier.
 const DEFAULT_MODEL: &str = "claude-sonnet-4-20250514";
 /// Haiku model for low-effort requests.
-const HAIKU_MODEL: &str = "claude-haiku-3-20240307";
+const HAIKU_MODEL: &str = "claude-3-haiku-20240307";
 /// Default maximum tokens in the response.
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 /// Max tokens for low-effort requests.

@@ -64,19 +64,51 @@ if ! command -v docker &>/dev/null; then
     exit 1
 fi
 
-# Build the builder image once
-if ! docker image inspect "${IMAGE}" &>/dev/null; then
-    echo "[*] Building builder image (one-time)..."
-    docker build -t "${IMAGE}" "${SCRIPT_DIR}"
-fi
+# Build the builder image (rebuilds only when Dockerfile or packages.list change)
+# Docker's layer cache handles this — unchanged layers are instant
+echo "[*] Building/checking builder image..."
+docker build -t "${IMAGE}" "${SCRIPT_DIR}"
 
 docker volume create "${CACHE_VOL}" &>/dev/null || true
 docker volume create "${CARGO_CACHE}" &>/dev/null || true
 
-# Clean if requested
+# Clean if requested — preserve external downloads that don't change
 if [ "${ARG}" = "--clean" ] && [ -d "${BUILD_DIR}" ]; then
-    echo "[*] Cleaning previous build..."
-    docker run --rm -v "${REPO_DIR}:/work" "${IMAGE}" rm -rf /work/distro/build
+    echo "[*] Cleaning previous build (preserving external caches)..."
+    docker run --rm -v "${REPO_DIR}:/work" -v "${CACHE_VOL}:/cache" "${IMAGE}" bash -c '
+        cd /work/distro/build
+        # Save downloaded external artifacts to cache volume
+        mkdir -p /cache/external
+        # Whisper model (~75MB)
+        if [ -f chroot/home/aios/.aios/models/whisper/ggml-tiny.bin ]; then
+            cp chroot/home/aios/.aios/models/whisper/ggml-tiny.bin /cache/external/ 2>/dev/null || true
+        fi
+        # Piper TTS binary
+        if [ -d chroot/opt/piper ]; then
+            tar cf /cache/external/piper.tar -C chroot/opt piper 2>/dev/null || true
+        fi
+        # Piper voice models
+        if [ -d chroot/home/aios/.aios/models/piper ]; then
+            tar cf /cache/external/piper-voices.tar -C chroot/home/aios/.aios/models piper 2>/dev/null || true
+        fi
+        # labwc compiled binary
+        if [ -f chroot/usr/bin/labwc ]; then
+            cp chroot/usr/bin/labwc /cache/external/ 2>/dev/null || true
+            # Also save labwc shared data (configs, xdg desktop entry, etc.)
+            tar cf /cache/external/labwc-share.tar -C chroot/usr/share labwc 2>/dev/null || true
+        fi
+        # whisper.cpp compiled binary
+        if [ -f chroot/usr/bin/whisper-cpp-cli ]; then
+            cp chroot/usr/bin/whisper-cpp-cli /cache/external/ 2>/dev/null || true
+        fi
+        # Bootstrap cache (debootstrap tarball — ~200 base packages)
+        if [ -d cache/bootstrap ] && [ ! -f /cache/bootstrap.tar ]; then
+            echo "[*] Saving bootstrap cache..."
+            tar cf /cache/bootstrap.tar -C cache bootstrap 2>/dev/null || true
+        fi
+        # Now clean
+        rm -rf /work/distro/build
+    '
 fi
 
 # ─── Always rebuild the Rust binary ──────────────────────────
