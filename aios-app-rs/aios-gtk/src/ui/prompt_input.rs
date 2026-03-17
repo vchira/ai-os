@@ -256,7 +256,7 @@ impl PromptInput {
                 cmd_label.add_css_class("heading");
                 row_box.append(&cmd_label);
 
-                let desc_label = gtk::Label::new(Some(cmd_info.description));
+                let desc_label = gtk::Label::new(Some(&cmd_info.description));
                 desc_label.set_halign(Align::Start);
                 desc_label.set_hexpand(true);
                 desc_label.set_opacity(0.6);

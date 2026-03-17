@@ -369,11 +369,29 @@ let ws = null;
 let reconnectTimer = null;
 let assistantName = 'Assistant';
 
+// -----------------------------------------------------------------------
+// i18n — translation support
+// -----------------------------------------------------------------------
+
+let translations = {};
+let currentLang = 'en';
+
+function t(key) {
+    return translations[currentLang]?.[key] || translations['en']?.[key] || key;
+}
+function tFmt(key, args) {
+    let s = t(key);
+    for (const [k, v] of Object.entries(args)) {
+        s = s.replace('{' + k + '}', v);
+    }
+    return s;
+}
+
 function roleDisplayName(role) {
     switch(role) {
-        case 'user': return 'You';
+        case 'user': return t('chat.role.you');
         case 'assistant': return assistantName;
-        case 'tool': return 'Tool';
+        case 'tool': return t('chat.role.tool');
         default: return role;
     }
 }
@@ -384,14 +402,14 @@ function connect() {
 
   ws.onopen = () => {
     statusDot.className = 'status-dot connected';
-    statusText.textContent = 'Connected';
+    statusText.textContent = t('web.connected');
     sendBtn.disabled = false;
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   };
 
   ws.onclose = () => {
     statusDot.className = 'status-dot';
-    statusText.textContent = 'Disconnected';
+    statusText.textContent = t('web.disconnected');
     sendBtn.disabled = true;
     reconnectTimer = setTimeout(connect, 3000);
   };
@@ -423,11 +441,19 @@ function handleServerMessage(msg) {
       addMessage('system', `[${msg.title}] ${msg.message}`);
       break;
     case 'system':
-      // If a system message includes assistant name config, update it
+      // If a system message includes JSON config, handle it
       try {
         const cfg = JSON.parse(msg.content);
         if (cfg.assistant_name) {
           assistantName = cfg.assistant_name;
+        }
+        if (cfg.type === 'translations') {
+          translations[cfg.lang] = cfg.strings;
+          if (cfg.lang === 'en') translations['en'] = cfg.strings;
+          currentLang = cfg.lang;
+          document.getElementById('input').placeholder = t('web.placeholder');
+          document.getElementById('sendBtn').textContent = t('web.send');
+          break; // Don't display translation config as a chat message
         }
       } catch(e) { /* not JSON config, ignore */ }
       addMessage('system', msg.content);
@@ -439,7 +465,9 @@ function handleServerMessage(msg) {
 }
 
 const LEVEL_ICONS = {info:'\u2139\ufe0f',success:'\u2705',warning:'\u26a0\ufe0f',important:'\u2757',error:'\u274c'};
-const LEVEL_LABELS = {info:'INFO',success:'SUCCESS',warning:'WARNING',important:'IMPORTANT',error:'ERROR'};
+function getLevelLabel(level) {
+  return t('web.level.' + level) || level.toUpperCase();
+}
 
 function addMessage(role, content, level) {
   const div = document.createElement('div');
@@ -449,7 +477,7 @@ function addMessage(role, content, level) {
     div.classList.add('level', `level-${level}`);
     const levelLabel = document.createElement('div');
     levelLabel.className = 'level-label';
-    levelLabel.textContent = `${LEVEL_ICONS[level]||''} [${LEVEL_LABELS[level]||level.toUpperCase()}]`;
+    levelLabel.textContent = `${LEVEL_ICONS[level]||''} [${getLevelLabel(level)}]`;
     div.appendChild(levelLabel);
   } else if (role !== 'system') {
     const roleLabel = document.createElement('div');
@@ -536,8 +564,8 @@ function showPanel(id, request) {
   });
 
   html += `<div class="buttons">
-    <button class="cancel" onclick="closePanel('${esc(id)}', true)">Cancel</button>
-    <button class="submit" onclick="submitPanel('${esc(id)}')">Submit</button>
+    <button class="cancel" onclick="closePanel('${esc(id)}', true)">${esc(t('web.panel.cancel'))}</button>
+    <button class="submit" onclick="submitPanel('${esc(id)}')">${esc(t('web.panel.submit'))}</button>
   </div>`;
 
   panelContent.innerHTML = html;
@@ -585,34 +613,36 @@ sendBtn.addEventListener('click', sendMessage);
 // Slash-command autocomplete
 // -----------------------------------------------------------------------
 
-const COMMANDS = [
-  { cmd: '/help',       desc: 'Show available commands' },
-  { cmd: '/key',        desc: 'Set API key for a provider' },
-  { cmd: '/provider',   desc: 'Switch LLM provider' },
-  { cmd: '/model',      desc: 'Set model for current provider' },
-  { cmd: '/effort',     desc: 'Set AI effort level' },
-  { cmd: '/mode',       desc: 'Set quality/cost mode' },
-  { cmd: '/keyboard',   desc: 'Set keyboard layout' },
-  { cmd: '/resolution', desc: 'Set screen resolution' },
-  { cmd: '/theme',      desc: 'Set UI theme' },
-  { cmd: '/voice',      desc: 'Set TTS voice' },
-  { cmd: '/mic',        desc: 'Toggle voice input' },
-  { cmd: '/speaker',    desc: 'Toggle voice output' },
-  { cmd: '/language',   desc: 'Set STT language' },
-  { cmd: '/tools',      desc: 'List available tools' },
-  { cmd: '/channel',    desc: 'Channel settings' },
-  { cmd: '/selftest',   desc: 'Run self-tests' },
-  { cmd: '/info',       desc: 'Show system information' },
-  { cmd: '/configure',  desc: 'Open settings dialog' },
-  { cmd: '/clear',      desc: 'Clear chat history' },
-];
+function getCommands() {
+  return [
+    { cmd: '/help',       desc: t('cmd.help.desc') },
+    { cmd: '/key',        desc: t('cmd.key.desc') },
+    { cmd: '/provider',   desc: t('cmd.provider.desc') },
+    { cmd: '/model',      desc: t('cmd.model.desc') },
+    { cmd: '/effort',     desc: t('cmd.effort.desc') },
+    { cmd: '/mode',       desc: t('cmd.mode.desc') },
+    { cmd: '/keyboard',   desc: t('cmd.keyboard.desc') },
+    { cmd: '/resolution', desc: t('cmd.resolution.desc') },
+    { cmd: '/theme',      desc: t('cmd.theme.desc') },
+    { cmd: '/voice',      desc: t('cmd.voice.desc') },
+    { cmd: '/mic',        desc: t('cmd.mic.desc') },
+    { cmd: '/speaker',    desc: t('cmd.speaker.desc') },
+    { cmd: '/language',   desc: t('cmd.language.desc') },
+    { cmd: '/tools',      desc: t('cmd.tools.desc') },
+    { cmd: '/channel',    desc: t('cmd.channel.desc') },
+    { cmd: '/selftest',   desc: t('cmd.selftest.desc') },
+    { cmd: '/info',       desc: t('cmd.info.desc') },
+    { cmd: '/configure',  desc: t('cmd.configure.desc') },
+    { cmd: '/clear',      desc: t('cmd.clear.desc') },
+  ];
+}
 
 const acBox = document.getElementById('autocomplete');
 let acIndex = -1;
 
 function showAutocomplete(filter) {
   const prefix = filter.toLowerCase();
-  const matches = COMMANDS.filter(c => c.cmd.startsWith(prefix));
+  const matches = getCommands().filter(c => c.cmd.startsWith(prefix));
   if (matches.length === 0) { hideAutocomplete(); return; }
 
   acBox.innerHTML = matches.map((c, i) =>

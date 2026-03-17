@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 
 use aios_core::config::commands::{CommandHandler, CommandResult, PanelFieldKind};
 use aios_core::config::ConfigManager;
+use aios_core::i18n::{t, t_fmt};
 use aios_core::secure::Vault;
 use aios_core::secure::vault::{SecretEntry, SecretKind};
 use aios_llm::{ClaudeProvider, LlmManager, OpenAIProvider};
@@ -343,11 +344,6 @@ impl AiosApp {
         let prompt_input = PromptInput::new();
         let channel_overlay = ChannelOverlay::new();
 
-        let window = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay, &["Setup..."]);
-
-        // Hide the prompt input during setup — it will be shown in transition_to_normal_mode.
-        prompt_input.widget().set_visible(false);
-
         // Load config and create channel infrastructure for setup mode.
         let mut config = match ConfigManager::new() {
             Ok(c) => c,
@@ -362,6 +358,21 @@ impl AiosApp {
                 }
             }
         };
+
+        // Initialize i18n system.
+        aios_core::i18n::init();
+        let lang = config.get_str("assistant.language", "");
+        if lang.is_empty() {
+            let detected = aios_core::i18n::detect_system_language();
+            aios_core::i18n::set_language(&detected);
+        } else {
+            aios_core::i18n::set_language(&lang);
+        }
+
+        let window = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay, &[&t("setup.window_title")]);
+
+        // Hide the prompt input during setup — it will be shown in transition_to_normal_mode.
+        prompt_input.widget().set_visible(false);
 
         // Apply assistant display name from config.
         let assistant_name = config.get_str("assistant.name", "Assistant");
@@ -381,14 +392,14 @@ impl AiosApp {
             use aios_core::types::{BootStatus, StatusLine};
             let mut status = BootStatus::new();
 
-            status.add(StatusLine::new("Desktop", true, "GTK4/libadwaita"));
+            status.add(StatusLine::new(&t("boot.status.desktop"), true, "GTK4/libadwaita"));
 
             let web_enabled = config.get_bool("channels.web.enabled", true);
             let web_port = config.get_str("channels.web.port", "80");
             if web_enabled {
-                status.add(StatusLine::new("Web Channel", true, format!("http://aios.local:{web_port}")));
+                status.add(StatusLine::new(&t("boot.status.web_channel"), true, format!("http://aios.local:{web_port}")));
             } else {
-                status.add(StatusLine::new("Web Channel", false, "disabled (/channel web on)"));
+                status.add(StatusLine::new(&t("boot.status.web_channel"), false, &t("boot.status.disabled_web")));
             }
 
             // Check audio
@@ -396,17 +407,18 @@ impl AiosApp {
             let has_espeak = std::path::Path::new("/usr/bin/espeak-ng").exists();
             let has_whisper = std::path::Path::new("/usr/bin/whisper-cpp-cli").exists();
             let tts_backend = if has_piper { "Piper" } else if has_espeak { "espeak-ng" } else { "none" };
-            status.add(StatusLine::new("Audio Output (TTS)", has_piper || has_espeak, tts_backend));
-            status.add(StatusLine::new("Audio Input (STT)", has_whisper, if has_whisper { "Whisper" } else { "not installed" }));
+            status.add(StatusLine::new(&t("boot.status.audio_output"), has_piper || has_espeak, tts_backend));
+            let stt_backend = if has_whisper { "Whisper".to_string() } else { t("boot.status.not_installed") };
+            status.add(StatusLine::new(&t("boot.status.audio_input"), has_whisper, &stt_backend));
 
             // System info
             let kb = config.get_str("system.keyboard_layout", "us");
             let tz = std::fs::read_to_string("/etc/timezone")
                 .unwrap_or_else(|_| "UTC".into()).trim().to_string();
             let boot_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            status.add(StatusLine::new("Keyboard", true, kb));
-            status.add(StatusLine::new("Timezone", true, &tz));
-            status.add(StatusLine::new("Boot time", true, boot_time));
+            status.add(StatusLine::new(&t("boot.status.keyboard"), true, kb));
+            status.add(StatusLine::new(&t("boot.status.timezone"), true, &tz));
+            status.add(StatusLine::new(&t("boot.status.boot_time"), true, boot_time));
 
             status.format()
         };
@@ -441,7 +453,7 @@ impl AiosApp {
 
                 chat_view.add_level_message(
                     aios_core::types::MessageLevel::Warning,
-                    &format!("Hostname conflict: another machine on this network is already using '{conflicting}.local'"),
+                    &t_fmt("hostname.conflict.warning", &[("name", &conflicting)]),
                 );
 
                 // Show rename card
@@ -449,13 +461,13 @@ impl AiosApp {
                 input_box.set_margin_top(8);
 
                 let entry = gtk4::Entry::builder()
-                    .placeholder_text("New hostname")
+                    .placeholder_text(&t("hostname.conflict.placeholder"))
                     .text(&suggestion)
                     .hexpand(true)
                     .build();
                 input_box.append(&entry);
 
-                let hint = gtk4::Label::new(Some("Lowercase letters, numbers, and hyphens only. Will be reachable as <name>.local"));
+                let hint = gtk4::Label::new(Some(&t("hostname.conflict.hint")));
                 hint.add_css_class("dim-label");
                 hint.set_halign(gtk4::Align::Start);
                 hint.set_wrap(true);
@@ -467,7 +479,7 @@ impl AiosApp {
                 error_label.set_halign(gtk4::Align::Start);
                 input_box.append(&error_label);
 
-                let apply_btn = gtk4::Button::with_label("Apply");
+                let apply_btn = gtk4::Button::with_label(&t("hostname.conflict.apply"));
                 apply_btn.add_css_class("suggested-action");
                 apply_btn.set_halign(gtk4::Align::Start);
                 apply_btn.set_margin_top(4);
@@ -487,7 +499,7 @@ impl AiosApp {
                         && !name.ends_with('-');
 
                     if !valid {
-                        error_ref.set_text("Invalid hostname: use lowercase letters, numbers, hyphens (1-63 chars)");
+                        error_ref.set_text(&t("hostname.conflict.error_invalid"));
                         error_ref.set_visible(true);
                         return;
                     }
@@ -508,14 +520,14 @@ impl AiosApp {
                         let _ = cfg.set("system.machine_name", serde_json::json!(name));
                     }
 
-                    chat_ref.add_message("system", &format!("Hostname changed to '{name}'. Reachable as {name}.local"));
+                    chat_ref.add_message("system", &t_fmt("hostname.conflict.changed", &[("name", &name)]));
                     let _ = std::fs::remove_file("/tmp/aios-name-conflict");
                 });
 
                 chat_view.add_setup_card(
                     "network-server-symbolic",
-                    "Rename Your Machine",
-                    &format!("Another machine is using '{conflicting}' on this network.\nChoose a different name:"),
+                    &t("hostname.conflict.title"),
+                    &t_fmt("hostname.conflict.description", &[("name", &conflicting)]),
                     Some(input_box.upcast_ref()),
                 );
             }
@@ -722,7 +734,7 @@ impl AiosApp {
         // Show the transition message.
         chat_view.add_message(
             "system",
-            "Setup complete. How can I help?",
+            &t("setup.transition"),
         );
 
         // Show the settings button (hidden during setup).
@@ -827,6 +839,16 @@ impl AiosApp {
             }
         };
 
+        // Initialize i18n system.
+        aios_core::i18n::init();
+        let lang = config.get_str("assistant.language", "");
+        if lang.is_empty() {
+            let detected = aios_core::i18n::detect_system_language();
+            aios_core::i18n::set_language(&detected);
+        } else {
+            aios_core::i18n::set_language(&lang);
+        }
+
         // Initialize tool registry with built-in tools.
         let mut tools = ToolRegistry::new();
         tools.load_builtins();
@@ -904,16 +926,16 @@ impl AiosApp {
             let mut status = BootStatus::new();
 
             // -- Channels --
-            status.add(StatusLine::new("Desktop", true, "GTK4/libadwaita"));
+            status.add(StatusLine::new(&t("boot.status.desktop"), true, "GTK4/libadwaita"));
             if web_enabled {
-                status.add(StatusLine::new("Web Channel", true, format!("http://aios.local:{web_port}")));
+                status.add(StatusLine::new(&t("boot.status.web_channel"), true, format!("http://aios.local:{web_port}")));
             } else {
-                status.add(StatusLine::new("Web Channel", false, "disabled (/channel web on)"));
+                status.add(StatusLine::new(&t("boot.status.web_channel"), false, &t("boot.status.disabled_web")));
             }
             if signal_enabled && !signal_phone.is_empty() {
-                status.add(StatusLine::new("Signal", true, &signal_phone));
+                status.add(StatusLine::new(&t("boot.status.signal"), true, &signal_phone));
             } else {
-                status.add(StatusLine::new("Signal", false, "disabled (/channel signal on)"));
+                status.add(StatusLine::new(&t("boot.status.signal"), false, &t("boot.status.disabled_signal")));
             }
 
             // -- LLM Provider + Model --
@@ -933,17 +955,17 @@ impl AiosApp {
                 _ => provider.clone(),
             };
             if has_key {
-                status.add(StatusLine::new("LLM Provider", true, format!("{provider} ({model})")));
+                status.add(StatusLine::new(&t("boot.status.llm_provider"), true, format!("{provider} ({model})")));
             } else {
-                status.add(StatusLine::new("LLM Provider", false, format!("{provider} — **no API key** (use /key)")));
+                status.add(StatusLine::new(&t("boot.status.llm_provider"), false, t_fmt("boot.status.no_api_key_hint", &[("provider", &provider)])));
             }
 
             // Show backup provider if available
             if has_claude && provider != "claude" {
-                status.add(StatusLine::new("Backup", true, "Claude available"));
+                status.add(StatusLine::new(&t("boot.status.backup"), true, t_fmt("boot.status.backup_available", &[("provider", "Claude")])));
             }
             if has_openai && provider != "openai" {
-                status.add(StatusLine::new("Backup", true, "ChatGPT available"));
+                status.add(StatusLine::new(&t("boot.status.backup"), true, t_fmt("boot.status.backup_available", &[("provider", "ChatGPT")])));
             }
 
             // -- Voice --
@@ -953,10 +975,11 @@ impl AiosApp {
             let has_piper = std::path::Path::new("/usr/bin/piper").exists();
             let has_whisper = std::path::Path::new("/usr/bin/whisper-cpp-cli").exists();
             let tts_backend = if has_piper { "Piper" } else { "espeak-ng" };
-            let stt_backend = if has_whisper { "Whisper" } else { "not installed" };
-            status.add(StatusLine::new("Audio Output (TTS)", tts,
+            let not_installed = t("boot.status.not_installed");
+            let stt_backend = if has_whisper { "Whisper" } else { &not_installed };
+            status.add(StatusLine::new(&t("boot.status.audio_output"), tts,
                 format!("{tts_backend} — voice: {tts_voice}")));
-            status.add(StatusLine::new("Audio Input (STT)", stt && has_whisper,
+            status.add(StatusLine::new(&t("boot.status.audio_input"), stt && has_whisper,
                 format!("{stt_backend}{}", if !stt { " — disabled" } else { "" })));
 
             // -- System --
@@ -965,9 +988,9 @@ impl AiosApp {
                 .unwrap_or_else(|_| "UTC".into())
                 .trim().to_string();
             let boot_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            status.add(StatusLine::new("Keyboard", true, kb_layout));
-            status.add(StatusLine::new("Timezone", true, &timezone));
-            status.add(StatusLine::new("Boot time", true, boot_time));
+            status.add(StatusLine::new(&t("boot.status.keyboard"), true, kb_layout));
+            status.add(StatusLine::new(&t("boot.status.timezone"), true, &timezone));
+            status.add(StatusLine::new(&t("boot.status.boot_time"), true, boot_time));
 
             status.format()
         };
@@ -993,7 +1016,7 @@ impl AiosApp {
 
                 chat_view.add_level_message(
                     aios_core::types::MessageLevel::Warning,
-                    &format!("Hostname conflict: another machine on this network is already using '{conflicting}.local'"),
+                    &t_fmt("hostname.conflict.warning", &[("name", &conflicting)]),
                 );
 
                 // Show rename card
@@ -1001,13 +1024,13 @@ impl AiosApp {
                 input_box.set_margin_top(8);
 
                 let entry = gtk4::Entry::builder()
-                    .placeholder_text("New hostname")
+                    .placeholder_text(&t("hostname.conflict.placeholder"))
                     .text(&suggestion)
                     .hexpand(true)
                     .build();
                 input_box.append(&entry);
 
-                let hint = gtk4::Label::new(Some("Lowercase letters, numbers, and hyphens only. Will be reachable as <name>.local"));
+                let hint = gtk4::Label::new(Some(&t("hostname.conflict.hint")));
                 hint.add_css_class("dim-label");
                 hint.set_halign(gtk4::Align::Start);
                 hint.set_wrap(true);
@@ -1019,7 +1042,7 @@ impl AiosApp {
                 error_label.set_halign(gtk4::Align::Start);
                 input_box.append(&error_label);
 
-                let apply_btn = gtk4::Button::with_label("Apply");
+                let apply_btn = gtk4::Button::with_label(&t("hostname.conflict.apply"));
                 apply_btn.add_css_class("suggested-action");
                 apply_btn.set_halign(gtk4::Align::Start);
                 apply_btn.set_margin_top(4);
@@ -1039,7 +1062,7 @@ impl AiosApp {
                         && !name.ends_with('-');
 
                     if !valid {
-                        error_ref.set_text("Invalid hostname: use lowercase letters, numbers, hyphens (1-63 chars)");
+                        error_ref.set_text(&t("hostname.conflict.error_invalid"));
                         error_ref.set_visible(true);
                         return;
                     }
@@ -1060,20 +1083,20 @@ impl AiosApp {
                         let _ = cfg.set("system.machine_name", serde_json::json!(name));
                     }
 
-                    chat_ref.add_message("system", &format!("Hostname changed to '{name}'. Reachable as {name}.local"));
+                    chat_ref.add_message("system", &t_fmt("hostname.conflict.changed", &[("name", &name)]));
                     let _ = std::fs::remove_file("/tmp/aios-name-conflict");
                 });
 
                 chat_view.add_setup_card(
                     "network-server-symbolic",
-                    "Rename Your Machine",
-                    &format!("Another machine is using '{conflicting}' on this network.\nChoose a different name:"),
+                    &t("hostname.conflict.title"),
+                    &t_fmt("hostname.conflict.description", &[("name", &conflicting)]),
                     Some(input_box.upcast_ref()),
                 );
             }
         }
 
-        chat_view.add_message("system", "Type a message or use /help to see available commands.");
+        chat_view.add_message("system", &t("setup.type_message"));
 
         // Apply assistant display name from config.
         let assistant_name = config.get_str("assistant.name", "Assistant");
@@ -1163,7 +1186,7 @@ impl AiosApp {
             if !has_key {
                 chat_view.add_level_message(
                     aios_core::types::MessageLevel::Warning,
-                    "No API key configured. Use **/key claude sk-ant-...** or **/key openai sk-...** to set one.",
+                    &t("app.no_api_key_warning"),
                 );
             }
         }

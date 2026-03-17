@@ -107,6 +107,7 @@ pub struct DialogResult {
 
 /// Run a dialog against real subsystems (config, tools, channels).
 pub fn run_dialog(dialog: &Dialog) -> DialogResult {
+    crate::i18n::init();
     let dir = std::env::temp_dir().join(format!(
         "aios_dialog_{}_{}", std::process::id(), dialog.name.replace(' ', "_")
     ));

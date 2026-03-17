@@ -278,6 +278,22 @@ async fn handle_ws(socket: WebSocket, state: Arc<WebServerState>) {
         }
     }
 
+    // Send translations for the current language.
+    let lang = aios_core::i18n::current_language();
+    if let Some(trans) = aios_core::i18n::get_translations(&lang) {
+        let config_msg = serde_json::json!({
+            "type": "translations",
+            "lang": lang,
+            "strings": trans,
+        });
+        let msg = ServerMessage::System {
+            content: config_msg.to_string(),
+        };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = ws_tx.send(Message::Text(json.into())).await;
+        }
+    }
+
     // Subscribe to broadcast responses.
     let mut response_rx = state.response_tx.subscribe();
 

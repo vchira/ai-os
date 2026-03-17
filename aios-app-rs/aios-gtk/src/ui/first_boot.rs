@@ -13,6 +13,7 @@ use gtk4::{self as gtk, Align, Orientation};
 use tracing::info;
 
 use aios_core::config::ConfigManager;
+use aios_core::i18n::{t, t_fmt};
 
 use super::chat_view::ChatView;
 
@@ -100,10 +101,10 @@ impl Default for SetupState {
             master_password: String::new(),
             pending_password: String::new(),
             primary_provider: String::new(),
-            assistant_name: "Assistant".to_string(),
+            assistant_name: t("setup.name.default"),
             use_same_name: true,
-            wake_word_custom: "Assistant".to_string(),
-            machine_name_custom: "assistant".to_string(),
+            wake_word_custom: t("setup.name.default"),
+            machine_name_custom: t("setup.name.default_lowercase"),
         }
     }
 }
@@ -175,7 +176,7 @@ impl SetupConversation {
             SetupStep::TestAudioInput => {
                 // Any voice input means the mic works.
                 self.chat_view.add_message("system",
-                    &format!("\u{2705} Mic works! I heard: \"{text}\""));
+                    &t_fmt("setup.audio_input.voice_works", &[("text", text)]));
                 self.advance(SetupStep::NameAssistant);
             }
             SetupStep::NameAssistant => {
@@ -312,7 +313,7 @@ impl SetupConversation {
     // -- Step 1: Welcome ----------------------------------------------------
 
     fn show_welcome(&self) {
-        let btn = gtk::Button::with_label("Get Started \u{2192}");
+        let btn = gtk::Button::with_label(&t("setup.welcome.button"));
         btn.add_css_class("suggested-action");
         btn.add_css_class("pill");
         btn.set_halign(Align::Start);
@@ -320,22 +321,18 @@ impl SetupConversation {
 
         let handle = self.chat_view.add_setup_card(
             "starred-symbolic",
-            "Welcome to AiOS!",
-            "I'm your AI assistant. Let's set up your system together.\n\
-             First, let's check your audio.",
+            &t("setup.welcome.title"),
+            &t("setup.welcome.description"),
             Some(btn.upcast_ref()),
         );
 
         let this = self.clone();
         btn.connect_clicked(move |_| {
-            if let Some(ref h) = handle { h.dismiss("Let's go!"); }
+            if let Some(ref h) = handle { h.dismiss(&t("setup.welcome.dismiss")); }
             this.advance(SetupStep::TestAudioOutput);
         });
 
-        self.speak(
-            "Welcome to AiOS! I'm your AI assistant. \
-             Let's set up your system together.",
-        );
+        self.speak(&t("setup.welcome.tts"));
     }
 
     // -- Step 1b: Test Audio Output -----------------------------------------
@@ -345,12 +342,12 @@ impl SetupConversation {
         input_box.set_margin_top(8);
 
         // "Replay" button — speaks the test phrase again.
-        let replay_btn = gtk::Button::with_label("\u{1f50a} Replay Audio");
+        let replay_btn = gtk::Button::with_label(&t("setup.audio_output.replay"));
         replay_btn.set_halign(Align::Start);
 
         let this_for_replay = self.clone();
         replay_btn.connect_clicked(move |_| {
-            this_for_replay.speak("Can you hear me? This is AiOS speaking.");
+            this_for_replay.speak(&t("setup.audio_output.tts"));
         });
         input_box.append(&replay_btn);
 
@@ -358,41 +355,40 @@ impl SetupConversation {
         let btn_box = gtk::Box::new(Orientation::Horizontal, 8);
         btn_box.set_margin_top(4);
 
-        let yes_btn = gtk::Button::with_label("\u{2705} Yes, I can hear");
+        let yes_btn = gtk::Button::with_label(&t("setup.audio_output.yes"));
         yes_btn.add_css_class("suggested-action");
         btn_box.append(&yes_btn);
 
-        let no_btn = gtk::Button::with_label("\u{274c} No audio / Skip");
+        let no_btn = gtk::Button::with_label(&t("setup.audio_output.no"));
         btn_box.append(&no_btn);
         input_box.append(&btn_box);
 
         let handle = self.chat_view.add_setup_card(
             "audio-speakers-symbolic",
-            "Test Audio Output",
-            "Let's check if you can hear me.\n\
-             I'll play a test message. Click Replay if you need to hear it again.",
+            &t("setup.audio_output.title"),
+            &t("setup.audio_output.description"),
             Some(input_box.upcast_ref()),
         );
 
         let this = self.clone();
         let h = handle.clone();
         yes_btn.connect_clicked(move |_| {
-            if let Some(ref h) = h { h.dismiss("Audio works"); }
-            this.chat_view.add_message("user", "Yes, I can hear the audio");
+            if let Some(ref h) = h { h.dismiss(&t("setup.audio_output.dismiss_works")); }
+            this.chat_view.add_message("user", &t("setup.audio_output.user_yes"));
             this.advance(SetupStep::TestAudioInput);
         });
 
         let this = self.clone();
         no_btn.connect_clicked(move |_| {
-            if let Some(ref h) = handle { h.dismiss("Skipped audio test"); }
-            this.chat_view.add_message("user", "Skip audio test");
+            if let Some(ref h) = handle { h.dismiss(&t("setup.audio_output.dismiss_skipped")); }
+            this.chat_view.add_message("user", &t("setup.audio_output.user_skip"));
             this.chat_view.add_message("system",
-                "Audio output skipped. You can configure it later in Settings.");
+                &t("setup.audio_output.skipped"));
             this.advance(SetupStep::NameAssistant);
         });
 
         // Speak the test phrase.
-        self.speak("Can you hear me? This is AiOS speaking.");
+        self.speak(&t("setup.audio_output.tts"));
     }
 
     // -- Step 1c: Test Audio Input ------------------------------------------
@@ -401,9 +397,7 @@ impl SetupConversation {
         let input_box = gtk::Box::new(Orientation::Vertical, 8);
         input_box.set_margin_top(8);
 
-        let status_label = gtk::Label::new(Some(
-            "\u{1f3a4} Speak now \u{2014} the meter should move:",
-        ));
+        let status_label = gtk::Label::new(Some(&t("setup.audio_input.speak_now")));
         status_label.set_halign(Align::Start);
         input_box.append(&status_label);
 
@@ -423,7 +417,7 @@ impl SetupConversation {
         level_bar.set_size_request(-1, 20);
         input_box.append(&level_bar);
 
-        let level_label = gtk::Label::new(Some("No audio detected"));
+        let level_label = gtk::Label::new(Some(&t("setup.audio_input.no_audio")));
         level_label.set_halign(Align::Start);
         level_label.add_css_class("dim-label");
         input_box.append(&level_label);
@@ -432,20 +426,19 @@ impl SetupConversation {
         let btn_box = gtk::Box::new(Orientation::Horizontal, 8);
         btn_box.set_margin_top(8);
 
-        let works_btn = gtk::Button::with_label("\u{2705} Mic works!");
+        let works_btn = gtk::Button::with_label(&t("setup.audio_input.works"));
         works_btn.add_css_class("suggested-action");
         works_btn.set_sensitive(false); // enabled once audio is detected
         btn_box.append(&works_btn);
 
-        let skip_btn = gtk::Button::with_label("No mic / Skip \u{2192}");
+        let skip_btn = gtk::Button::with_label(&t("setup.audio_input.skip"));
         btn_box.append(&skip_btn);
         input_box.append(&btn_box);
 
         let handle = self.chat_view.add_setup_card(
             "audio-input-microphone-symbolic",
-            "Test Microphone",
-            "Speak into your microphone.\n\
-             The meter below shows your audio level in real time.",
+            &t("setup.audio_input.title"),
+            &t("setup.audio_input.description"),
             Some(input_box.upcast_ref()),
         );
 
@@ -507,7 +500,7 @@ impl SetupConversation {
 
             if level > 0.05 && !peak_seen {
                 peak_seen = true;
-                level_label_ref.set_text("\u{2705} Audio detected! Your microphone works.");
+                level_label_ref.set_text(&t("setup.audio_input.detected"));
                 works_btn_ref.set_sensitive(true);
             } else if level > 0.05 {
                 // Keep updating with current level
@@ -515,7 +508,7 @@ impl SetupConversation {
                 let bar_str: String = "\u{2588}".repeat(bars);
                 level_label_ref.set_text(&format!("\u{1f3a4} {bar_str}"));
             } else if !peak_seen {
-                level_label_ref.set_text("Waiting for audio...");
+                level_label_ref.set_text(&t("setup.audio_input.waiting"));
             }
 
             gtk::glib::ControlFlow::Continue
@@ -529,8 +522,8 @@ impl SetupConversation {
         works_btn.connect_clicked(move |_| {
             mic_active_for_works.set(false);
             flag_for_works.store(false, std::sync::atomic::Ordering::Relaxed);
-            if let Some(ref h) = h { h.dismiss("Microphone works"); }
-            this.chat_view.add_message("user", "Microphone works!");
+            if let Some(ref h) = h { h.dismiss(&t("setup.audio_input.dismiss_works")); }
+            this.chat_view.add_message("user", &t("setup.audio_input.user_works"));
             this.advance(SetupStep::NameAssistant);
         });
 
@@ -541,16 +534,14 @@ impl SetupConversation {
         skip_btn.connect_clicked(move |_| {
             mic_active_for_skip.set(false);
             flag_for_skip.store(false, std::sync::atomic::Ordering::Relaxed);
-            if let Some(ref h) = handle { h.dismiss("Skipped mic test"); }
-            this.chat_view.add_message("user", "Skip mic test");
+            if let Some(ref h) = handle { h.dismiss(&t("setup.audio_input.dismiss_skipped")); }
+            this.chat_view.add_message("user", &t("setup.audio_input.user_skip"));
             this.chat_view.add_message("system",
-                "Mic test skipped. You can configure voice input later in Settings.");
+                &t("setup.audio_input.skipped"));
             this.advance(SetupStep::NameAssistant);
         });
 
-        self.speak(
-            "Now let's test your microphone. Please say something.",
-        );
+        self.speak(&t("setup.audio_input.tts"));
     }
 
     // -- Step 1d: Name Your Assistant ----------------------------------------
@@ -560,12 +551,12 @@ impl SetupConversation {
         input_box.set_margin_top(8);
 
         // Assistant name
-        let name_label = gtk::Label::new(Some("Assistant name (shown in chat):"));
+        let name_label = gtk::Label::new(Some(&t("setup.name.label")));
         name_label.set_halign(Align::Start);
         input_box.append(&name_label);
 
         let name_entry = gtk::Entry::builder()
-            .text("Assistant")
+            .text(&t("setup.name.default"))
             .hexpand(true)
             .build();
         name_entry.add_css_class("setup-input");
@@ -573,7 +564,7 @@ impl SetupConversation {
 
         // Same-for-all toggle
         let same_check = gtk::CheckButton::with_label(
-            "Use same name for wake word and network hostname",
+            &t("setup.name.same_toggle"),
         );
         same_check.set_active(true);
         same_check.set_margin_top(8);
@@ -584,23 +575,23 @@ impl SetupConversation {
         extra_box.set_visible(false);
         extra_box.set_margin_top(8);
 
-        let wake_label = gtk::Label::new(Some("Wake word (what you say to activate):"));
+        let wake_label = gtk::Label::new(Some(&t("setup.name.wake_label")));
         wake_label.set_halign(Align::Start);
         extra_box.append(&wake_label);
 
         let wake_entry = gtk::Entry::builder()
-            .text("Assistant")
+            .text(&t("setup.name.default"))
             .hexpand(true)
             .build();
         wake_entry.add_css_class("setup-input");
         extra_box.append(&wake_entry);
 
-        let host_label = gtk::Label::new(Some("Network hostname (reachable as <name>.local):"));
+        let host_label = gtk::Label::new(Some(&t("setup.name.host_label")));
         host_label.set_halign(Align::Start);
         extra_box.append(&host_label);
 
         let host_entry = gtk::Entry::builder()
-            .text("assistant")
+            .text(&t("setup.name.default_lowercase"))
             .hexpand(true)
             .build();
         host_entry.add_css_class("setup-input");
@@ -622,7 +613,7 @@ impl SetupConversation {
         error_label.set_halign(Align::Start);
         input_box.append(&error_label);
 
-        let next_btn = gtk::Button::with_label("Next \u{2192}");
+        let next_btn = gtk::Button::with_label(&t("setup.name.next"));
         next_btn.add_css_class("suggested-action");
         next_btn.set_halign(Align::Start);
         next_btn.set_margin_top(4);
@@ -630,9 +621,8 @@ impl SetupConversation {
 
         let handle = self.chat_view.add_setup_card(
             "avatar-default-symbolic",
-            "Name Your Assistant",
-            "Choose a name for your AI assistant.\n\
-             This is shown in chat, used as the wake word, and as the network hostname.",
+            &t("setup.name.title"),
+            &t("setup.name.description"),
             Some(input_box.upcast_ref()),
         );
 
@@ -645,7 +635,7 @@ impl SetupConversation {
         next_btn.connect_clicked(move |b| {
             let name = name_ref.text().to_string().trim().to_string();
             if name.is_empty() {
-                error_ref.set_text("Please enter a name");
+                error_ref.set_text(&t("setup.name.error_empty"));
                 error_ref.set_visible(true);
                 return;
             }
@@ -670,7 +660,7 @@ impl SetupConversation {
                 && !machine.ends_with('-');
 
             if !machine_valid {
-                error_ref.set_text("Invalid hostname: use lowercase letters, numbers, hyphens");
+                error_ref.set_text(&t("setup.name.error_hostname"));
                 error_ref.set_visible(true);
                 return;
             }
@@ -693,7 +683,7 @@ impl SetupConversation {
             this.advance(SetupStep::ChooseProvider);
         });
 
-        self.speak("What would you like to call me? The default is Assistant.");
+        self.speak(&t("setup.name.tts"));
     }
 
     // -- Step 2: Choose Provider --------------------------------------------
@@ -708,13 +698,13 @@ impl SetupConversation {
             };
             if has_claude && !has_openai {
                 self.chat_view.add_message("system",
-                    "Claude API key found in system config \u{2014} using Claude.");
+                    &t("setup.provider.auto_claude"));
                 self.select_provider("claude");
                 return;
             }
             if has_openai && !has_claude {
                 self.chat_view.add_message("system",
-                    "ChatGPT API key found in system config \u{2014} using ChatGPT.");
+                    &t("setup.provider.auto_chatgpt"));
                 self.select_provider("openai");
                 return;
             }
@@ -725,43 +715,40 @@ impl SetupConversation {
 
         // Claude button.
         let claude_btn = Self::make_provider_button(
-            "Claude (Anthropic)",
-            "Advanced reasoning and analysis, strong at coding tasks",
+            &t("setup.provider.claude_name"),
+            &t("setup.provider.claude_desc"),
         );
 
         input_box.append(&claude_btn);
 
         // ChatGPT button.
         let openai_btn = Self::make_provider_button(
-            "ChatGPT (OpenAI)",
-            "GPT-4o with broad general knowledge and tool use",
+            &t("setup.provider.chatgpt_name"),
+            &t("setup.provider.chatgpt_desc"),
         );
         input_box.append(&openai_btn);
 
         let handle = self.chat_view.add_setup_card(
             "network-server-symbolic",
-            "Choose Your AI Provider",
-            "Which AI would you like to use as your primary assistant?",
+            &t("setup.provider.title"),
+            &t("setup.provider.description"),
             Some(input_box.upcast_ref()),
         );
 
         let this = self.clone();
         let h = handle.clone();
         claude_btn.connect_clicked(move |_| {
-            if let Some(ref h) = h { h.dismiss("Claude (Anthropic)"); }
+            if let Some(ref h) = h { h.dismiss(&t("setup.provider.claude_name")); }
             this.select_provider("claude");
         });
 
         let this = self.clone();
         openai_btn.connect_clicked(move |_| {
-            if let Some(ref h) = handle { h.dismiss("ChatGPT (OpenAI)"); }
+            if let Some(ref h) = handle { h.dismiss(&t("setup.provider.chatgpt_name")); }
             this.select_provider("openai");
         });
 
-        self.speak(
-            "Which AI provider would you like to use? \
-             You can say Claude or ChatGPT.",
-        );
+        self.speak(&t("setup.provider.tts"));
     }
 
     /// Create a styled provider selection button.
@@ -798,16 +785,16 @@ impl SetupConversation {
 
         // Show a user-style confirmation message.
         let display = match provider {
-            "claude" => "Claude (Anthropic)",
-            "openai" => "ChatGPT (OpenAI)",
-            other => other,
+            "claude" => t("setup.provider.claude_name"),
+            "openai" => t("setup.provider.chatgpt_name"),
+            other => other.to_string(),
         };
-        self.chat_view.add_message("user", display);
+        self.chat_view.add_message("user", &display);
 
         let next = SetupStep::EnterApiKey {
             provider: provider.to_owned(),
         };
-        self.advance_with_choice(next, Some(display));
+        self.advance_with_choice(next, Some(&display));
     }
 
     // -- Step 3 / Step 7: Enter API Key ------------------------------------
@@ -815,28 +802,16 @@ impl SetupConversation {
     fn show_enter_api_key(&self, provider: String, is_backup: bool) {
         let (title, tutorial) = match provider.as_str() {
             "claude" => (
-                "Enter Your Claude API Key".to_string(),
-                "How to get your key:\n\
-                 1. Go to console.anthropic.com\n\
-                 2. Sign in or create an account\n\
-                 3. Go to Settings \u{2192} API Keys\n\
-                 4. Click \"Create Key\" and copy it\n\
-                 \n\
-                 The key starts with sk-ant-...".to_string(),
+                t("setup.api_key.title_claude"),
+                t("setup.api_key.tutorial_claude"),
             ),
             "openai" => (
-                "Enter Your ChatGPT API Key".to_string(),
-                "How to get your key:\n\
-                 1. Go to platform.openai.com\n\
-                 2. Sign in or create an account\n\
-                 3. Go to API Keys in the sidebar\n\
-                 4. Click \"Create new secret key\" and copy it\n\
-                 \n\
-                 The key starts with sk-...".to_string(),
+                t("setup.api_key.title_chatgpt"),
+                t("setup.api_key.tutorial_chatgpt"),
             ),
             _ => (
-                format!("Enter Your {} API Key", provider),
-                "Visit the provider's developer dashboard to create an API key.".to_string(),
+                t_fmt("setup.api_key.title_generic", &[("provider", &provider)]),
+                t("setup.api_key.tutorial_generic"),
             ),
         };
 
@@ -844,7 +819,7 @@ impl SetupConversation {
         input_box.set_margin_top(8);
 
         let entry = gtk::PasswordEntry::builder()
-            .placeholder_text("Paste your API key here")
+            .placeholder_text(&t("setup.api_key.placeholder"))
             .show_peek_icon(true)
             .hexpand(true)
             .build();
@@ -873,7 +848,7 @@ impl SetupConversation {
         error_label.set_halign(Align::Start);
         input_box.append(&error_label);
 
-        let next_btn = gtk::Button::with_label("Next \u{2192}");
+        let next_btn = gtk::Button::with_label(&t("setup.api_key.next"));
         next_btn.add_css_class("suggested-action");
         next_btn.set_halign(Align::Start);
         next_btn.set_margin_top(4);
@@ -886,7 +861,7 @@ impl SetupConversation {
         next_btn.connect_clicked(move |b| {
             let api_key = entry_ref.text().to_string().trim().to_owned();
             if api_key.is_empty() {
-                error_ref.set_text("Please enter an API key");
+                error_ref.set_text(&t("setup.api_key.error_empty"));
                 error_ref.set_visible(true);
                 return;
             }
@@ -904,7 +879,7 @@ impl SetupConversation {
         entry.connect_activate(move |_| {
             let api_key = entry_ref2.text().to_string().trim().to_owned();
             if api_key.is_empty() {
-                error_ref2.set_text("Please enter an API key");
+                error_ref2.set_text(&t("setup.api_key.error_empty"));
                 error_ref2.set_visible(true);
                 return;
             }
@@ -920,7 +895,7 @@ impl SetupConversation {
             Some(input_box.upcast_ref()),
         );
 
-        self.speak("Please type or paste your API key.");
+        self.speak(&t("setup.api_key.tts"));
 
         // Focus the entry after a brief delay so the card is rendered.
         let entry_focus = entry.clone();
@@ -939,10 +914,10 @@ impl SetupConversation {
                 &api_key[api_key.len() - 4..]
             )
         } else {
-            "****".to_string()
+            t("setup.api_key.masked_fallback")
         };
         self.chat_view
-            .add_message("user", &format!("API Key: {masked}"));
+            .add_message("user", &t_fmt("setup.api_key.user_masked", &[("masked", &masked)]));
 
         {
             let mut s = self.state.borrow_mut();
@@ -968,7 +943,7 @@ impl SetupConversation {
         input_box.set_margin_top(8);
 
         let entry = gtk::PasswordEntry::builder()
-            .placeholder_text("Master password (min. 8 characters)")
+            .placeholder_text(&t("setup.password.placeholder"))
             .show_peek_icon(true)
             .hexpand(true)
             .build();
@@ -978,7 +953,7 @@ impl SetupConversation {
         // Strength indicator.
         let strength_box = gtk::Box::new(Orientation::Horizontal, 6);
         strength_box.set_margin_top(2);
-        let strength_label = gtk::Label::new(Some("Strength:"));
+        let strength_label = gtk::Label::new(Some(&t("setup.password.strength")));
         strength_label.add_css_class("dim-label");
         strength_box.append(&strength_label);
 
@@ -1007,7 +982,7 @@ impl SetupConversation {
         error_label.set_halign(Align::Start);
         input_box.append(&error_label);
 
-        let next_btn = gtk::Button::with_label("Next \u{2192}");
+        let next_btn = gtk::Button::with_label(&t("setup.password.next"));
         next_btn.add_css_class("suggested-action");
         next_btn.set_halign(Align::Start);
         next_btn.set_margin_top(4);
@@ -1020,7 +995,7 @@ impl SetupConversation {
             next_btn.connect_clicked(move |b| {
                 let password = entry_ref.text().to_string();
                 if password.len() < 8 {
-                    error_ref.set_text("Password must be at least 8 characters");
+                    error_ref.set_text(&t("setup.password.error_short"));
                     error_ref.set_visible(true);
                     return;
                 }
@@ -1044,7 +1019,7 @@ impl SetupConversation {
             entry.connect_activate(move |_| {
                 let password = entry_ref.text().to_string();
                 if password.len() < 8 {
-                    error_ref.set_text("Password must be at least 8 characters");
+                    error_ref.set_text(&t("setup.password.error_short"));
                     error_ref.set_visible(true);
                     return;
                 }
@@ -1062,13 +1037,12 @@ impl SetupConversation {
 
         self.chat_view.add_setup_card(
             "channel-secure-symbolic",
-            "Secure Your Data",
-            "Create a master password to protect your API keys and personal data.\n\
-             Minimum 8 characters.",
+            &t("setup.password.title"),
+            &t("setup.password.description"),
             Some(input_box.upcast_ref()),
         );
 
-        self.speak("Now let's secure your data. Please type a master password.");
+        self.speak(&t("setup.password.tts"));
 
         let entry_focus = entry.clone();
         gtk4::glib::idle_add_local_once(move || {
@@ -1083,7 +1057,7 @@ impl SetupConversation {
         input_box.set_margin_top(8);
 
         let entry = gtk::PasswordEntry::builder()
-            .placeholder_text("Confirm your password")
+            .placeholder_text(&t("setup.confirm_password.placeholder"))
             .show_peek_icon(true)
             .hexpand(true)
             .build();
@@ -1096,7 +1070,7 @@ impl SetupConversation {
         error_label.set_halign(Align::Start);
         input_box.append(&error_label);
 
-        let next_btn = gtk::Button::with_label("Next \u{2192}");
+        let next_btn = gtk::Button::with_label(&t("setup.confirm_password.next"));
         next_btn.add_css_class("suggested-action");
         next_btn.set_halign(Align::Start);
         next_btn.set_margin_top(4);
@@ -1111,7 +1085,7 @@ impl SetupConversation {
                 let pending = this.state.borrow().pending_password.clone();
 
                 if confirm != pending {
-                    error_ref.set_text("Passwords do not match");
+                    error_ref.set_text(&t("setup.confirm_password.error_mismatch"));
                     error_ref.set_visible(true);
                     return;
                 }
@@ -1138,7 +1112,7 @@ impl SetupConversation {
                 let pending = this.state.borrow().pending_password.clone();
 
                 if confirm != pending {
-                    error_ref.set_text("Passwords do not match");
+                    error_ref.set_text(&t("setup.confirm_password.error_mismatch"));
                     error_ref.set_visible(true);
                     return;
                 }
@@ -1157,12 +1131,12 @@ impl SetupConversation {
 
         self.chat_view.add_setup_card(
             "emblem-ok-symbolic",
-            "Confirm Password",
-            "Type your password again to confirm.",
+            &t("setup.confirm_password.title"),
+            &t("setup.confirm_password.description"),
             Some(input_box.upcast_ref()),
         );
 
-        self.speak("Please type your password again to confirm.");
+        self.speak(&t("setup.confirm_password.tts"));
 
         let entry_focus = entry.clone();
         gtk4::glib::idle_add_local_once(move || {
@@ -1174,11 +1148,10 @@ impl SetupConversation {
 
     fn show_add_backup(&self) {
         let primary = self.state.borrow().primary_provider.clone();
-        let other = if primary == "claude" { "openai" } else { "claude" };
         let other_name = if primary == "claude" {
-            "ChatGPT (OpenAI)"
+            t("setup.provider.chatgpt_name")
         } else {
-            "Claude"
+            t("setup.provider.claude_name")
         };
 
         // Always show the backup provider question — the user can enter
@@ -1187,7 +1160,7 @@ impl SetupConversation {
         let input_box = gtk::Box::new(Orientation::Vertical, 8);
         input_box.set_margin_top(8);
 
-        let yes_btn = gtk::Button::with_label(&format!("Yes, add {other_name}"));
+        let yes_btn = gtk::Button::with_label(&t_fmt("setup.backup.yes", &[("provider", &other_name)]));
         yes_btn.add_css_class("suggested-action");
         yes_btn.set_halign(Align::Start);
 
@@ -1198,7 +1171,7 @@ impl SetupConversation {
         });
         input_box.append(&yes_btn);
 
-        let no_btn = gtk::Button::with_label("No, I'm good");
+        let no_btn = gtk::Button::with_label(&t("setup.backup.no"));
         no_btn.set_halign(Align::Start);
 
         let this = self.clone();
@@ -1210,12 +1183,12 @@ impl SetupConversation {
 
         self.chat_view.add_setup_card(
             "list-add-symbolic",
-            "Add a Backup Provider?",
-            "If your primary AI is unavailable, a backup can take over automatically.",
+            &t("setup.backup.title"),
+            &t("setup.backup.description"),
             Some(input_box.upcast_ref()),
         );
 
-        self.speak("Would you like to add a backup AI provider?");
+        self.speak(&t("setup.backup.tts"));
     }
 
     /// Handle the add-backup decision (from button or voice).
@@ -1228,18 +1201,21 @@ impl SetupConversation {
                 "claude"
             };
 
-            self.chat_view.add_message("user", &format!(
-                "Yes, add {}",
-                if backup == "claude" { "Claude" } else { "ChatGPT (OpenAI)" }
-            ));
+            let display = if backup == "claude" {
+                t("setup.provider.claude_name")
+            } else {
+                t("setup.provider.chatgpt_name")
+            };
+            self.chat_view.add_message("user",
+                &t_fmt("setup.backup.user_yes", &[("provider", &display)]));
 
-            let display = if backup == "claude" { "Claude" } else { "ChatGPT (OpenAI)" };
+            let dismiss = t_fmt("setup.backup.dismiss_add", &[("provider", &display)]);
             self.advance_with_choice(SetupStep::EnterBackupKey {
                 provider: backup.to_owned(),
-            }, Some(&format!("Add {display}")));
+            }, Some(&dismiss));
         } else {
-            self.chat_view.add_message("user", "No, I'm good");
-            self.advance_with_choice(SetupStep::Complete, Some("No backup provider"));
+            self.chat_view.add_message("user", &t("setup.backup.user_no"));
+            self.advance_with_choice(SetupStep::Complete, Some(&t("setup.backup.dismiss_none")));
         }
     }
 
@@ -1258,12 +1234,12 @@ impl SetupConversation {
 
         for p in &providers {
             let display = match p.name.as_str() {
-                "claude" => "Claude (Anthropic)",
-                "openai" => "ChatGPT (OpenAI)",
-                other => other,
+                "claude" => t("setup.provider.claude_name"),
+                "openai" => t("setup.provider.chatgpt_name"),
+                other => other.to_string(),
             };
 
-            let btn = gtk::Button::with_label(&format!("{display} as primary"));
+            let btn = gtk::Button::with_label(&t_fmt("setup.order.primary", &[("provider", &display)]));
             btn.add_css_class("setup-provider-button");
             btn.set_halign(Align::Start);
 
@@ -1278,15 +1254,12 @@ impl SetupConversation {
 
         self.chat_view.add_setup_card(
             "view-sort-descending-symbolic",
-            "Choose Primary Provider",
-            "Which provider should be your primary AI? The other will be used as fallback.",
+            &t("setup.order.title"),
+            &t("setup.order.description"),
             Some(input_box.upcast_ref()),
         );
 
-        self.speak(
-            "Which provider should be your primary AI? \
-             Say Claude or ChatGPT.",
-        );
+        self.speak(&t("setup.order.tts"));
     }
 
     /// Set the primary provider order and advance.
@@ -1303,12 +1276,12 @@ impl SetupConversation {
         }
 
         let display = match primary {
-            "claude" => "Claude (Anthropic)",
-            "openai" => "ChatGPT (OpenAI)",
-            other => other,
+            "claude" => t("setup.provider.claude_name"),
+            "openai" => t("setup.provider.chatgpt_name"),
+            other => other.to_string(),
         };
         self.chat_view
-            .add_message("user", &format!("{display} as primary"));
+            .add_message("user", &t_fmt("setup.order.primary", &[("provider", &display)]));
 
         self.advance(SetupStep::Complete);
     }
@@ -1322,35 +1295,39 @@ impl SetupConversation {
         let mut status = BootStatus::new();
 
         for (i, p) in s.providers.iter().enumerate() {
-            let role = if i == 0 { "Primary" } else { "Backup" };
+            let role = if i == 0 {
+                t("setup.complete.primary_provider")
+            } else {
+                t("setup.complete.backup_provider")
+            };
             let display = match p.name.as_str() {
-                "claude" => "Claude",
-                "openai" => "ChatGPT",
-                other => other,
+                "claude" => "Claude".to_string(),
+                "openai" => "ChatGPT".to_string(),
+                other => other.to_string(),
             };
             status.add(StatusLine::new(
-                &format!("{role} provider"),
+                &role,
                 true,
-                format!("{display} (API key stored)"),
+                t_fmt("setup.complete.api_key_stored", &[("provider", &display)]),
             ));
         }
-        status.add(StatusLine::new("Assistant name", true, &s.assistant_name));
-        status.add(StatusLine::new("Wake word", true, &s.wake_word_custom));
-        status.add(StatusLine::new("Network", true, format!("{}.local", s.machine_name_custom)));
-        status.add(StatusLine::new("Master password", true, "set"));
-        status.add(StatusLine::new("Vault", true, "created"));
-        status.add(StatusLine::new("Web Channel", true, "http://aios.local"));
+        status.add(StatusLine::new(&t("setup.complete.assistant_name"), true, &s.assistant_name));
+        status.add(StatusLine::new(&t("setup.complete.wake_word"), true, &s.wake_word_custom));
+        status.add(StatusLine::new(&t("setup.complete.network"), true, t_fmt("setup.complete.network_local", &[("name", &s.machine_name_custom)])));
+        status.add(StatusLine::new(&t("setup.complete.master_password"), true, &t("setup.complete.master_password_set")));
+        status.add(StatusLine::new(&t("setup.complete.vault"), true, &t("setup.complete.vault_created")));
+        status.add(StatusLine::new(&t("setup.complete.web_channel"), true, &t("setup.complete.web_channel_url")));
 
         drop(s);
 
         // Show the INFO summary.
         self.chat_view.add_level_message(
             MessageLevel::Info,
-            &format!("First-Boot Setup Complete\n\n{}", status.format()),
+            &format!("{}\n\n{}", t("setup.complete.title"), status.format()),
         );
 
         // "Start Chatting" button via a setup card (no description needed).
-        let btn = gtk::Button::with_label("Start Chatting \u{2192}");
+        let btn = gtk::Button::with_label(&t("setup.complete.button"));
         btn.add_css_class("suggested-action");
         btn.add_css_class("pill");
         btn.set_halign(Align::Start);
@@ -1364,12 +1341,12 @@ impl SetupConversation {
 
         self.chat_view.add_setup_card(
             "emblem-default-symbolic",
-            "You're All Set!",
-            "Your AI assistant is ready. Just start talking or typing.",
+            &t("setup.complete.all_set_title"),
+            &t("setup.complete.all_set_description"),
             Some(btn.upcast_ref()),
         );
 
-        self.speak("You're all set! Your AI assistant is ready.");
+        self.speak(&t("setup.complete.tts"));
     }
 
     /// Invoke the completion callback with the accumulated setup result.

@@ -9,6 +9,7 @@
 use serde_json::json;
 
 use super::ConfigManager;
+use crate::i18n::{t, t_fmt};
 
 // ---------------------------------------------------------------------------
 // CommandInfo — metadata for autocomplete
@@ -17,35 +18,35 @@ use super::ConfigManager;
 /// Command metadata for autocomplete menus.
 pub struct CommandInfo {
     pub command: &'static str,
-    pub description: &'static str,
+    pub description: String,
 }
 
 /// Return all available commands with short descriptions.
 pub fn command_list() -> Vec<CommandInfo> {
     vec![
-        CommandInfo { command: "/help", description: "Show available commands" },
-        CommandInfo { command: "/key", description: "Set API key for a provider" },
-        CommandInfo { command: "/provider", description: "Switch LLM provider" },
-        CommandInfo { command: "/model", description: "Set model for current provider" },
-        CommandInfo { command: "/effort", description: "Set AI effort level" },
-        CommandInfo { command: "/mode", description: "Set quality/cost mode" },
-        CommandInfo { command: "/keyboard", description: "Set keyboard layout" },
-        CommandInfo { command: "/resolution", description: "Set screen resolution" },
-        CommandInfo { command: "/theme", description: "Set UI theme" },
-        CommandInfo { command: "/voice", description: "Set TTS voice" },
-        CommandInfo { command: "/mic", description: "Toggle voice input" },
-        CommandInfo { command: "/speaker", description: "Toggle voice output" },
-        CommandInfo { command: "/language", description: "Set STT language" },
-        CommandInfo { command: "/tools", description: "List available tools" },
-        CommandInfo { command: "/channel", description: "Channel settings" },
-        CommandInfo { command: "/selftest", description: "Run self-tests" },
-        CommandInfo { command: "/info", description: "Show system information" },
-        CommandInfo { command: "/sysinfo", description: "Show system monitor" },
-        CommandInfo { command: "/close", description: "Close topmost panel/dialog" },
-        CommandInfo { command: "/update", description: "Self-update from URL" },
-        CommandInfo { command: "/configure", description: "Open settings dialog" },
-        CommandInfo { command: "/wake", description: "Set wake word phrase" },
-        CommandInfo { command: "/clear", description: "Clear chat history" },
+        CommandInfo { command: "/help", description: t("cmd.help.desc") },
+        CommandInfo { command: "/key", description: t("cmd.key.desc") },
+        CommandInfo { command: "/provider", description: t("cmd.provider.desc") },
+        CommandInfo { command: "/model", description: t("cmd.model.desc") },
+        CommandInfo { command: "/effort", description: t("cmd.effort.desc") },
+        CommandInfo { command: "/mode", description: t("cmd.mode.desc") },
+        CommandInfo { command: "/keyboard", description: t("cmd.keyboard.desc") },
+        CommandInfo { command: "/resolution", description: t("cmd.resolution.desc") },
+        CommandInfo { command: "/theme", description: t("cmd.theme.desc") },
+        CommandInfo { command: "/voice", description: t("cmd.voice.desc") },
+        CommandInfo { command: "/mic", description: t("cmd.mic.desc") },
+        CommandInfo { command: "/speaker", description: t("cmd.speaker.desc") },
+        CommandInfo { command: "/language", description: t("cmd.language.desc") },
+        CommandInfo { command: "/tools", description: t("cmd.tools.desc") },
+        CommandInfo { command: "/channel", description: t("cmd.channel.desc") },
+        CommandInfo { command: "/selftest", description: t("cmd.selftest.desc") },
+        CommandInfo { command: "/info", description: t("cmd.info.desc") },
+        CommandInfo { command: "/sysinfo", description: t("cmd.sysinfo.desc") },
+        CommandInfo { command: "/close", description: t("cmd.close.desc") },
+        CommandInfo { command: "/update", description: t("cmd.update.desc") },
+        CommandInfo { command: "/configure", description: t("cmd.configure.desc") },
+        CommandInfo { command: "/wake", description: t("cmd.wake.desc") },
+        CommandInfo { command: "/clear", description: t("cmd.clear.desc") },
     ]
 }
 
@@ -178,89 +179,84 @@ impl<'a> CommandHandler<'a> {
     // -- individual commands ------------------------------------------------
 
     fn cmd_help(&self) -> CommandResult {
-        CommandResult::Response(
-            "\
-Available commands:
-
-/key <provider> <api-key>   Set API key (e.g., /key claude sk-ant-...)
-/provider <name>            Switch LLM provider (claude, openai)
-/model <name>               Set the model for current provider
-/keyboard <layout> [var]    Set keyboard layout (e.g., /keyboard de)
-/resolution <WxH>           Set screen resolution (e.g., /resolution 1920x1080)
-/theme <dark|light|auto>    Set UI theme
-/voice <voice-id>           Set TTS voice (e.g., /voice en_US-ryan-medium)
-/mic <on|off>               Enable/disable voice input
-/speaker <on|off>           Enable/disable voice output
-/language <code>            Set STT language (blank=auto)
-/wake <phrase>              Set wake word (e.g., /wake hey aios)
-/tools                      List available tools
-/effort <level>             Set AI effort (low, medium, high, auto)
-/mode <mode>                Set quality mode (saver, balanced, thorough)
-/channel                    Show active channel / channel settings
-/selftest [filter]          Run self-tests (quick, channel, tools, interactive)
-/sysinfo                    Show system monitor (CPU, memory, disk, processes)
-/info                       Show system information
-/close                      Close the topmost panel or dialog
-/update <url>               Self-update AiOS binary from URL
-/configure                  Open settings dialog
-/clear                      Clear chat history
-/help                       Show this help"
-                .to_string(),
-        )
+        let lines = [
+            t("cmd.help.title"),
+            String::new(),
+            t("cmd.help.key"),
+            t("cmd.help.provider"),
+            t("cmd.help.model"),
+            t("cmd.help.keyboard"),
+            t("cmd.help.resolution"),
+            t("cmd.help.theme"),
+            t("cmd.help.voice"),
+            t("cmd.help.mic"),
+            t("cmd.help.speaker"),
+            t("cmd.help.language"),
+            t("cmd.help.wake"),
+            t("cmd.help.tools"),
+            t("cmd.help.effort"),
+            t("cmd.help.mode"),
+            t("cmd.help.channel"),
+            t("cmd.help.selftest"),
+            t("cmd.help.sysinfo"),
+            t("cmd.help.info"),
+            t("cmd.help.close"),
+            t("cmd.help.update"),
+            t("cmd.help.configure"),
+            t("cmd.help.clear"),
+            t("cmd.help.help"),
+        ];
+        CommandResult::Response(lines.join("\n"))
     }
 
     fn cmd_key(&mut self, args: &str) -> CommandResult {
         let parts: Vec<&str> = args.trim().splitn(2, char::is_whitespace).collect();
         if parts.len() != 2 {
-            return CommandResult::Response(
-                "Usage: /key <provider> <api-key>\nExample: /key claude sk-ant-...".into(),
-            );
+            return CommandResult::Response(t("cmd.key.usage"));
         }
 
         let provider = parts[0].to_lowercase();
         let key = parts[1];
 
         if key.is_empty() {
-            return CommandResult::Response("API key cannot be empty.".to_string());
+            return CommandResult::Response(t("cmd.key.empty"));
         }
 
         match provider.as_str() {
             "claude" => {
                 let _ = self.config.set("llm.claude_api_key", json!(key));
                 let preview = &key[..key.len().min(12)];
-                CommandResult::Response(format!("Claude API key set ({preview}...)"))
+                CommandResult::Response(t_fmt("cmd.key.claude_set", &[("preview", preview)]))
             }
             "openai" => {
                 let _ = self.config.set("llm.openai_api_key", json!(key));
                 let preview = &key[..key.len().min(12)];
-                CommandResult::Response(format!("OpenAI API key set ({preview}...)"))
+                CommandResult::Response(t_fmt("cmd.key.openai_set", &[("preview", preview)]))
             }
-            _ => CommandResult::Response(format!(
-                "Unknown provider: {provider}. Supported: claude, openai"
-            )),
+            _ => CommandResult::Response(
+                t_fmt("cmd.key.unknown_provider", &[("provider", &provider)]),
+            ),
         }
     }
 
     fn cmd_provider(&mut self, args: &str) -> CommandResult {
         let name = args.trim().to_lowercase();
         if name != "claude" && name != "openai" {
-            return CommandResult::Response("Usage: /provider <claude|openai>".into());
+            return CommandResult::Response(t("cmd.provider.usage"));
         }
         let _ = self.config.set("llm.provider", json!(name));
-        CommandResult::Response(format!("Switched to {name}"))
+        CommandResult::Response(t_fmt("cmd.provider.switched", &[("name", &name)]))
     }
 
     fn cmd_model(&mut self, args: &str) -> CommandResult {
         let model = args.trim();
         if model.is_empty() {
-            return CommandResult::Response(
-                "Usage: /model <model-name>\nExamples: claude-sonnet-4-20250514, gpt-4o".into(),
-            );
+            return CommandResult::Response(t("cmd.model.usage"));
         }
         let provider = self.config.get_str("llm.provider", "claude");
         let key = format!("llm.{provider}_model");
         let _ = self.config.set(&key, json!(model));
-        CommandResult::Response(format!("Model set to {model} for {provider}"))
+        CommandResult::Response(t_fmt("cmd.model.set", &[("model", model), ("provider", &provider)]))
     }
 
     fn cmd_keyboard(&mut self, args: &str) -> CommandResult {
@@ -294,7 +290,7 @@ Available commands:
         } else {
             format!(" ({variant})")
         };
-        CommandResult::Response(format!("Keyboard layout set to {layout}{suffix}"))
+        CommandResult::Response(t_fmt("cmd.keyboard.set", &[("layout", layout), ("suffix", &suffix)]))
     }
 
     fn cmd_resolution(&self, args: &str) -> CommandResult {
@@ -303,11 +299,7 @@ Available commands:
             // Detect available resolutions via wlr-randr.
             let available = Self::detect_resolutions();
             if available.is_empty() {
-                return CommandResult::Response(
-                    "No resolutions detected (wlr-randr not available).\n\
-                     Usage: /resolution <WxH>\nExample: /resolution 1920x1080"
-                        .into(),
-                );
+                return CommandResult::Response(t("cmd.resolution.no_detect"));
             }
             let current = Self::detect_current_resolution();
             return CommandResult::Panel {
@@ -328,13 +320,11 @@ Available commands:
             };
         }
         if !res.to_lowercase().contains('x') {
-            return CommandResult::Response(
-                "Usage: /resolution <WxH>\nExample: /resolution 1920x1080".into(),
-            );
+            return CommandResult::Response(t("cmd.resolution.invalid"));
         }
         // Apply resolution via wlr-randr.
         Self::apply_resolution(res);
-        CommandResult::Response(format!("Resolution set to {res}"))
+        CommandResult::Response(t_fmt("cmd.resolution.set", &[("resolution", res)]))
     }
 
     /// Detect available resolutions using wlr-randr.
@@ -430,52 +420,50 @@ Available commands:
             };
         }
         if !matches!(theme.as_str(), "dark" | "light" | "auto") {
-            return CommandResult::Response("Usage: /theme <dark|light|auto>".into());
+            return CommandResult::Response(t("cmd.theme.usage"));
         }
         let _ = self.config.set("ui.theme", json!(theme));
-        CommandResult::Response(format!("Theme set to {theme}"))
+        CommandResult::Response(t_fmt("cmd.theme.set", &[("theme", &theme)]))
     }
 
     fn cmd_voice(&mut self, args: &str) -> CommandResult {
         let voice_id = args.trim();
         if voice_id.is_empty() {
-            return CommandResult::Response(
-                "Usage: /voice <voice-id>\nExample: /voice en_US-ryan-medium".into(),
-            );
+            return CommandResult::Response(t("cmd.voice.usage"));
         }
         let _ = self.config.set("voice.tts_voice", json!(voice_id));
-        CommandResult::Response(format!("Voice set to {voice_id}"))
+        CommandResult::Response(t_fmt("cmd.voice.set", &[("voice", voice_id)]))
     }
 
     fn cmd_mic(&mut self, args: &str) -> CommandResult {
         let state = args.trim().to_lowercase();
         if state != "on" && state != "off" {
-            return CommandResult::Response("Usage: /mic <on|off>".into());
+            return CommandResult::Response(t("cmd.mic.usage"));
         }
         let enabled = state == "on";
         let _ = self.config.set("voice.stt_enabled", json!(enabled));
-        let label = if enabled { "enabled" } else { "disabled" };
-        CommandResult::Response(format!("Voice input {label}"))
+        let key = if enabled { "cmd.mic.enabled" } else { "cmd.mic.disabled" };
+        CommandResult::Response(t(key))
     }
 
     fn cmd_speaker(&mut self, args: &str) -> CommandResult {
         let state = args.trim().to_lowercase();
         if state != "on" && state != "off" {
-            return CommandResult::Response("Usage: /speaker <on|off>".into());
+            return CommandResult::Response(t("cmd.speaker.usage"));
         }
         let enabled = state == "on";
         let _ = self.config.set("voice.tts_enabled", json!(enabled));
-        let label = if enabled { "enabled" } else { "disabled" };
-        CommandResult::Response(format!("Voice output {label}"))
+        let key = if enabled { "cmd.speaker.enabled" } else { "cmd.speaker.disabled" };
+        CommandResult::Response(t(key))
     }
 
     fn cmd_language(&mut self, args: &str) -> CommandResult {
         let lang = args.trim();
         let _ = self.config.set("voice.stt_language", json!(lang));
         if lang.is_empty() {
-            CommandResult::Response("STT language set to auto-detect".into())
+            CommandResult::Response(t("cmd.language.auto"))
         } else {
-            CommandResult::Response(format!("STT language set to {lang}"))
+            CommandResult::Response(t_fmt("cmd.language.set", &[("lang", lang)]))
         }
     }
 
@@ -485,30 +473,27 @@ Available commands:
             let current = self.config.get_str("voice.wake_word", "Assistant");
             let enabled = self.config.get_bool("voice.wake_enabled", true);
             let status = if enabled { "enabled" } else { "disabled" };
-            return CommandResult::Response(format!(
-                "Wake word: \"{current}\" ({status})\n\
-                 Usage: /wake <phrase>   Set wake word\n\
-                 Usage: /wake off        Disable wake word detection\n\
-                 Usage: /wake on         Enable wake word detection"
-            ));
+            return CommandResult::Response(
+                t_fmt("cmd.wake.status", &[("current", &current), ("status", status)]),
+            );
         }
 
         match phrase.to_lowercase().as_str() {
             "off" => {
                 let _ = self.config.set("voice.wake_enabled", json!(false));
-                CommandResult::Response("Wake word detection disabled".into())
+                CommandResult::Response(t("cmd.wake.disabled"))
             }
             "on" => {
                 let _ = self.config.set("voice.wake_enabled", json!(true));
                 let current = self.config.get_str("voice.wake_word", "Assistant");
-                CommandResult::Response(format!(
-                    "Wake word detection enabled (phrase: \"{current}\")"
-                ))
+                CommandResult::Response(
+                    t_fmt("cmd.wake.enabled", &[("current", &current)]),
+                )
             }
             _ => {
                 let _ = self.config.set("voice.wake_word", json!(phrase));
                 let _ = self.config.set("voice.wake_enabled", json!(true));
-                CommandResult::Response(format!("Wake word set to \"{phrase}\""))
+                CommandResult::Response(t_fmt("cmd.wake.set", &[("phrase", phrase)]))
             }
         }
     }
@@ -516,7 +501,7 @@ Available commands:
     fn cmd_tools(&self) -> CommandResult {
         // Actual tool listing requires the tool registry which lives outside
         // aios-core.  Return a placeholder the caller can enrich.
-        CommandResult::Response("Tool listing requires the tool registry.".into())
+        CommandResult::Response(t("cmd.tools.placeholder"))
     }
 
     fn cmd_effort(&mut self, args: &str) -> CommandResult {
@@ -524,23 +509,15 @@ Available commands:
         match level.as_str() {
             "low" | "medium" | "high" | "auto" => {
                 let _ = self.config.set("llm.effort", json!(level));
-                CommandResult::Response(format!("Effort level set to {level}"))
+                CommandResult::Response(t_fmt("cmd.effort.set", &[("level", &level)]))
             }
             "" => {
                 let current = self.config.get_str("llm.effort", "auto");
-                CommandResult::Response(format!(
-                    "Current effort level: {current}\n\
-                     Usage: /effort <low|medium|high|auto>"
-                ))
+                CommandResult::Response(
+                    t_fmt("cmd.effort.current", &[("current", &current)]),
+                )
             }
-            _ => CommandResult::Response(
-                "Usage: /effort <low|medium|high|auto>\n\
-                 - low: fast mode (smaller model, shorter output)\n\
-                 - medium: balanced (default)\n\
-                 - high: thorough mode (extended thinking)\n\
-                 - auto: let the system decide based on message complexity"
-                    .into(),
-            ),
+            _ => CommandResult::Response(t("cmd.effort.usage")),
         }
     }
 
@@ -549,25 +526,15 @@ Available commands:
         match mode.as_str() {
             "saver" | "balanced" | "thorough" => {
                 let _ = self.config.set("llm.quality_mode", json!(mode));
-                CommandResult::Response(format!("Quality mode set to {mode}"))
+                CommandResult::Response(t_fmt("cmd.mode.set", &[("mode", &mode)]))
             }
             "" => {
                 let current = self.config.get_str("llm.quality_mode", "balanced");
-                CommandResult::Response(format!(
-                    "Current quality mode: {current}\n\
-                     Usage: /mode <saver|balanced|thorough>\n\
-                     - saver: cheapest model, heuristic escalation\n\
-                     - balanced: auto-detected effort, reliable escalation only\n\
-                     - thorough: best model always, extended thinking"
-                ))
+                CommandResult::Response(
+                    t_fmt("cmd.mode.current", &[("current", &current)]),
+                )
             }
-            _ => CommandResult::Response(
-                "Usage: /mode <saver|balanced|thorough>\n\
-                 - saver: cheapest model, heuristic escalation (saves money)\n\
-                 - balanced: auto-detected effort, reliable escalation only (default)\n\
-                 - thorough: best model always, extended thinking (best quality)"
-                    .into(),
-            ),
+            _ => CommandResult::Response(t("cmd.mode.usage")),
         }
     }
 
@@ -581,22 +548,21 @@ Available commands:
             let signal_enabled = self.config.get_bool("channels.signal.enabled", false);
             let signal_phone = self.config.get_str("channels.signal.phone", "(not set)");
 
+            let title = t("cmd.channel.title");
+            let web_status = if web_enabled { "enabled" } else { "disabled" };
+            let signal_status = if signal_enabled { "enabled" } else { "disabled" };
             let info = format!(
                 "\
-Channel Settings
+{title}
 ========================================
-Web:    {} (port {})
-Signal: {} (phone: {})
+Web:    {web_status} (port {web_port})
+Signal: {signal_status} (phone: {signal_phone})
 
 Usage:
   /channel web on|off       Enable/disable web channel
   /channel signal on|off    Enable/disable Signal channel
   /channel web port <N>     Set web server port
   /channel signal phone <N> Set Signal phone number",
-                if web_enabled { "enabled" } else { "disabled" },
-                web_port,
-                if signal_enabled { "enabled" } else { "disabled" },
-                signal_phone,
             );
             return CommandResult::Response(info);
         }
@@ -609,36 +575,37 @@ Usage:
         match (channel, action) {
             ("web", "on") => {
                 let _ = self.config.set("channels.web.enabled", json!(true));
-                CommandResult::Response("Web channel enabled. Restart required.".to_string())
+                CommandResult::Response(t("cmd.channel.web_enabled"))
             }
             ("web", "off") => {
                 let _ = self.config.set("channels.web.enabled", json!(false));
-                CommandResult::Response("Web channel disabled. Restart required.".to_string())
+                CommandResult::Response(t("cmd.channel.web_disabled"))
             }
             ("web", "port") if !value.is_empty() => {
                 match value.parse::<u16>() {
                     Ok(port) => {
                         let _ = self.config.set("channels.web.port", json!(port));
-                        CommandResult::Response(format!("Web port set to {port}. Restart required."))
+                        let port_str = port.to_string();
+                        CommandResult::Response(t_fmt("cmd.channel.web_port_set", &[("port", &port_str)]))
                     }
-                    Err(_) => CommandResult::Response(format!("Invalid port number: {value}")),
+                    Err(_) => CommandResult::Response(
+                        t_fmt("cmd.channel.web_port_invalid", &[("value", value)]),
+                    ),
                 }
             }
             ("signal", "on") => {
                 let _ = self.config.set("channels.signal.enabled", json!(true));
-                CommandResult::Response("Signal channel enabled. Restart required.".to_string())
+                CommandResult::Response(t("cmd.channel.signal_enabled"))
             }
             ("signal", "off") => {
                 let _ = self.config.set("channels.signal.enabled", json!(false));
-                CommandResult::Response("Signal channel disabled. Restart required.".to_string())
+                CommandResult::Response(t("cmd.channel.signal_disabled"))
             }
             ("signal", "phone") if !value.is_empty() => {
                 let _ = self.config.set("channels.signal.phone", json!(value));
-                CommandResult::Response(format!("Signal phone set to {value}."))
+                CommandResult::Response(t_fmt("cmd.channel.signal_phone_set", &[("value", value)]))
             }
-            _ => CommandResult::Response(
-                "Usage: /channel web|signal on|off|port|phone [value]".to_string(),
-            ),
+            _ => CommandResult::Response(t("cmd.channel.usage")),
         }
     }
 
@@ -658,9 +625,10 @@ Usage:
         let theme = self.config.get_str("ui.theme", "dark");
         let keyboard = self.config.get_str("system.keyboard_layout", "us");
 
+        let title = t("cmd.info.title");
         let info = format!(
             "\
-AiOS System Information
+{title}
 ========================================
 AiOS Version: 2.0.0
 Provider: {provider}
@@ -684,6 +652,7 @@ mod tests {
 
     /// Helper: create a ConfigManager backed by a temp dir.
     fn temp_config() -> (tempfile::TempDir, ConfigManager) {
+        crate::i18n::init();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         let mgr = ConfigManager::with_path(path).unwrap();
