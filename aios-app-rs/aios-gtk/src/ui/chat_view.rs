@@ -123,13 +123,44 @@ impl ChatView {
 
         // Role label (not shown for system messages to keep them cleaner).
         if role != "system" {
-            let role_label = gtk::Label::new(Some(&role_display_name(role)));
-            role_label.add_css_class("message-role-label");
-            role_label.set_halign(match role {
+            let role_row = gtk::Box::new(Orientation::Horizontal, 4);
+            role_row.set_halign(match role {
                 "user" => Align::End,
                 _ => Align::Start,
             });
-            row.append(&role_label);
+
+            let role_label = gtk::Label::new(Some(&role_display_name(role)));
+            role_label.add_css_class("message-role-label");
+            role_row.append(&role_label);
+
+            // Stop-reading button for assistant messages.
+            if role == "assistant" {
+                let stop_btn = gtk::Button::from_icon_name("audio-volume-muted-symbolic");
+                stop_btn.add_css_class("flat");
+                stop_btn.add_css_class("circular");
+                stop_btn.set_tooltip_text(Some("Stop reading"));
+                stop_btn.connect_clicked(|btn| {
+                    let _ = std::process::Command::new("pkill")
+                        .args(["-f", "piper"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    let _ = std::process::Command::new("pkill")
+                        .args(["-f", "espeak-ng"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    let _ = std::process::Command::new("pkill")
+                        .args(["-f", "aplay"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                    btn.set_visible(false);
+                });
+                role_row.append(&stop_btn);
+            }
+
+            row.append(&role_row);
         }
 
         // Message bubble.
@@ -358,10 +389,10 @@ impl ChatView {
     fn scroll_to_bottom(&self) {
         if let Some(sw) = self.scroll_window.borrow().as_ref() {
             let adj = sw.vadjustment();
-            // Use idle_add to ensure the layout has been computed.
+            // Use idle_add to ensure the layout has been computed before scrolling.
             let adj_clone = adj.clone();
             gtk4::glib::idle_add_local_once(move || {
-                adj_clone.set_value(adj_clone.upper());
+                adj_clone.set_value(adj_clone.upper() - adj_clone.page_size());
             });
         }
     }

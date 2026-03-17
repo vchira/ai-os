@@ -768,6 +768,9 @@ impl AiosApp {
             // Display the user message immediately.
             chat_view_ref.add_message("user", &text);
 
+            // Force immediate redraw before the async LLM call begins.
+            while gtk4::glib::MainContext::default().iteration(false) {}
+
             // Send to LLM asynchronously.
             Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
         });
@@ -1358,6 +1361,9 @@ impl AiosApp {
 
             // Display the user message immediately.
             chat_view_ref.add_message("user", &text);
+
+            // Force immediate redraw before the async LLM call begins.
+            while gtk4::glib::MainContext::default().iteration(false) {}
 
             // Send to LLM asynchronously.
             Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);

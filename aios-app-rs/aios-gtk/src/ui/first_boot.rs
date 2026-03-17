@@ -1429,6 +1429,11 @@ impl SetupConversation {
         // Use Piper (natural voice) or espeak-ng (fallback) for TTS.
         let text = text.to_string();
         std::thread::spawn(move || {
+            // Small delay to let any preceding pkill (from stop_speaking) finish
+            // before we start a new TTS process — avoids a race where the new
+            // process is immediately killed by a still-running pkill.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+
             info!(tts = %text, "setup TTS");
 
             // Try Piper first

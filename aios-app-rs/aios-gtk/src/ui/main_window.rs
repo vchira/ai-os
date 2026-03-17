@@ -324,6 +324,11 @@ pub fn build_main_window(
     // Fullscreen on startup — AiOS IS the desktop
     window.fullscreen();
 
+    // AiOS is the desktop shell — prevent closing the window.
+    window.connect_close_request(|_| {
+        gtk::glib::Propagation::Stop
+    });
+
     window
 }
 
