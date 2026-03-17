@@ -42,7 +42,8 @@ pub const DEFAULTS_JSON: &str = r#"{
         "keyboard_variant": "",
         "locale": "en_US.UTF-8",
         "timezone": "",
-        "machine_name": "assistant"
+        "machine_name": "assistant",
+        "update_url": "https://api.github.com/repos/aios-dev/aios/releases/latest"
     },
     "tools": {
         "plugins_dir": "~/.aios/plugins",
@@ -71,6 +72,7 @@ mod tests {
         assert_eq!(v["voice"]["tts_voice"], "en_US-amy-medium");
         assert_eq!(v["ui"]["theme"], "dark");
         assert_eq!(v["system"]["keyboard_layout"], "us");
+        assert_eq!(v["system"]["update_url"], "https://api.github.com/repos/aios-dev/aios/releases/latest");
         assert_eq!(v["tools"]["store_url"], "https://store.aios.dev/api/v1");
     }
 }

@@ -44,6 +44,7 @@ pub fn command_list() -> Vec<CommandInfo> {
         CommandInfo { command: "/sysinfo", description: t("cmd.sysinfo.desc") },
         CommandInfo { command: "/close", description: t("cmd.close.desc") },
         CommandInfo { command: "/update", description: t("cmd.update.desc") },
+        CommandInfo { command: "/upgrade", description: t("cmd.upgrade.desc") },
         CommandInfo { command: "/configure", description: t("cmd.configure.desc") },
         CommandInfo { command: "/wake", description: t("cmd.wake.desc") },
         CommandInfo { command: "/clear", description: t("cmd.clear.desc") },
@@ -93,6 +94,8 @@ pub enum CommandResult {
     ClosePanel,
     /// The user requested a self-update (`/update <url>`).
     Update(String),
+    /// The user typed `/upgrade` — check for and optionally install an update.
+    Upgrade,
     /// A settings panel with interactive fields (dropdown, toggle, etc.).
     ///
     /// The GTK handler should render this as a card in the chat view with
@@ -169,6 +172,7 @@ impl<'a> CommandHandler<'a> {
             "/sysinfo" => CommandResult::SysInfo,
             "/close" => CommandResult::ClosePanel,
             "/update" => CommandResult::Update(args),
+            "/upgrade" => CommandResult::Upgrade,
             "/clear" => CommandResult::Clear,
             "/configure" => CommandResult::Configure,
             "/info" => self.cmd_info(),
@@ -202,6 +206,7 @@ impl<'a> CommandHandler<'a> {
             t("cmd.help.info"),
             t("cmd.help.close"),
             t("cmd.help.update"),
+            t("cmd.help.upgrade"),
             t("cmd.help.configure"),
             t("cmd.help.clear"),
             t("cmd.help.help"),
@@ -1321,5 +1326,28 @@ mod tests {
         assert!(names.contains(&"/channel"));
         assert!(names.contains(&"/selftest"));
         assert!(names.contains(&"/wake"));
+    }
+
+    #[test]
+    fn upgrade_returns_upgrade_variant() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        assert!(matches!(handler.execute("/upgrade"), CommandResult::Upgrade));
+    }
+
+    #[test]
+    fn help_contains_upgrade() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        match handler.execute("/help") {
+            CommandResult::Response(text) => assert!(text.contains("/upgrade")),
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn command_list_contains_upgrade() {
+        let list = command_list();
+        assert!(list.iter().any(|c| c.command == "/upgrade"));
     }
 }

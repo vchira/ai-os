@@ -1699,6 +1699,66 @@ impl AiosApp {
                     return;
                 }
             }
+            CommandResult::Upgrade => {
+                use aios_core::types::MessageLevel;
+
+                // Show a "Checking..." message immediately on the GTK thread.
+                chat_view.add_message("system", &t("cmd.upgrade.checking"));
+
+                // Pull the update URL from config before dropping the borrow.
+                let update_url = s.config.get_str(
+                    "system.update_url",
+                    "https://api.github.com/repos/aios-dev/aios/releases/latest",
+                );
+                let rt = s.rt.clone();
+                drop(s);
+
+                // Use mpsc channel: tokio task sends result, GTK polls via timeout_add_local.
+                let (tx, rx) = std::sync::mpsc::channel::<UpgradeCheckResult>();
+
+                // Spawn version check on Tokio (no GTK types captured).
+                rt.spawn(async move {
+                    let result = aios_core::upgrade::check_for_update(&update_url).await;
+                    let _ = tx.send(match result {
+                        Err(e) => UpgradeCheckResult::Error(e.to_string()),
+                        Ok(None) => UpgradeCheckResult::UpToDate,
+                        Ok(Some(info)) => UpgradeCheckResult::Available(info),
+                    });
+                });
+
+                // Poll for result on the GTK thread.
+                let chat = chat_view.clone();
+                let state_clone = state.clone();
+                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+                    match rx.try_recv() {
+                        Ok(UpgradeCheckResult::Error(e)) => {
+                            let msg = t_fmt("cmd.upgrade.check_failed", &[("error", &e)]);
+                            chat.add_level_message(MessageLevel::Warning, &msg);
+                            glib::ControlFlow::Break
+                        }
+                        Ok(UpgradeCheckResult::UpToDate) => {
+                            let version = aios_core::upgrade::CURRENT_VERSION.trim();
+                            let msg = t_fmt("cmd.upgrade.up_to_date", &[("version", version)]);
+                            chat.add_message("system", &msg);
+                            glib::ControlFlow::Break
+                        }
+                        Ok(UpgradeCheckResult::Available(info)) => {
+                            let current = aios_core::upgrade::CURRENT_VERSION.trim();
+                            let msg = t_fmt("cmd.upgrade.available", &[("latest", &info.version), ("current", current)]);
+                            chat.add_message("system", &msg);
+                            if !info.changelog.is_empty() {
+                                let label = t("cmd.upgrade.changelog_label");
+                                chat.add_message("system", &format!("{label} {}", info.changelog));
+                            }
+                            Self::show_upgrade_confirm_dialog(&state_clone, &chat, info);
+                            glib::ControlFlow::Break
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                    }
+                });
+                return;
+            }
             CommandResult::Panel { title, description, fields, config_key } => {
                 // Render the panel as an interactive card in the chat view.
                 let input_box = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
@@ -1813,6 +1873,154 @@ impl AiosApp {
         // Re-apply theme from config (handles /theme dark, /theme light, etc.).
         let theme = s.config.get_str("ui.theme", "dark");
         Self::apply_theme(&theme);
+    }
+
+    /// Show an "Install update?" confirm dialog for the upgrade flow.
+    fn show_upgrade_confirm_dialog(
+        state: &Rc<RefCell<AiosApp>>,
+        chat_view: &ChatView,
+        info: aios_core::upgrade::ReleaseInfo,
+    ) {
+        use adw::prelude::*;
+
+        // Find the top-level window from the chat view widget.
+        let widget = chat_view.widget();
+        let window = widget.root()
+            .and_then(|r| r.downcast::<adw::ApplicationWindow>().ok());
+        let win_ref: Option<&gtk4::Window> = window.as_ref()
+            .map(|w| w.upcast_ref::<gtk4::Window>());
+
+        let dialog = adw::MessageDialog::new(
+            win_ref,
+            Some(&t("cmd.upgrade.install_prompt")),
+            Some(&format!("Install AiOS v{}?", info.version)),
+        );
+        dialog.add_response("skip", "Skip");
+        dialog.add_response("install", "Install");
+        dialog.set_response_appearance("install", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("skip"));
+
+        let chat = chat_view.clone();
+        let state_clone = state.clone();
+
+        dialog.connect_response(None, move |_dlg, response| {
+            if response != "install" {
+                return;
+            }
+            Self::run_upgrade(&state_clone, &chat, info.clone());
+        });
+
+        dialog.present();
+    }
+
+    /// Drive the download + verify + install sequence, reporting progress via
+    /// the chat view, then show the reboot dialog.
+    fn run_upgrade(
+        state: &Rc<RefCell<AiosApp>>,
+        chat_view: &ChatView,
+        info: aios_core::upgrade::ReleaseInfo,
+    ) {
+        use aios_core::types::MessageLevel;
+
+        let rt = state.borrow().rt.clone();
+        let chat = chat_view.clone();
+        let state_clone = state.clone();
+
+        chat.add_message("system", &t("cmd.upgrade.downloading"));
+
+        // Use mpsc channel: tokio task sends result, GTK polls via timeout_add_local.
+        let (tx, rx) = std::sync::mpsc::channel::<UpgradeInstallResult>();
+
+        let sha256 = info.sha256.clone();
+
+        // Spawn download + verify + install on Tokio (no GTK types captured).
+        rt.spawn(async move {
+            // --- Download ---
+            let dl_result = aios_core::upgrade::download_binary(&info, |_downloaded, _total| {
+                // Progress reporting intentionally omitted to avoid Send issues.
+                // The "Downloading..." message is already shown.
+            })
+            .await;
+
+            if let Err(e) = dl_result {
+                let _ = tx.send(UpgradeInstallResult::Error(e.to_string()));
+                return;
+            }
+
+            // --- Verify checksum ---
+            if let Err(e) = aios_core::upgrade::verify_checksum(&sha256).await {
+                let _ = tx.send(UpgradeInstallResult::Error(e.to_string()));
+                return;
+            }
+
+            // --- Install ---
+            if let Err(e) = aios_core::upgrade::install_binary().await {
+                let _ = tx.send(UpgradeInstallResult::Error(e.to_string()));
+                return;
+            }
+
+            let _ = tx.send(UpgradeInstallResult::Success);
+        });
+
+        // Poll for result on the GTK thread.
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            match rx.try_recv() {
+                Ok(UpgradeInstallResult::Error(e)) => {
+                    let msg = t_fmt("cmd.upgrade.install_failed", &[("error", &e)]);
+                    chat.add_level_message(MessageLevel::Warning, &msg);
+                    glib::ControlFlow::Break
+                }
+                Ok(UpgradeInstallResult::Success) => {
+                    chat.add_message("system", &t("cmd.upgrade.install_ok"));
+                    Self::show_reboot_dialog(&state_clone, &chat);
+                    glib::ControlFlow::Break
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+            }
+        });
+    }
+
+    /// Show a "Reboot now?" dialog after a successful upgrade install.
+    fn show_reboot_dialog(
+        state: &Rc<RefCell<AiosApp>>,
+        chat_view: &ChatView,
+    ) {
+        use adw::prelude::*;
+
+        // Find the top-level window from the chat view widget.
+        let widget = chat_view.widget();
+        let window = widget.root()
+            .and_then(|r| r.downcast::<adw::ApplicationWindow>().ok());
+        let win_ref: Option<&gtk4::Window> = window.as_ref()
+            .map(|w| w.upcast_ref::<gtk4::Window>());
+
+        let dialog = adw::MessageDialog::new(
+            win_ref,
+            Some(&t("cmd.upgrade.reboot_prompt")),
+            Some("Reboot now to apply the update?"),
+        );
+        dialog.add_response("later", "Later");
+        dialog.add_response("reboot", "Reboot");
+        dialog.set_response_appearance("reboot", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("reboot"));
+
+        let chat = chat_view.clone();
+        let state_clone = state.clone();
+
+        dialog.connect_response(None, move |_dlg, response| {
+            if response != "reboot" {
+                let msg = t("cmd.upgrade.reboot_later");
+                chat.add_message("system", &msg);
+                return;
+            }
+            let rt = state_clone.borrow().rt.clone();
+            rt.spawn(async {
+                let _ = aios_core::upgrade::reboot().await;
+            });
+        });
+
+        dialog.present();
     }
 
     /// Run the self-test suite on the current channel.
@@ -1989,6 +2197,19 @@ impl AiosApp {
             }
         });
     }
+}
+
+/// Internal result type for async upgrade version check.
+enum UpgradeCheckResult {
+    UpToDate,
+    Available(aios_core::upgrade::ReleaseInfo),
+    Error(String),
+}
+
+/// Internal result type for async upgrade install (download + verify + install).
+enum UpgradeInstallResult {
+    Success,
+    Error(String),
 }
 
 /// Internal result type for async LLM communication.

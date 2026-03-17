@@ -40,6 +40,10 @@ pub fn register_all(runner: &mut SelfTestRunner) {
     runner.add("setup: chatgpt display name", false, test_setup_chatgpt_display_name);
     runner.add("setup: auto-select single provider", false, test_setup_auto_select_single_provider);
 
+    // -- Upgrade tests --
+    runner.add("upgrade: current version is valid semver", false, test_upgrade_version_semver);
+    runner.add("upgrade: /upgrade command returns Upgrade variant", false, test_upgrade_command);
+
     // -- Hostname tests --
     runner.add("hostname: validation", false, test_hostname_validation);
 
@@ -499,6 +503,43 @@ fn test_setup_auto_select_single_provider(ctx: &mut TestContext) -> TestResult {
         }
         Ok("Single provider auto-selection works".into())
     })();
+    let _ = std::fs::remove_dir_all(&dir);
+    make_result(name, res, ctx)
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade tests
+// ---------------------------------------------------------------------------
+
+fn test_upgrade_version_semver(ctx: &mut TestContext) -> TestResult {
+    let name = "upgrade: current version is valid semver";
+    let res = (|| -> Result<String, String> {
+        let v = semver::Version::parse(crate::upgrade::CURRENT_VERSION.trim());
+        match v {
+            Ok(ver) => Ok(format!("Current version: {ver}")),
+            Err(e) => Err(format!("CURRENT_VERSION must be valid semver: {e}")),
+        }
+    })();
+    make_result(name, res, ctx)
+}
+
+fn test_upgrade_command(ctx: &mut TestContext) -> TestResult {
+    let name = "upgrade: /upgrade command returns Upgrade variant";
+    let dir = std::env::temp_dir().join(format!("aios_st_upgrade_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("cfg.json");
+
+    let res = (|| -> Result<String, String> {
+        let mut cfg = ConfigManager::with_path(path).map_err(|e| format!("{e}"))?;
+        let mut handler = CommandHandler::new(&mut cfg);
+        let ok = matches!(handler.execute("/upgrade"), CommandResult::Upgrade);
+        if ok {
+            Ok("/upgrade command returns Upgrade variant".into())
+        } else {
+            Err("Expected CommandResult::Upgrade".into())
+        }
+    })();
+
     let _ = std::fs::remove_dir_all(&dir);
     make_result(name, res, ctx)
 }
