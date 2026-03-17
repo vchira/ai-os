@@ -405,6 +405,8 @@ impl AiosApp {
         };
 
         // Start the web server so the setup wizard is also available via browser.
+        // Enter the Tokio runtime context — server.start() uses tokio::spawn().
+        let _guard = rt.enter();
         let _web_server = Self::start_web_server(
             &mut config,
             &runtime,
