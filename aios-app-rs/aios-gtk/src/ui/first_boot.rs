@@ -224,7 +224,30 @@ impl SetupConversation {
     /// Dismisses the interactive widgets from the previous step's card
     /// so the user can't click old buttons.
     fn advance(&self, next: SetupStep) {
+        self.stop_speaking();
         self.advance_with_choice(next, None);
+    }
+
+    /// Stop any active TTS playback immediately.
+    fn stop_speaking(&self) {
+        std::thread::spawn(|| {
+            // Kill any running TTS processes
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "piper"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "espeak-ng"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "aplay"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        });
     }
 
     /// Advance to the next step, showing what the user chose in the previous card.
@@ -336,29 +359,145 @@ impl SetupConversation {
         input_box.set_margin_top(8);
 
         let status_label = gtk::Label::new(Some(
-            "\u{1f3a4} Listening... Say something like \"Hello AiOS\"",
+            "\u{1f3a4} Speak now \u{2014} the meter should move:",
         ));
         status_label.set_halign(Align::Start);
-        status_label.add_css_class("dim-label");
         input_box.append(&status_label);
 
-        // Manual skip button.
-        let skip_btn = gtk::Button::with_label("Skip mic test \u{2192}");
-        skip_btn.set_halign(Align::Start);
-        skip_btn.set_margin_top(8);
+        // VU meter — real-time audio level display
+        let level_bar = gtk::LevelBar::for_interval(0.0, 1.0);
+        level_bar.set_value(0.0);
+        level_bar.set_hexpand(true);
+        level_bar.set_margin_top(4);
+        level_bar.set_margin_bottom(4);
+        // Add color thresholds: green (low), yellow (mid), red (high)
+        level_bar.remove_offset_value(Some("low"));
+        level_bar.remove_offset_value(Some("high"));
+        level_bar.remove_offset_value(Some("full"));
+        level_bar.add_offset_value("low", 0.3);
+        level_bar.add_offset_value("high", 0.6);
+        level_bar.add_offset_value("full", 0.9);
+        level_bar.set_size_request(-1, 20);
+        input_box.append(&level_bar);
 
-        input_box.append(&skip_btn);
+        let level_label = gtk::Label::new(Some("No audio detected"));
+        level_label.set_halign(Align::Start);
+        level_label.add_css_class("dim-label");
+        input_box.append(&level_label);
+
+        // Buttons row
+        let btn_box = gtk::Box::new(Orientation::Horizontal, 8);
+        btn_box.set_margin_top(8);
+
+        let works_btn = gtk::Button::with_label("\u{2705} Mic works!");
+        works_btn.add_css_class("suggested-action");
+        works_btn.set_sensitive(false); // enabled once audio is detected
+        btn_box.append(&works_btn);
+
+        let skip_btn = gtk::Button::with_label("No mic / Skip \u{2192}");
+        btn_box.append(&skip_btn);
+        input_box.append(&btn_box);
 
         let handle = self.chat_view.add_setup_card(
             "audio-input-microphone-symbolic",
             "Test Microphone",
-            "Now let's check your microphone.\n\
-             Say something \u{2014} I'll show you what I hear.",
+            "Speak into your microphone.\n\
+             The meter below shows your audio level in real time.",
             Some(input_box.upcast_ref()),
         );
 
+        // Start audio capture for the VU meter
+        let mic_active = std::rc::Rc::new(std::cell::Cell::new(true));
+        let mic_buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
+
+        // Background thread: capture mic audio
+        let buf_writer = mic_buffer.clone();
+        let active_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flag_for_thread = active_flag.clone();
+        std::thread::spawn(move || {
+            use aios_voice::audio::capture::AudioCapture;
+            let mut capture = AudioCapture::new();
+            if capture.start_recording().is_err() {
+                return; // no mic available
+            }
+            while flag_for_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if let Ok(mut buf) = capture.buffer().lock() {
+                    if !buf.is_empty() {
+                        let samples: Vec<f32> = std::mem::take(&mut *buf);
+                        if let Ok(mut target) = buf_writer.lock() {
+                            *target = samples;
+                        }
+                    }
+                }
+            }
+            capture.stop_recording();
+        });
+
+        // GTK timer: update the VU meter every 60ms
+        let buf_reader = mic_buffer.clone();
+        let mic_active_for_timer = mic_active.clone();
+        let level_bar_ref = level_bar.clone();
+        let level_label_ref = level_label.clone();
+        let works_btn_ref = works_btn.clone();
+        let mut peak_seen = false;
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(60), move || {
+            if !mic_active_for_timer.get() {
+                level_bar_ref.set_value(0.0);
+                return gtk::glib::ControlFlow::Break;
+            }
+
+            let rms = if let Ok(samples) = buf_reader.lock() {
+                if samples.is_empty() {
+                    0.0
+                } else {
+                    let sum_sq: f32 = samples.iter().map(|&s| s * s).sum();
+                    (sum_sq / samples.len() as f32).sqrt()
+                }
+            } else {
+                0.0
+            };
+
+            // Scale RMS to 0..1 range (typical speech is 0.01-0.15)
+            let level = (rms * 8.0).min(1.0);
+            level_bar_ref.set_value(level as f64);
+
+            if level > 0.05 && !peak_seen {
+                peak_seen = true;
+                level_label_ref.set_text("\u{2705} Audio detected! Your microphone works.");
+                works_btn_ref.set_sensitive(true);
+            } else if level > 0.05 {
+                // Keep updating with current level
+                let bars = (level * 20.0) as usize;
+                let bar_str: String = "\u{2588}".repeat(bars);
+                level_label_ref.set_text(&format!("\u{1f3a4} {bar_str}"));
+            } else if !peak_seen {
+                level_label_ref.set_text("Waiting for audio...");
+            }
+
+            gtk::glib::ControlFlow::Continue
+        });
+
+        // "Mic works" button
         let this = self.clone();
+        let h = handle.clone();
+        let mic_active_for_works = mic_active.clone();
+        let flag_for_works = active_flag.clone();
+        works_btn.connect_clicked(move |_| {
+            mic_active_for_works.set(false);
+            flag_for_works.store(false, std::sync::atomic::Ordering::Relaxed);
+            if let Some(ref h) = h { h.dismiss("Microphone works"); }
+            this.chat_view.add_message("user", "Microphone works!");
+            this.advance(SetupStep::ChooseProvider);
+        });
+
+        // "Skip" button
+        let this = self.clone();
+        let mic_active_for_skip = mic_active.clone();
+        let flag_for_skip = active_flag.clone();
         skip_btn.connect_clicked(move |_| {
+            mic_active_for_skip.set(false);
+            flag_for_skip.store(false, std::sync::atomic::Ordering::Relaxed);
             if let Some(ref h) = handle { h.dismiss("Skipped mic test"); }
             this.chat_view.add_message("user", "Skip mic test");
             this.chat_view.add_message("system",
@@ -467,18 +606,30 @@ impl SetupConversation {
     // -- Step 3 / Step 7: Enter API Key ------------------------------------
 
     fn show_enter_api_key(&self, provider: String, is_backup: bool) {
-        let (title, hint_url) = match provider.as_str() {
+        let (title, tutorial) = match provider.as_str() {
             "claude" => (
-                format!("Enter Your Claude API Key"),
-                "console.anthropic.com",
+                "Enter Your Claude API Key".to_string(),
+                "How to get your key:\n\
+                 1. Go to console.anthropic.com\n\
+                 2. Sign in or create an account\n\
+                 3. Go to Settings \u{2192} API Keys\n\
+                 4. Click \"Create Key\" and copy it\n\
+                 \n\
+                 The key starts with sk-ant-...".to_string(),
             ),
             "openai" => (
-                format!("Enter Your OpenAI API Key"),
-                "platform.openai.com",
+                "Enter Your OpenAI API Key".to_string(),
+                "How to get your key:\n\
+                 1. Go to platform.openai.com\n\
+                 2. Sign in or create an account\n\
+                 3. Go to API Keys in the sidebar\n\
+                 4. Click \"Create new secret key\" and copy it\n\
+                 \n\
+                 The key starts with sk-...".to_string(),
             ),
             _ => (
                 format!("Enter Your {} API Key", provider),
-                "the provider's website",
+                "Visit the provider's developer dashboard to create an API key.".to_string(),
             ),
         };
 
@@ -539,12 +690,10 @@ impl SetupConversation {
             this.store_api_key(&provider_clone2, api_key, is_backup);
         });
 
-        let description = format!("Paste your API key below. Get one at {hint_url}");
-
         self.chat_view.add_setup_card(
             "dialog-password-symbolic",
             &title,
-            &description,
+            &tutorial,
             Some(input_box.upcast_ref()),
         );
 

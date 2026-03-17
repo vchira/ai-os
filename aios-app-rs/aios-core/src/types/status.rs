@@ -112,15 +112,27 @@ impl StatusLine {
         }
     }
 
-    /// Format as a single line with green/red indicator.
+    /// Format as a single line with green/red indicator using Pango markup.
     pub fn format(&self) -> String {
-        let icon = if self.available { "\u{2705}" } else { "\u{274c}" }; // ✅ / ❌
-        let status = if self.available { "available" } else { "unavailable" };
-        if self.detail.is_empty() {
-            format!("  {icon} {}: {status}", self.component)
+        let (icon, color) = if self.available {
+            ("\u{2713}", "#2ed573") // ✓ green
         } else {
-            format!("  {icon} {}: {status} — {}", self.component, self.detail)
-        }
+            ("\u{2717}", "#ff4757") // ✗ red
+        };
+        let status = if self.available { "available" } else { "unavailable" };
+        let detail_part = if self.detail.is_empty() {
+            String::new()
+        } else {
+            let escaped = self.detail
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;");
+            format!(" <span color='#888888'>\u{2014} {escaped}</span>")
+        };
+        format!(
+            "  <span color='{color}'>{icon}</span> <b>{}</b>: <span color='#888888'>{status}</span>{detail_part}",
+            self.component
+        )
     }
 
     /// Format as HTML with green/red color.
@@ -160,12 +172,12 @@ impl BootStatus {
         self.lines.push(line);
     }
 
-    /// Format the boot status as a plain-text report.
+    /// Format the boot status as a Pango markup report.
     pub fn format(&self) -> String {
         let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
         let mut parts = vec![
-            format!("{} [{}] AiOS System Status", MessageLevel::Info.icon(), MessageLevel::Info.label()),
-            format!("  Boot time: {now}"),
+            format!("<b>AiOS System Status</b>"),
+            format!("  <span color='#888888'>Boot time: {now}</span>"),
             String::new(),
         ];
 

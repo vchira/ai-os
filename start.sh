@@ -19,6 +19,14 @@ if [ "${ARG}" = "--clean" ]; then
 elif [ "${ARG}" = "--code-rebuild" ]; then
     echo "[*] Rebuilding Rust code only (fast rebuild)..."
     "${SCRIPT_DIR}/distro/build.sh" --code-rebuild
+elif [ "${ARG}" = "--bump-major" ]; then
+    echo "[*] Major version bump + clean build..."
+    "${SCRIPT_DIR}/clean.sh"
+    "${SCRIPT_DIR}/distro/build.sh" --bump-major
+elif [ "${ARG}" = "--bump-minor" ]; then
+    echo "[*] Minor version bump + clean build..."
+    "${SCRIPT_DIR}/clean.sh"
+    "${SCRIPT_DIR}/distro/build.sh" --bump-minor
 else
     ISO=$(find "${SCRIPT_DIR}/distro/build" -maxdepth 1 -name "*.iso" -type f 2>/dev/null || true)
     if [ -z "${ISO}" ]; then

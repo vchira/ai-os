@@ -17,6 +17,39 @@ BUILD_DIR="${SCRIPT_DIR}/build"
 REPO_DIR="${SCRIPT_DIR}/.."
 ARG="${1:-}"
 IMAGE="aios-builder"
+
+# ─── Version management ──────────────────────────────────────
+# VERSION file format: MAJOR.MINOR.PATCH
+# --bump-major: increment major, reset minor+patch
+# --bump-minor: increment minor, reset patch
+# Patch is ALWAYS incremented on every build
+VERSION_FILE="${REPO_DIR}/VERSION"
+if [ ! -f "${VERSION_FILE}" ]; then
+    echo "2.0.0" > "${VERSION_FILE}"
+fi
+
+CURRENT_VERSION=$(cat "${VERSION_FILE}" | tr -d '[:space:]')
+IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "${CURRENT_VERSION}"
+
+if [ "${ARG}" = "--bump-major" ]; then
+    V_MAJOR=$((V_MAJOR + 1))
+    V_MINOR=0
+    V_PATCH=0
+    echo "[*] Bumped major version to ${V_MAJOR}.${V_MINOR}.${V_PATCH}"
+    ARG="--clean"  # major bump implies clean build
+elif [ "${ARG}" = "--bump-minor" ]; then
+    V_MINOR=$((V_MINOR + 1))
+    V_PATCH=0
+    echo "[*] Bumped minor version to ${V_MAJOR}.${V_MINOR}.${V_PATCH}"
+    ARG="--clean"  # minor bump implies clean build
+else
+    # Auto-increment patch on every build
+    V_PATCH=$((V_PATCH + 1))
+fi
+
+AIOS_VERSION="${V_MAJOR}.${V_MINOR}.${V_PATCH}"
+echo "${AIOS_VERSION}" > "${VERSION_FILE}"
+export AIOS_VERSION
 CACHE_VOL="aios-build-cache"
 CARGO_CACHE="aios-cargo-cache"
 
@@ -57,6 +90,7 @@ docker run --rm \
     -v "${REPO_DIR}:/work" \
     -v "${CARGO_CACHE}:/root/.cargo/registry" \
     -w /work/aios-app-rs \
+    -e "AIOS_VERSION=${AIOS_VERSION}" \
     "${IMAGE}" cargo build --release 2>&1
 
 AIOS_BIN="${REPO_DIR}/aios-app-rs/target/release/aios"
@@ -151,9 +185,11 @@ if [ "${ARG}" = "--code-rebuild" ]; then
 fi
 
 # ─── Full ISO build ─────────────────────────────────────────
+echo "[*] Building AiOS v${AIOS_VERSION}..."
 docker run --rm --privileged \
     -v "${REPO_DIR}:/work" \
     -v "${CACHE_VOL}:/cache" \
+    -e "AIOS_VERSION=${AIOS_VERSION}" \
     "${IMAGE}" bash /work/distro/_inner_build.sh
 
 # Check result

@@ -187,7 +187,13 @@ impl ChatView {
         let bubble = gtk::Box::new(Orientation::Vertical, 4);
         bubble.add_css_class("message-bubble");
 
-        let pango = aios_core::types::to_pango(content);
+        // If content already contains Pango markup (e.g. <span>, <b>), use it directly.
+        // Otherwise, convert rich text to Pango.
+        let pango = if content.contains("<span") || content.contains("<b>") {
+            content.to_string()
+        } else {
+            aios_core::types::to_pango(content)
+        };
         let label = gtk::Label::new(None);
         label.set_markup(&pango);
         label.set_wrap(true);

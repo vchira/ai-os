@@ -195,6 +195,7 @@ pub fn build_main_window(
     chat_view: &ChatView,
     prompt_input: &PromptInput,
     channel_overlay: &ChannelOverlay,
+    available_providers: &[&str],
 ) -> adw::ApplicationWindow {
     // Load CSS.
     let css_provider = gtk::CssProvider::new();
@@ -208,10 +209,46 @@ pub fn build_main_window(
 
     // --- Header bar ---
     let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&gtk::Label::new(Some("AiOS"))));
 
-    // Provider dropdown (left side).
-    let provider_model = gtk::StringList::new(&["Claude", "OpenAI"]);
+    // Title: "AiOS v2.0.1 | 2026-03-17 12:34" with live clock
+    let version = option_env!("AIOS_VERSION").unwrap_or("dev");
+    let title_box = gtk::Box::new(Orientation::Horizontal, 8);
+    title_box.set_halign(gtk::Align::Center);
+
+    let title_label = gtk::Label::new(Some(&format!("AiOS v{version}")));
+    title_label.add_css_class("heading");
+    title_box.append(&title_label);
+
+    let sep = gtk::Label::new(Some("|"));
+    sep.set_opacity(0.4);
+    title_box.append(&sep);
+
+    let clock_label = gtk::Label::new(Some(""));
+    clock_label.set_opacity(0.6);
+    title_box.append(&clock_label);
+
+    // Update clock every second
+    let clock_ref = clock_label.clone();
+    gtk::glib::timeout_add_local(std::time::Duration::from_secs(1), move || {
+        let now = chrono::Local::now();
+        clock_ref.set_text(&now.format("%Y-%m-%d %H:%M:%S").to_string());
+        gtk::glib::ControlFlow::Continue
+    });
+    // Set initial value
+    {
+        let now = chrono::Local::now();
+        clock_label.set_text(&now.format("%Y-%m-%d %H:%M:%S").to_string());
+    }
+
+    header.set_title_widget(Some(&title_box));
+
+    // Provider dropdown (left side) — only shows providers with API keys.
+    let provider_names: Vec<&str> = if available_providers.is_empty() {
+        vec!["No provider"]
+    } else {
+        available_providers.to_vec()
+    };
+    let provider_model = gtk::StringList::new(&provider_names);
     let provider_dropdown = gtk::DropDown::new(Some(provider_model), gtk::Expression::NONE);
     provider_dropdown.set_widget_name(PROVIDER_DROPDOWN_NAME);
     provider_dropdown.set_tooltip_text(Some("Select LLM provider"));

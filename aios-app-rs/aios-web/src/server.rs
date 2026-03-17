@@ -185,6 +185,7 @@ impl WebServer {
                 Ok(l) => l,
                 Err(e) => {
                     error!("Failed to bind web server on {addr}: {e}");
+                    error!("If port 80, ensure 'setcap cap_net_bind_service=+ep /usr/bin/aios' was run");
                     return;
                 }
             };

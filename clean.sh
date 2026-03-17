@@ -59,12 +59,10 @@ find "${SCRIPT_DIR}" -type f -name "*.pyc" -delete 2>/dev/null || true
 # Generated files
 # _inner_build.sh is a source file, not generated — don't delete it
 
-# Deep clean: also remove Docker cache volumes
-if [ "${ARG}" = "--deep" ]; then
-    echo "[*] Deep clean: removing Docker cache volumes..."
-    docker volume rm aios-build-cache 2>/dev/null || true
-    docker volume rm aios-cargo-cache 2>/dev/null || true
-fi
+# Always remove Docker cache volumes (ensures truly clean builds)
+echo "[*] Removing Docker cache volumes..."
+docker volume rm aios-build-cache 2>/dev/null || true
+docker volume rm aios-cargo-cache 2>/dev/null || true
 
 echo ""
 echo "Done. Run ./start.sh to rebuild and boot."

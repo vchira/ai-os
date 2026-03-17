@@ -57,10 +57,29 @@ if [ -f "${QEMU_CONF}" ]; then
 fi
 
 # ─── Audio strategy ───────────────────────────────────────────
-# Use SPICE audio: sound is carried over the SPICE protocol to the viewer.
-# This avoids PipeWire/PulseAudio permission issues with libvirt-qemu user.
-echo "[*] Audio: SPICE (routed through viewer)"
-AUDIO_XML="<audio id='1' type='spice'/>"
+# Try PipeWire first (supports mic input), fall back to SPICE.
+UID_NUM=$(id -u)
+QEMU_CONF="/etc/libvirt/qemu.conf"
+CURRENT_USER=$(whoami)
+QEMU_USER_OK=false
+if [ -f "${QEMU_CONF}" ] && grep -q "^user = \"${CURRENT_USER}\"" "${QEMU_CONF}" 2>/dev/null; then
+    QEMU_USER_OK=true
+fi
+
+if [ "${QEMU_USER_OK}" = true ] && [ -S "/run/user/${UID_NUM}/pipewire-0" ]; then
+    echo "[*] Audio: PipeWire (mic + speaker)"
+    AUDIO_XML="<audio id='1' type='pipewire' runtimeDir='/run/user/${UID_NUM}'/>"
+elif [ "${QEMU_USER_OK}" = true ] && [ -S "/run/user/${UID_NUM}/pulse/native" ]; then
+    echo "[*] Audio: PulseAudio (mic + speaker)"
+    AUDIO_XML="<audio id='1' type='pulseaudio' serverName='/run/user/${UID_NUM}/pulse/native'/>"
+else
+    echo "[*] Audio: SPICE (speaker only, no mic)"
+    echo "    For mic support, run:"
+    echo "      sudo sed -i 's/^#user = \"libvirt-qemu\"/user = \"${CURRENT_USER}\"/' /etc/libvirt/qemu.conf"
+    echo "      sudo sed -i 's/^#group = \"libvirt-qemu\"/group = \"${CURRENT_USER}\"/' /etc/libvirt/qemu.conf"
+    echo "      sudo systemctl restart libvirtd"
+    AUDIO_XML="<audio id='1' type='spice'/>"
+fi
 
 # ─── Build domain XML directly ───────────────────────────────
 echo "[*] Creating AiOS VM..."

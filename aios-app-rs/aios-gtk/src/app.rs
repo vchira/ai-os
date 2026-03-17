@@ -202,6 +202,27 @@ fn transcribe_with_whisper(samples: &[f32]) -> Result<String, String> {
     Ok(text)
 }
 
+/// Stop any running TTS playback immediately.
+fn stop_tts() {
+    std::thread::spawn(|| {
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "piper"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "espeak-ng"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "aplay.*raw"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+}
+
 /// Speak text using espeak-ng if TTS is enabled.
 ///
 /// Runs in a background thread so it doesn't block the GTK main loop.
@@ -322,7 +343,41 @@ impl AiosApp {
         let prompt_input = PromptInput::new();
         let channel_overlay = ChannelOverlay::new();
 
-        let window = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay);
+        let window = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay, &["Setup..."]);
+
+        // Show boot status before setup begins.
+        {
+            use aios_core::types::{BootStatus, StatusLine};
+            let mut status = BootStatus::new();
+
+            status.add(StatusLine::new("Desktop", true, "GTK4/libadwaita"));
+            status.add(StatusLine::new("Web Channel", true, "http://aios.local"));
+
+            // Check audio
+            let has_piper = std::path::Path::new("/usr/bin/piper").exists();
+            let has_espeak = std::path::Path::new("/usr/bin/espeak-ng").exists();
+            let has_whisper = std::path::Path::new("/usr/bin/whisper-cpp-cli").exists();
+            let tts_backend = if has_piper { "Piper" } else if has_espeak { "espeak-ng" } else { "none" };
+            status.add(StatusLine::new("Audio Output (TTS)", has_piper || has_espeak, tts_backend));
+            status.add(StatusLine::new("Audio Input (STT)", has_whisper, if has_whisper { "Whisper" } else { "not installed" }));
+
+            // System info
+            let kb = std::fs::read_to_string("/etc/default/keyboard")
+                .ok()
+                .and_then(|s| s.lines().find(|l| l.starts_with("XKBLAYOUT")).map(|l| {
+                    l.split('"').nth(1).unwrap_or("us").to_string()
+                }))
+                .unwrap_or_else(|| "us".into());
+            let tz = std::fs::read_to_string("/etc/timezone")
+                .unwrap_or_else(|_| "UTC".into()).trim().to_string();
+            status.add(StatusLine::new("Keyboard", true, &kb));
+            status.add(StatusLine::new("Timezone", true, &tz));
+
+            let boot_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            status.add(StatusLine::new("Boot time", true, &boot_time));
+
+            chat_view.add_level_message(aios_core::types::MessageLevel::Info, &status.format());
+        }
 
         // Create the setup conversation.
         let setup = SetupConversation::new(chat_view.clone());
@@ -539,6 +594,9 @@ impl AiosApp {
         main_window::connect_speaker_toggle(window, move |active| {
             let mut s = state_ref.borrow_mut();
             let _ = s.config.set("voice.tts_enabled", serde_json::json!(active));
+            if !active {
+                stop_tts();
+            }
             info!("Speaker toggled: {active}");
         });
 
@@ -597,11 +655,25 @@ impl AiosApp {
         let prompt_input = PromptInput::new();
         let channel_overlay = ChannelOverlay::new();
 
+        // Build provider list — only show providers with API keys configured.
+        let mut available_providers = Vec::new();
+        if !config.get_str("llm.claude_api_key", "").is_empty() {
+            available_providers.push("Claude");
+        }
+        if !config.get_str("llm.openai_api_key", "").is_empty() {
+            let k = config.get_str("llm.openai_api_key", "");
+            if k != "your-api-key-here" {
+                available_providers.push("OpenAI");
+            }
+        }
+        let provider_refs: Vec<&str> = available_providers.iter().map(|s| *s).collect();
+
         let window = main_window::build_main_window(
             app,
             &chat_view,
             &prompt_input,
             &channel_overlay,
+            &provider_refs,
         );
 
         // Create a UiPanelTool with the GTK panel renderer callback.
@@ -631,7 +703,7 @@ impl AiosApp {
         }));
 
         // Read channel config (used by both boot status and channel startup).
-        let web_enabled = config.get_bool("channels.web.enabled", false);
+        let web_enabled = config.get_bool("channels.web.enabled", true);
         let web_port = config.get_str("channels.web.port", "80");
         let signal_enabled = config.get_bool("channels.signal.enabled", false);
         let signal_phone = config.get_str("channels.signal.phone", "");
@@ -641,6 +713,8 @@ impl AiosApp {
             use aios_core::types::{BootStatus, StatusLine};
 
             let mut status = BootStatus::new();
+
+            // -- Channels --
             status.add(StatusLine::new("Desktop", true, "GTK4/libadwaita"));
             if web_enabled {
                 status.add(StatusLine::new("Web Channel", true, format!("http://aios.local:{web_port}")));
@@ -649,26 +723,63 @@ impl AiosApp {
             }
             if signal_enabled && !signal_phone.is_empty() {
                 status.add(StatusLine::new("Signal", true, &signal_phone));
-            } else if signal_enabled {
-                status.add(StatusLine::new("Signal", false, "enabled but no phone configured"));
             } else {
                 status.add(StatusLine::new("Signal", false, "disabled (/channel signal on)"));
             }
+
+            // -- LLM Provider + Model --
             let provider = config.get_str("llm.provider", "claude");
+            let claude_key = config.get_str("llm.claude_api_key", "");
+            let openai_key = config.get_str("llm.openai_api_key", "");
+            let has_claude = !claude_key.is_empty();
+            let has_openai = !openai_key.is_empty() && openai_key != "your-api-key-here";
             let has_key = match provider.as_str() {
-                "claude" => !config.get_str("llm.claude_api_key", "").is_empty(),
-                "openai" => !config.get_str("llm.openai_api_key", "").is_empty(),
+                "claude" => has_claude,
+                "openai" => has_openai,
                 _ => false,
             };
+            let model = match provider.as_str() {
+                "claude" => config.get_str("llm.claude_model", "claude-sonnet-4-20250514"),
+                "openai" => config.get_str("llm.openai_model", "gpt-4o"),
+                _ => provider.clone(),
+            };
             if has_key {
-                status.add(StatusLine::new("LLM Provider", true, &provider));
+                status.add(StatusLine::new("LLM Provider", true, format!("{provider} ({model})")));
             } else {
-                status.add(StatusLine::new("LLM Provider", false, format!("{provider} (no API key — use /key)")));
+                status.add(StatusLine::new("LLM Provider", false, format!("{provider} — **no API key** (use /key)")));
             }
+
+            // Show backup provider if available
+            if has_claude && provider != "claude" {
+                status.add(StatusLine::new("Backup", true, "Claude available"));
+            }
+            if has_openai && provider != "openai" {
+                status.add(StatusLine::new("Backup", true, "OpenAI available"));
+            }
+
+            // -- Voice --
             let stt = config.get_bool("voice.stt_enabled", true);
             let tts = config.get_bool("voice.tts_enabled", true);
-            status.add(StatusLine::new("Voice", stt || tts,
-                format!("STT: {} | TTS: {}", if stt { "on" } else { "off" }, if tts { "on" } else { "off" })));
+            let tts_voice = config.get_str("voice.tts_voice", "en_US-amy-medium");
+            let has_piper = std::path::Path::new("/usr/bin/piper").exists();
+            let has_whisper = std::path::Path::new("/usr/bin/whisper-cpp-cli").exists();
+            let tts_backend = if has_piper { "Piper" } else { "espeak-ng" };
+            let stt_backend = if has_whisper { "Whisper" } else { "not installed" };
+            status.add(StatusLine::new("Audio Output (TTS)", tts,
+                format!("{tts_backend} — voice: {tts_voice}")));
+            status.add(StatusLine::new("Audio Input (STT)", stt && has_whisper,
+                format!("{stt_backend}{}", if !stt { " — disabled" } else { "" })));
+
+            // -- System --
+            let kb_layout = config.get_str("system.keyboard_layout", "us");
+            let timezone = std::fs::read_to_string("/etc/timezone")
+                .unwrap_or_else(|_| "UTC".into())
+                .trim().to_string();
+            let boot_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            status.add(StatusLine::new("Keyboard", true, kb_layout));
+            status.add(StatusLine::new("Timezone", true, &timezone));
+            status.add(StatusLine::new("Boot time", true, boot_time));
+
             status.format()
         };
 
@@ -1001,6 +1112,9 @@ impl AiosApp {
         main_window::connect_speaker_toggle(&window, move |active| {
             let mut s = state_ref.borrow_mut();
             let _ = s.config.set("voice.tts_enabled", serde_json::json!(active));
+            if !active {
+                stop_tts();
+            }
             info!("Speaker toggled: {active}");
         });
 
@@ -1310,6 +1424,9 @@ impl AiosApp {
         _prompt: &PromptInput,
         text: String,
     ) {
+        // Stop any active TTS when the user sends a new message
+        stop_tts();
+
         let s = state.borrow();
         let llm = s.llm.clone();
         let rt = s.rt.clone();

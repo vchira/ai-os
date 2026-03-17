@@ -107,6 +107,8 @@ openssh-server
 libsndfile1
 curl
 wget
+libcap2-bin
+bc
 git
 build-essential
 espeak-ng
@@ -148,10 +150,46 @@ echo "[AiOS] labwc installed successfully"
 EOF
 chmod +x config/hooks/live/0050-build-labwc.hook.chroot
 
+# Pre-compute values from .env OUTSIDE the chroot hook (where /work is accessible)
+_KB_LAYOUT="us"
+_CLAUDE_KEY=""
+_OPENAI_KEY=""
+_AIOS_VERSION="${AIOS_VERSION:-dev}"
+if [ -f /work/.env ]; then
+    _KB_LAYOUT=$(grep -oP 'KEYBOARD_LAYOUT\s*=\s*\K\S+' /work/.env 2>/dev/null || echo "us")
+    _CLAUDE_KEY=$(grep -oP 'CLAUDE_API_KEY\s*=\s*\K\S+' /work/.env 2>/dev/null || true)
+    _OPENAI_KEY=$(grep -oP 'OPENAI_API_KEY\s*=\s*\K\S+' /work/.env 2>/dev/null || true)
+    [ "$_OPENAI_KEY" = "your-api-key-here" ] && _OPENAI_KEY=""
+fi
+[ -z "$_KB_LAYOUT" ] && _KB_LAYOUT="us"
+echo "[*] Build config: keyboard=${_KB_LAYOUT} version=${_AIOS_VERSION} claude_key=$([ -n "$_CLAUDE_KEY" ] && echo 'set' || echo 'empty')"
+
+# Write build config where the chroot can read it
+mkdir -p config/includes.chroot/tmp
+cat > config/includes.chroot/tmp/aios-build-config << BUILDCFG
+KB_LAYOUT=${_KB_LAYOUT}
+CLAUDE_KEY=${_CLAUDE_KEY}
+OPENAI_KEY=${_OPENAI_KEY}
+AIOS_VERSION=${_AIOS_VERSION}
+BUILDCFG
+
 # Hook 2: Setup AiOS system
 cat > config/hooks/live/0100-setup-aios.hook.chroot << 'EOF'
 #!/bin/bash
 set -e
+
+# Read build config (written by _inner_build.sh outside chroot)
+if [ -f /tmp/aios-build-config ]; then
+    source /tmp/aios-build-config
+    echo "[AiOS] Build config loaded: keyboard=${KB_LAYOUT} version=${AIOS_VERSION}"
+else
+    echo "[AiOS] WARNING: No build config found, using defaults"
+    KB_LAYOUT="us"
+    CLAUDE_KEY=""
+    OPENAI_KEY=""
+    AIOS_VERSION="dev"
+fi
+
 echo "[AiOS] Setting up AiOS distribution..."
 
 # ── Create user ──
@@ -163,12 +201,9 @@ echo "aios ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/aios
 echo "aios" > /etc/hostname
 echo "127.0.0.1 aios" >> /etc/hosts
 
-# ── Keyboard layout (from .env or default to us) ──
-KB_LAYOUT="us"
-if [ -f /work/.env ]; then
-    KB_LAYOUT=$(grep -oP 'KEYBOARD_LAYOUT\s*=\s*\K\S+' /work/.env 2>/dev/null || echo "us")
-fi
-[ -z "$KB_LAYOUT" ] && KB_LAYOUT="us"
+# ── Keyboard layout (from build config injected by _inner_build.sh) ──
+# KB_LAYOUT is already set from /tmp/aios-build-config (sourced above)
+[ -z "${KB_LAYOUT:-}" ] && KB_LAYOUT="us"
 echo "[AiOS] Keyboard layout: ${KB_LAYOUT}"
 
 # Console keymap (de -> de-latin1, us -> us, etc.)
@@ -205,6 +240,22 @@ AVEOF
 
 # ── SPICE agent for clipboard sharing with host ──
 # spice-vdagentd must run as a system service BEFORE the user session starts.
+# Create the service file if it doesn't exist (some Debian versions don't include it)
+if [ ! -f /etc/systemd/system/spice-vdagentd.service ] && [ ! -f /lib/systemd/system/spice-vdagentd.service ]; then
+    cat > /etc/systemd/system/spice-vdagentd.service << 'SVCEOF'
+[Unit]
+Description=SPICE guest agent daemon
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/sbin/spice-vdagentd
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+fi
 systemctl enable spice-vdagentd 2>/dev/null || true
 
 # ── SSH server — enable for remote access + updates ──
@@ -229,6 +280,8 @@ SSHEOF
 if [ -f /opt/aios-app/aios ]; then
     cp /opt/aios-app/aios /usr/bin/aios
     chmod +x /usr/bin/aios
+    # Allow binding to port 80 without root
+    setcap cap_net_bind_service=+ep /usr/bin/aios 2>/dev/null || true
     echo "[AiOS] Binary installed to /usr/bin/aios"
 else
     echo "WARN: AiOS binary not found at /opt/aios-app/aios"
@@ -314,30 +367,298 @@ echo "[AiOS Update] Done!"
 UPDEOF
 chmod +x /usr/bin/aios-update
 
-# ── Install whisper.cpp for STT ──
-# Download pre-built whisper-cpp binary and the tiny.en model for fast local STT.
-echo "[AiOS] Installing whisper.cpp for STT..."
-WHISPER_VERSION="1.7.4"
-WHISPER_URL="https://github.com/ggerganov/whisper.cpp/releases/download/v${WHISPER_VERSION}/whisper-cli-linux-x86_64.tar.gz"
-if curl -fsSL "${WHISPER_URL}" -o /tmp/whisper.tar.gz 2>/dev/null; then
-    tar xzf /tmp/whisper.tar.gz -C /tmp/
-    cp /tmp/whisper-cli /usr/bin/whisper-cpp-cli 2>/dev/null || \
-    cp /tmp/whisper.cpp/main /usr/bin/whisper-cpp-cli 2>/dev/null || \
-    find /tmp -name 'main' -o -name 'whisper-cli' 2>/dev/null | head -1 | xargs -I{} cp {} /usr/bin/whisper-cpp-cli
-    chmod +x /usr/bin/whisper-cpp-cli 2>/dev/null || true
-    rm -rf /tmp/whisper*
-    echo "[AiOS] whisper-cpp-cli installed"
+# ── System selftest script ──
+cat > /usr/bin/aios-test << 'TESTEOF'
+#!/bin/bash
+# AiOS System Self-Test
+# Run: aios-test          (all tests)
+# Run: aios-test audio    (audio only)
+# Run: aios-test mic      (microphone only)
+# Run: aios-test network  (network only)
+
+set -euo pipefail
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+PASS=0
+FAIL=0
+WARN=0
+
+pass() { echo -e "  ${GREEN}✅ PASS${NC}: $1"; PASS=$((PASS+1)); }
+fail() { echo -e "  ${RED}❌ FAIL${NC}: $1"; FAIL=$((FAIL+1)); }
+warn() { echo -e "  ${YELLOW}⚠️  WARN${NC}: $1"; WARN=$((WARN+1)); }
+header() { echo -e "\n${BOLD}${CYAN}── $1 ──${NC}"; }
+
+FILTER="${1:-all}"
+
+echo -e "${BOLD}╔═══════════════════════════════════════╗${NC}"
+echo -e "${BOLD}║       AiOS System Self-Test           ║${NC}"
+echo -e "${BOLD}╚═══════════════════════════════════════╝${NC}"
+echo ""
+
+# ── Audio Output ──
+if [ "$FILTER" = "all" ] || [ "$FILTER" = "audio" ]; then
+    header "Audio Output"
+
+    if command -v aplay &>/dev/null; then
+        pass "aplay available"
+    else
+        fail "aplay not found"
+    fi
+
+    if aplay -l 2>/dev/null | grep -q "card"; then
+        CARDS=$(aplay -l 2>/dev/null | grep "^card" | head -3)
+        pass "Sound card detected:"
+        echo "        $CARDS"
+    else
+        fail "No sound card detected"
+    fi
+
+    if pgrep -x pipewire &>/dev/null; then
+        pass "PipeWire running"
+    else
+        fail "PipeWire not running"
+    fi
+
+    if pgrep -x wireplumber &>/dev/null; then
+        pass "WirePlumber running"
+    else
+        warn "WirePlumber not running"
+    fi
+
+    if command -v pactl &>/dev/null && pactl info &>/dev/null; then
+        SINK=$(pactl info 2>/dev/null | grep "Default Sink" || echo "none")
+        pass "PulseAudio/PipeWire-pulse working"
+        echo "        $SINK"
+    else
+        warn "pactl not responding"
+    fi
+
+    if command -v piper &>/dev/null; then
+        pass "Piper TTS installed"
+    else
+        warn "Piper TTS not installed (using espeak-ng fallback)"
+    fi
+
+    if command -v espeak-ng &>/dev/null; then
+        pass "espeak-ng available"
+    else
+        fail "espeak-ng not found"
+    fi
+
+    if [ -f /home/aios/.aios/models/piper/en_US-amy-medium.onnx ]; then
+        pass "Piper voice model: en_US-amy-medium"
+    else
+        warn "No Piper voice model found"
+    fi
+
+    # Play test tone
+    echo -e "\n  ${CYAN}Playing test tone (1 second)...${NC}"
+    if speaker-test -t sine -f 440 -l 1 -p 1 &>/dev/null; then
+        pass "Audio playback works"
+    else
+        fail "Audio playback failed"
+    fi
+
+    # Test TTS
+    echo -e "  ${CYAN}Testing TTS...${NC}"
+    if espeak-ng "Test" &>/dev/null; then
+        pass "TTS (espeak-ng) works"
+    else
+        fail "TTS failed"
+    fi
+fi
+
+# ── Microphone / Audio Input ──
+if [ "$FILTER" = "all" ] || [ "$FILTER" = "mic" ]; then
+    header "Microphone / Audio Input"
+
+    if arecord -l 2>/dev/null | grep -q "card"; then
+        CARDS=$(arecord -l 2>/dev/null | grep "^card" | head -3)
+        pass "Recording device detected:"
+        echo "        $CARDS"
+    else
+        fail "No recording device detected (mic will not work)"
+    fi
+
+    echo -e "\n  ${CYAN}Recording 2 seconds of audio...${NC}"
+    if timeout 3 arecord -d 2 -f S16_LE -r 16000 -q /tmp/aios-mic-test.wav 2>/dev/null; then
+        SIZE=$(stat -c%s /tmp/aios-mic-test.wav 2>/dev/null || echo 0)
+        if [ "$SIZE" -gt 1000 ]; then
+            # Check if there's actual audio (not just silence)
+            ENERGY=$(python3 -c "
+import wave, struct, math
+w = wave.open('/tmp/aios-mic-test.wav','r')
+frames = w.readframes(w.getnframes())
+samples = struct.unpack('<' + 'h' * w.getnframes(), frames)
+rms = math.sqrt(sum(s*s for s in samples) / len(samples))
+print(f'{rms:.1f}')
+" 2>/dev/null || echo "0")
+            if [ "$(echo "$ENERGY > 100" | bc 2>/dev/null || echo 0)" = "1" ]; then
+                pass "Microphone recording works (energy: $ENERGY)"
+                echo -e "  ${CYAN}Playing back recording...${NC}"
+                aplay -q /tmp/aios-mic-test.wav 2>/dev/null || true
+            else
+                warn "Recording captured but only silence (energy: $ENERGY)"
+                echo "        Mic may not be connected or SPICE doesn't forward audio input"
+            fi
+        else
+            fail "Recording file too small ($SIZE bytes)"
+        fi
+        rm -f /tmp/aios-mic-test.wav
+    else
+        fail "arecord failed — no microphone available"
+    fi
+
+    if command -v whisper-cpp-cli &>/dev/null; then
+        pass "whisper-cpp-cli installed (STT ready)"
+    else
+        fail "whisper-cpp-cli not found (STT will not work)"
+    fi
+
+    if [ -f /home/aios/.aios/models/whisper/ggml-tiny.bin ]; then
+        SIZE=$(du -h /home/aios/.aios/models/whisper/ggml-tiny.bin | cut -f1)
+        pass "Whisper model: ggml-tiny.bin ($SIZE)"
+    else
+        fail "No Whisper model found"
+    fi
+fi
+
+# ── Network ──
+if [ "$FILTER" = "all" ] || [ "$FILTER" = "network" ]; then
+    header "Network"
+
+    if ip addr show | grep -q "inet " | grep -v "127.0.0.1"; then
+        IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        pass "Network interface up (IP: ${IP:-unknown})"
+    else
+        IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+        if [ -n "$IP" ]; then
+            pass "Network up (IP: $IP)"
+        else
+            fail "No network interface"
+        fi
+    fi
+
+    if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
+        pass "Internet connectivity (ping 8.8.8.8)"
+    else
+        fail "No internet connectivity"
+    fi
+
+    if ping -c 1 -W 2 google.com &>/dev/null; then
+        pass "DNS resolution working"
+    else
+        warn "DNS resolution failed"
+    fi
+
+    if pgrep -x avahi-daemon &>/dev/null; then
+        pass "Avahi mDNS running (aios.local)"
+    else
+        warn "Avahi not running — aios.local won't resolve"
+    fi
+
+    if ss -tlnp 2>/dev/null | grep -q ":80 "; then
+        pass "Web server listening on port 80"
+    else
+        if ss -tlnp 2>/dev/null | grep -q ":8080 "; then
+            pass "Web server listening on port 8080"
+        else
+            fail "Web server not listening"
+        fi
+    fi
+
+    if ss -tlnp 2>/dev/null | grep -q ":22 "; then
+        pass "SSH server running"
+    else
+        warn "SSH server not running"
+    fi
+fi
+
+# ── System ──
+if [ "$FILTER" = "all" ] || [ "$FILTER" = "system" ]; then
+    header "System"
+
+    if [ -f /usr/bin/aios ]; then
+        SIZE=$(du -h /usr/bin/aios | cut -f1)
+        pass "AiOS binary installed ($SIZE)"
+    else
+        fail "AiOS binary not found"
+    fi
+
+    KB=$(cat /etc/default/keyboard 2>/dev/null | grep XKBLAYOUT | cut -d'"' -f2 || echo "unknown")
+    pass "Keyboard layout: $KB"
+
+    TZ=$(cat /etc/timezone 2>/dev/null || echo "unknown")
+    pass "Timezone: $TZ"
+
+    MEM=$(free -h 2>/dev/null | awk '/^Mem:/{print $2}')
+    pass "RAM: $MEM"
+
+    CPUS=$(nproc 2>/dev/null || echo "?")
+    pass "CPUs: $CPUS"
+
+    if pgrep -x spice-vdagentd &>/dev/null; then
+        pass "SPICE agent daemon running (clipboard sharing)"
+    else
+        warn "spice-vdagentd not running — clipboard won't work"
+    fi
+
+    if pgrep -x spice-vdagent &>/dev/null; then
+        pass "SPICE agent running"
+    else
+        warn "spice-vdagent not running"
+    fi
+
+    if [ -f /home/aios/.aios/vault.enc ]; then
+        pass "Vault exists (API keys stored)"
+    else
+        warn "No vault — run first-boot setup"
+    fi
+fi
+
+# ── Summary ──
+echo ""
+echo -e "${BOLD}═══════════════════════════════════════${NC}"
+echo -e "  ${GREEN}Passed: $PASS${NC}  ${RED}Failed: $FAIL${NC}  ${YELLOW}Warnings: $WARN${NC}"
+if [ $FAIL -eq 0 ]; then
+    echo -e "  ${GREEN}${BOLD}All critical tests passed!${NC}"
 else
-    echo "WARN: Failed to download whisper.cpp — STT will not work"
+    echo -e "  ${RED}${BOLD}$FAIL test(s) failed — see above${NC}"
+fi
+echo -e "${BOLD}═══════════════════════════════════════${NC}"
+TESTEOF
+chmod +x /usr/bin/aios-test
+
+# ── Install whisper.cpp for STT (build from source) ──
+echo "[AiOS] Building whisper.cpp from source..."
+WHISPER_VERSION="1.7.4"
+if [ ! -f /usr/bin/whisper-cpp-cli ]; then
+    cd /tmp
+    curl -fsSL "https://github.com/ggerganov/whisper.cpp/archive/refs/tags/v${WHISPER_VERSION}.tar.gz" -o whisper-src.tar.gz 2>/dev/null && \
+    tar xzf whisper-src.tar.gz && \
+    cd "whisper.cpp-${WHISPER_VERSION}" && \
+    make -j$(nproc) main 2>/dev/null && \
+    cp main /usr/bin/whisper-cpp-cli && \
+    chmod +x /usr/bin/whisper-cpp-cli && \
+    echo "[AiOS] whisper-cpp-cli built and installed" || \
+    echo "WARN: Failed to build whisper.cpp — STT will not work"
+    cd /
+    rm -rf /tmp/whisper*
 fi
 
 # Download whisper tiny model (75MB, good for real-time on most hardware)
 WHISPER_MODEL_DIR="/home/aios/.aios/models/whisper"
 mkdir -p "${WHISPER_MODEL_DIR}"
-WHISPER_MODEL_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin"
 if [ ! -f "${WHISPER_MODEL_DIR}/ggml-tiny.bin" ]; then
     echo "[AiOS] Downloading whisper tiny model..."
-    curl -fsSL "${WHISPER_MODEL_URL}" -o "${WHISPER_MODEL_DIR}/ggml-tiny.bin" 2>/dev/null || \
+    curl -fsSL "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin" \
+        -o "${WHISPER_MODEL_DIR}/ggml-tiny.bin" 2>/dev/null || \
         echo "WARN: Failed to download whisper model"
 fi
 
@@ -364,14 +685,12 @@ if [ ! -f "${PIPER_VOICE_DIR}/en_US-amy-medium.onnx" ]; then
     curl -fsSL "${VOICE_URL}/en_US-amy-medium.onnx.json" -o "${PIPER_VOICE_DIR}/en_US-amy-medium.onnx.json" 2>/dev/null || true
 fi
 
-# ── AiOS config (read API keys from .env if available) ──
-CLAUDE_KEY=""
-OPENAI_KEY=""
-if [ -f /work/.env ]; then
-    CLAUDE_KEY=$(grep -oP 'CLAUDE_API_KEY\s*=\s*\K\S+' /work/.env 2>/dev/null || true)
-    OPENAI_KEY=$(grep -oP 'OPENAI_API_KEY\s*=\s*\K\S+' /work/.env 2>/dev/null || true)
-    [ "$OPENAI_KEY" = "your-api-key-here" ] && OPENAI_KEY=""
-fi
+# ── AiOS config (API keys from build config, injected before chroot) ──
+# CLAUDE_KEY and OPENAI_KEY are already set from /tmp/aios-build-config
+[ -z "${CLAUDE_KEY:-}" ] && CLAUDE_KEY=""
+[ -z "${OPENAI_KEY:-}" ] && OPENAI_KEY=""
+[ "$OPENAI_KEY" = "your-api-key-here" ] && OPENAI_KEY=""
+echo "[AiOS] Config: claude_key=$([ -n "$CLAUDE_KEY" ] && echo 'set' || echo 'empty') openai_key=$([ -n "$OPENAI_KEY" ] && echo 'set' || echo 'empty')"
 mkdir -p /home/aios/.aios/{models/whisper,models/piper,plugins,memory}
 cat > /home/aios/.aios/config.json << CFGEOF
 {
@@ -394,7 +713,13 @@ cat > /home/aios/.aios/config.json << CFGEOF
     "tts_rate": 1.0
   },
   "ui": { "theme": "dark" },
-  "system": { "keyboard_layout": "us" }
+  "system": { "keyboard_layout": "${KB_LAYOUT}" },
+  "channels": {
+    "web": {
+      "enabled": true,
+      "port": 80
+    }
+  }
 }
 CFGEOF
 
@@ -555,38 +880,33 @@ log "HOME=$HOME"
 # Dark background
 swaybg -m solid_color -c '#1a1a2e' >> "$LOGFILE" 2>&1 &
 
-# Desktop hint — shown when AiOS window is closed
-# Creates a small foot terminal with the hint text
-show_hint() {
-    foot --title="AiOS Hint" -W 60x3 -- bash -c '
-        echo ""
-        echo "  Press Super or Ctrl+Space to open AiOS"
-        echo ""
-        read -r
-    ' >> "$LOGFILE" 2>&1 &
-}
-
-# Launch AiOS in a loop — restart if user closes the window
+# Launch AiOS — restart on crash, exit cleanly on normal close
+CRASH_COUNT=0
 while true; do
     log "Launching /usr/bin/aios..."
     /usr/bin/aios >> "$LOGFILE" 2>&1
     EXIT_CODE=$?
     log "AiOS exited with code $EXIT_CODE"
 
-    if [ $EXIT_CODE -ne 0 ] && [ $EXIT_CODE -ne 0 ]; then
-        # Show error terminal on crash
-        log "AiOS crashed, showing debug terminal..."
-        foot -e bash -c "cat /tmp/aios-boot.log; echo; echo 'AiOS crashed (exit $EXIT_CODE). Press Enter to restart...'; read" 2>/dev/null
+    if [ $EXIT_CODE -eq 0 ]; then
+        # Normal close — just restart it after a short pause
+        log "AiOS closed normally, restarting in 1s..."
+        CRASH_COUNT=0
+        sleep 1
     else
-        # Normal close — show hint and wait for relaunch
-        log "AiOS closed normally, showing hint..."
-        show_hint
-        # Wait until aios is launched again (via keybinding)
-        while ! pgrep -x aios >/dev/null 2>&1; do
-            sleep 1
-        done
-        # Kill the hint terminal
-        pkill -f "AiOS Hint" 2>/dev/null
+        # Crash — increment counter, restart with backoff
+        CRASH_COUNT=$((CRASH_COUNT + 1))
+        log "AiOS crashed (exit $EXIT_CODE), crash count: $CRASH_COUNT"
+
+        if [ $CRASH_COUNT -ge 5 ]; then
+            # Too many crashes — show debug terminal and stop
+            log "Too many crashes, showing debug terminal"
+            foot -e bash -c "echo 'AiOS crashed $CRASH_COUNT times.'; echo; tail -50 /tmp/aios-boot.log; echo; echo 'Press Enter to retry...'; read" 2>/dev/null
+            CRASH_COUNT=0
+        else
+            # Brief pause before restart
+            sleep 2
+        fi
     fi
 done
 EOF
