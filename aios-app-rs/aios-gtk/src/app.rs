@@ -663,7 +663,7 @@ impl AiosApp {
         if !config.get_str("llm.openai_api_key", "").is_empty() {
             let k = config.get_str("llm.openai_api_key", "");
             if k != "your-api-key-here" {
-                available_providers.push("OpenAI");
+                available_providers.push("ChatGPT");
             }
         }
         let provider_refs: Vec<&str> = available_providers.iter().map(|s| *s).collect();
@@ -754,7 +754,7 @@ impl AiosApp {
                 status.add(StatusLine::new("Backup", true, "Claude available"));
             }
             if has_openai && provider != "openai" {
-                status.add(StatusLine::new("Backup", true, "OpenAI available"));
+                status.add(StatusLine::new("Backup", true, "ChatGPT available"));
             }
 
             // -- Voice --

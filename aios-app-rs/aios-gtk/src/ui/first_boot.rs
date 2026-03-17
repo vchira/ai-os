@@ -155,7 +155,7 @@ impl SetupConversation {
             SetupStep::ChooseProvider => {
                 if lower.contains("claude") || lower.contains("anthropic") {
                     self.select_provider("claude");
-                } else if lower.contains("openai") || lower.contains("gpt") {
+                } else if lower.contains("openai") || lower.contains("gpt") || lower.contains("chatgpt") {
                     self.select_provider("openai");
                 }
                 // Ignore unrecognized voice input.
@@ -181,7 +181,7 @@ impl SetupConversation {
             SetupStep::ProviderOrder => {
                 if lower.contains("claude") || lower.contains("anthropic") {
                     self.set_primary_order("claude");
-                } else if lower.contains("openai") || lower.contains("gpt") {
+                } else if lower.contains("openai") || lower.contains("gpt") || lower.contains("chatgpt") {
                     self.set_primary_order("openai");
                 }
             }
@@ -524,9 +524,9 @@ impl SetupConversation {
 
         input_box.append(&claude_btn);
 
-        // OpenAI button.
+        // ChatGPT button.
         let openai_btn = Self::make_provider_button(
-            "OpenAI",
+            "ChatGPT (OpenAI)",
             "GPT-4o with broad general knowledge and tool use",
         );
         input_box.append(&openai_btn);
@@ -547,13 +547,13 @@ impl SetupConversation {
 
         let this = self.clone();
         openai_btn.connect_clicked(move |_| {
-            if let Some(ref h) = handle { h.dismiss("OpenAI"); }
+            if let Some(ref h) = handle { h.dismiss("ChatGPT (OpenAI)"); }
             this.select_provider("openai");
         });
 
         self.speak(
             "Which AI provider would you like to use? \
-             You can say Claude or OpenAI.",
+             You can say Claude or ChatGPT.",
         );
     }
 
@@ -592,7 +592,7 @@ impl SetupConversation {
         // Show a user-style confirmation message.
         let display = match provider {
             "claude" => "Claude (Anthropic)",
-            "openai" => "OpenAI",
+            "openai" => "ChatGPT (OpenAI)",
             other => other,
         };
         self.chat_view.add_message("user", display);
@@ -618,7 +618,7 @@ impl SetupConversation {
                  The key starts with sk-ant-...".to_string(),
             ),
             "openai" => (
-                "Enter Your OpenAI API Key".to_string(),
+                "Enter Your ChatGPT API Key".to_string(),
                 "How to get your key:\n\
                  1. Go to platform.openai.com\n\
                  2. Sign in or create an account\n\
@@ -952,7 +952,7 @@ impl SetupConversation {
     fn show_add_backup(&self) {
         let primary = self.state.borrow().primary_provider.clone();
         let other_name = if primary == "claude" {
-            "OpenAI"
+            "ChatGPT (OpenAI)"
         } else {
             "Claude"
         };
@@ -1003,10 +1003,10 @@ impl SetupConversation {
 
             self.chat_view.add_message("user", &format!(
                 "Yes, add {}",
-                if backup == "claude" { "Claude" } else { "OpenAI" }
+                if backup == "claude" { "Claude" } else { "ChatGPT (OpenAI)" }
             ));
 
-            let display = if backup == "claude" { "Claude" } else { "OpenAI" };
+            let display = if backup == "claude" { "Claude" } else { "ChatGPT (OpenAI)" };
             self.advance_with_choice(SetupStep::EnterBackupKey {
                 provider: backup.to_owned(),
             }, Some(&format!("Add {display}")));
@@ -1032,7 +1032,7 @@ impl SetupConversation {
         for p in &providers {
             let display = match p.name.as_str() {
                 "claude" => "Claude (Anthropic)",
-                "openai" => "OpenAI",
+                "openai" => "ChatGPT (OpenAI)",
                 other => other,
             };
 
@@ -1058,7 +1058,7 @@ impl SetupConversation {
 
         self.speak(
             "Which provider should be your primary AI? \
-             Say Claude or OpenAI.",
+             Say Claude or ChatGPT.",
         );
     }
 
@@ -1077,7 +1077,7 @@ impl SetupConversation {
 
         let display = match primary {
             "claude" => "Claude (Anthropic)",
-            "openai" => "OpenAI",
+            "openai" => "ChatGPT (OpenAI)",
             other => other,
         };
         self.chat_view
@@ -1096,7 +1096,7 @@ impl SetupConversation {
             let role = if i == 0 { "Primary" } else { "Backup" };
             let display = match p.name.as_str() {
                 "claude" => "Claude (Anthropic)",
-                "openai" => "OpenAI",
+                "openai" => "ChatGPT (OpenAI)",
                 other => other,
             };
             summary_lines.push(format!("\u{2713} {display} as {}", role.to_lowercase()));
