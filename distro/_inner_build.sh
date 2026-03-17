@@ -165,8 +165,9 @@ fi
 echo "[*] Build config: keyboard=${_KB_LAYOUT} version=${_AIOS_VERSION} claude_key=$([ -n "$_CLAUDE_KEY" ] && echo 'set' || echo 'empty')"
 
 # Write build config where the chroot can read it
-mkdir -p config/includes.chroot/tmp
-cat > config/includes.chroot/tmp/aios-build-config << BUILDCFG
+# Use /opt/aios-app/ instead of /tmp/ — live-build cleans /tmp before hooks run
+mkdir -p config/includes.chroot/opt/aios-app
+cat > config/includes.chroot/opt/aios-app/build-config << BUILDCFG
 KB_LAYOUT=${_KB_LAYOUT}
 CLAUDE_KEY=${_CLAUDE_KEY}
 OPENAI_KEY=${_OPENAI_KEY}
@@ -179,8 +180,8 @@ cat > config/hooks/live/0100-setup-aios.hook.chroot << 'EOF'
 set -e
 
 # Read build config (written by _inner_build.sh outside chroot)
-if [ -f /tmp/aios-build-config ]; then
-    source /tmp/aios-build-config
+if [ -f /opt/aios-app/build-config ]; then
+    source /opt/aios-app/build-config
     echo "[AiOS] Build config loaded: keyboard=${KB_LAYOUT} version=${AIOS_VERSION}"
 else
     echo "[AiOS] WARNING: No build config found, using defaults"
@@ -248,14 +249,27 @@ Description=SPICE guest agent daemon
 After=network.target
 
 [Service]
-Type=forking
-ExecStart=/usr/sbin/spice-vdagentd
+Type=simple
+ExecStart=/usr/sbin/spice-vdagentd -f
 Restart=on-failure
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
 SVCEOF
 fi
+# Override stock service: remove ConditionPathExists (device may not be ready at
+# service start on live systems) and add restart so it retries
+mkdir -p /etc/systemd/system/spice-vdagentd.service.d
+cat > /etc/systemd/system/spice-vdagentd.service.d/override.conf << 'OVEOF'
+[Unit]
+ConditionVirtualization=
+ConditionPathExists=
+
+[Service]
+Restart=on-failure
+RestartSec=2
+OVEOF
 systemctl enable spice-vdagentd 2>/dev/null || true
 
 # ── SSH server — enable for remote access + updates ──
@@ -282,6 +296,25 @@ if [ -f /opt/aios-app/aios ]; then
     chmod +x /usr/bin/aios
     # Allow binding to port 80 without root
     setcap cap_net_bind_service=+ep /usr/bin/aios 2>/dev/null || true
+    echo "net.ipv4.ip_unprivileged_port_start=80" > /etc/sysctl.d/99-aios-ports.conf
+    # Systemd service to guarantee sysctl is applied at boot
+    # (sysctl.d may not be loaded reliably on live systems)
+    cat > /etc/systemd/system/aios-ports.service << 'PORTSEOF'
+[Unit]
+Description=Allow AiOS to bind port 80
+DefaultDependencies=no
+Before=greetd.service
+After=systemd-sysctl.service
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/sysctl -w net.ipv4.ip_unprivileged_port_start=80
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target
+PORTSEOF
+    systemctl enable aios-ports.service
     echo "[AiOS] Binary installed to /usr/bin/aios"
 else
     echo "WARN: AiOS binary not found at /opt/aios-app/aios"
@@ -512,7 +545,12 @@ print(f'{rms:.1f}')
         fi
         rm -f /tmp/aios-mic-test.wav
     else
-        fail "arecord failed — no microphone available"
+        # Recording device detected but arecord failed — likely a VM without mic passthrough
+        if systemd-detect-virt -q 2>/dev/null; then
+            warn "arecord failed — VM detected, mic input not available (expected)"
+        else
+            fail "arecord failed — no microphone available"
+        fi
     fi
 
     if command -v whisper-cpp-cli &>/dev/null; then
@@ -565,12 +603,10 @@ if [ "$FILTER" = "all" ] || [ "$FILTER" = "network" ]; then
 
     if ss -tlnp 2>/dev/null | grep -q ":80 "; then
         pass "Web server listening on port 80"
+    elif ss -tlnp 2>/dev/null | grep -q ":8080 "; then
+        pass "Web server listening on port 8080"
     else
-        if ss -tlnp 2>/dev/null | grep -q ":8080 "; then
-            pass "Web server listening on port 8080"
-        else
-            fail "Web server not listening"
-        fi
+        fail "Web server not listening"
     fi
 
     if ss -tlnp 2>/dev/null | grep -q ":22 "; then
@@ -606,13 +642,24 @@ if [ "$FILTER" = "all" ] || [ "$FILTER" = "system" ]; then
     if pgrep -x spice-vdagentd &>/dev/null; then
         pass "SPICE agent daemon running (clipboard sharing)"
     else
-        warn "spice-vdagentd not running — clipboard won't work"
+        # Try starting it — socket activation may not have triggered yet
+        sudo systemctl start spice-vdagentd.service 2>/dev/null
+        sleep 0.5
+        if pgrep -x spice-vdagentd &>/dev/null; then
+            pass "SPICE agent daemon running (started on demand)"
+        else
+            warn "spice-vdagentd not running — clipboard won't work"
+        fi
     fi
 
     if pgrep -x spice-vdagent &>/dev/null; then
-        pass "SPICE agent running"
+        pass "SPICE user agent running"
     else
-        warn "spice-vdagent not running"
+        if [ "$XDG_SESSION_TYPE" = "wayland" ] || [ -n "$WAYLAND_DISPLAY" ]; then
+            warn "spice-vdagent not running — X11 agent, Wayland not supported"
+        else
+            warn "spice-vdagent not running"
+        fi
     fi
 
     if [ -f /home/aios/.aios/vault.enc ]; then
@@ -639,17 +686,33 @@ chmod +x /usr/bin/aios-test
 echo "[AiOS] Building whisper.cpp from source..."
 WHISPER_VERSION="1.7.4"
 if [ ! -f /usr/bin/whisper-cpp-cli ]; then
+    # whisper.cpp v1.6+ requires CMake
+    apt-get install -y -qq cmake >/dev/null 2>&1
     cd /tmp
-    curl -fsSL "https://github.com/ggerganov/whisper.cpp/archive/refs/tags/v${WHISPER_VERSION}.tar.gz" -o whisper-src.tar.gz 2>/dev/null && \
-    tar xzf whisper-src.tar.gz && \
-    cd "whisper.cpp-${WHISPER_VERSION}" && \
-    make -j$(nproc) main 2>/dev/null && \
-    cp main /usr/bin/whisper-cpp-cli && \
-    chmod +x /usr/bin/whisper-cpp-cli && \
-    echo "[AiOS] whisper-cpp-cli built and installed" || \
-    echo "WARN: Failed to build whisper.cpp — STT will not work"
+    if curl -fsSL "https://github.com/ggerganov/whisper.cpp/archive/refs/tags/v${WHISPER_VERSION}.tar.gz" -o whisper-src.tar.gz 2>/dev/null && \
+       tar xzf whisper-src.tar.gz && \
+       cd "whisper.cpp-${WHISPER_VERSION}" && \
+       cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF 2>/dev/null && \
+       cmake --build build --config Release -j"$(nproc)" 2>/dev/null; then
+        # Find the built binary (whisper-cli in v1.7+)
+        BUILT_BIN=$(find build -name 'whisper-cli' -type f 2>/dev/null | head -1)
+        if [ -z "$BUILT_BIN" ]; then
+            BUILT_BIN=$(find build -name 'main' -type f -executable 2>/dev/null | head -1)
+        fi
+        if [ -n "$BUILT_BIN" ]; then
+            cp "$BUILT_BIN" /usr/bin/whisper-cpp-cli
+            chmod +x /usr/bin/whisper-cpp-cli
+            echo "[AiOS] whisper-cpp-cli built and installed"
+        else
+            echo "WARN: whisper.cpp built but binary not found — STT will not work"
+        fi
+    else
+        echo "WARN: Failed to build whisper.cpp — STT will not work"
+    fi
     cd /
     rm -rf /tmp/whisper*
+    apt-get remove -y -qq cmake cmake-data >/dev/null 2>&1 || true
+    apt-get autoremove -y -qq >/dev/null 2>&1 || true
 fi
 
 # Download whisper tiny model (75MB, good for real-time on most hardware)
@@ -754,10 +817,16 @@ if [ -z "${XDG_RUNTIME_DIR}" ]; then
     echo "Set XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}"
 fi
 
-# Start spice-vdagent for clipboard sharing with host
-# (spice-vdagentd system daemon is started via systemd)
-spice-vdagent 2>/dev/null &
-sleep 0.2
+# Start SPICE clipboard agent (daemon via systemd + user agent)
+if [ -e /dev/virtio-ports/com.redhat.spice.0 ]; then
+    # Start the system daemon via systemd (uses socket activation)
+    sudo systemctl start spice-vdagentd.service 2>/dev/null || true
+    sleep 0.5
+    spice-vdagent 2>/dev/null &
+    echo "SPICE agent started"
+else
+    echo "No SPICE device — skipping vdagent"
+fi
 
 # Ensure PipeWire is running for audio
 if ! pgrep -x pipewire >/dev/null; then
@@ -844,6 +913,9 @@ chown -R aios:aios /home/aios
 
 # ── Enable PipeWire ──
 systemctl --global enable pipewire pipewire-pulse wireplumber 2>/dev/null || true
+
+# ── Clean up build config (contains API keys) ──
+rm -f /opt/aios-app/build-config
 
 # ── Build marker ──
 date > /etc/aios-build-marker
