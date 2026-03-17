@@ -142,6 +142,14 @@ pub fn detect_country_blocking(callback: impl FnOnce(Option<&'static CountryDefa
 }
 
 /// Synchronous country detection using `reqwest::blocking`.
+///
+/// Public variant for direct use from background threads.
+/// Returns `None` if the request fails or the country is not in our table.
+pub fn detect_country_sync_pub() -> Option<&'static CountryDefaults> {
+    detect_country_sync()
+}
+
+/// Synchronous country detection using `reqwest::blocking`.
 fn detect_country_sync() -> Option<&'static CountryDefaults> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(5))

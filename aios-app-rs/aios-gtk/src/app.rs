@@ -610,6 +610,36 @@ impl AiosApp {
                 let _ = config.set("system.machine_name", serde_json::json!(result.machine_name));
             }
 
+            // Apply country-derived settings to the live or installed system.
+            if let Some(ref country) = result.country {
+                let _ = std::process::Command::new("sudo")
+                    .args(["localectl", "set-x11-keymap", country.keyboard])
+                    .status();
+                let _ = std::process::Command::new("sudo")
+                    .args(["timedatectl", "set-timezone", country.timezone])
+                    .status();
+
+                if let Ok(mut cfg) = ConfigManager::new() {
+                    let _ = cfg.set("system.keyboard_layout", serde_json::json!(country.keyboard));
+                    let _ = cfg.set("system.timezone", serde_json::json!(country.timezone));
+                    let _ = cfg.set("system.language", serde_json::json!(country.language));
+                    let _ = cfg.set("system.time_format_24h", serde_json::json!(country.time_format_24h));
+                }
+            }
+
+            // Update SSH password from default 'aios' to the master password.
+            let _ = std::process::Command::new("sudo")
+                .args(["chpasswd"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        use std::io::Write;
+                        let _ = stdin.write_all(format!("aios:{}\n", result.master_password).as_bytes());
+                    }
+                    child.wait()
+                });
+
             // Update display name
             crate::ui::chat_view::set_assistant_display_name(&result.assistant_name);
 
@@ -620,6 +650,13 @@ impl AiosApp {
             let _ = std::process::Command::new("sudo")
                 .args(["systemctl", "restart", "avahi-daemon"])
                 .status();
+
+            // If installation to hard drive was done, the reboot dialog is
+            // already showing — do not transition to normal mode.
+            if result.installed_to_drive {
+                info!("Installation completed — reboot dialog is showing, skipping normal mode transition");
+                return;
+            }
 
             // Transition to normal mode: initialize LLM, wire up the real
             // prompt handler, and show the ready message.

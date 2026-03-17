@@ -278,5 +278,53 @@
   "cmd.channel.signal_disabled": "Signal channel disabled. Restart required.",
   "cmd.channel.signal_phone_set": "Signal phone set to {value}.",
   "cmd.channel.usage": "Usage: /channel web|signal on|off|port|phone [value]",
-  "cmd.info.title": "AiOS System Information"
+  "cmd.info.title": "AiOS System Information",
+
+  "setup.country.title": "Choose Your Country",
+  "setup.country.description": "Select your country to configure language, keyboard, timezone, and time format.",
+  "setup.country.next": "Next \u2192",
+  "setup.country.tts": "Please select your country.",
+
+  "setup.install_decision.title": "Install to Hard Drive?",
+  "setup.install_decision.description": "Would you like to install AiOS to a hard drive, or continue running from USB?",
+  "setup.install_decision.install": "Install to hard drive",
+  "setup.install_decision.usb": "Continue from USB",
+  "setup.install_decision.user_yes": "Install to hard drive",
+  "setup.install_decision.user_no": "Continue from USB",
+  "setup.install_decision.tts": "Would you like to install AiOS to a hard drive?",
+
+  "setup.drive_selection.title": "Select Target Drive",
+  "setup.drive_selection.description": "Choose the drive where AiOS will be installed.",
+  "setup.drive_selection.no_drives": "No eligible drives found. All detected drives are either the live USB or too small.",
+  "setup.drive_selection.no_partitions": "No existing partitions",
+  "setup.drive_selection.next": "Next \u2192",
+  "setup.drive_selection.back": "\u2190 Back",
+  "setup.drive_selection.tts": "Please select the target drive for installation.",
+
+  "setup.partition_plan.title": "Partition Plan",
+  "setup.partition_plan.description": "The following partitions will be created on the selected drive.",
+  "setup.partition_plan.warning": "This will ERASE all data on {drive}.",
+  "setup.partition_plan.continue": "Continue",
+  "setup.partition_plan.cancel": "Cancel",
+  "setup.partition_plan.user_continue": "Continue with partitioning",
+  "setup.partition_plan.user_cancel": "Cancel installation",
+
+  "setup.install_confirm.title": "Ready to Install",
+  "setup.install_confirm.card_title": "Confirm Installation",
+  "setup.install_confirm.card_description": "Review the summary above and click Install to begin.",
+  "setup.install_confirm.country": "Country",
+  "setup.install_confirm.locale": "Locale",
+  "setup.install_confirm.target": "Target Drive",
+  "setup.install_confirm.partitions": "Partitions",
+  "setup.install_confirm.install": "Install AiOS",
+  "setup.install_confirm.cancel": "Cancel",
+  "setup.install_confirm.user_install": "Install AiOS",
+  "setup.install_confirm.user_cancel": "Cancel installation",
+
+  "setup.install_progress.starting": "Starting installation...",
+  "setup.install_progress.failed": "Installation failed:",
+
+  "setup.reboot.title": "Installation Complete!",
+  "setup.reboot.body": "Remove the USB drive and press Reboot.",
+  "setup.reboot.button": "Reboot"
 }

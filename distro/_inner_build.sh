@@ -127,6 +127,11 @@ libgbm-dev
 scdoc
 hwdata
 libseat-dev
+squashfs-tools
+gdisk
+dosfstools
+grub-efi-amd64
+grub-pc
 EOF
 
 # ─── Hooks ──────────────────────────────────────────────────

@@ -57,6 +57,7 @@ dependencies = [
  "libc",
  "rand",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

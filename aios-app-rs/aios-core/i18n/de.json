@@ -278,5 +278,53 @@
   "cmd.channel.signal_disabled": "Signal-Kanal deaktiviert. Neustart erforderlich.",
   "cmd.channel.signal_phone_set": "Signal-Telefonnummer auf {value} gesetzt.",
   "cmd.channel.usage": "Verwendung: /channel web|signal on|off|port|phone [Wert]",
-  "cmd.info.title": "AiOS Systeminformationen"
+  "cmd.info.title": "AiOS Systeminformationen",
+
+  "setup.country.title": "Land auswählen",
+  "setup.country.description": "Wähle dein Land, um Sprache, Tastaturlayout, Zeitzone und Zeitformat zu konfigurieren.",
+  "setup.country.next": "Weiter \u2192",
+  "setup.country.tts": "Bitte wähle dein Land aus.",
+
+  "setup.install_decision.title": "Auf Festplatte installieren?",
+  "setup.install_decision.description": "Möchtest du AiOS auf einer Festplatte installieren oder weiter vom USB-Stick starten?",
+  "setup.install_decision.install": "Auf Festplatte installieren",
+  "setup.install_decision.usb": "Vom USB-Stick weiter",
+  "setup.install_decision.user_yes": "Auf Festplatte installieren",
+  "setup.install_decision.user_no": "Vom USB-Stick weiter",
+  "setup.install_decision.tts": "Möchtest du AiOS auf einer Festplatte installieren?",
+
+  "setup.drive_selection.title": "Ziellaufwerk auswählen",
+  "setup.drive_selection.description": "Wähle das Laufwerk, auf dem AiOS installiert werden soll.",
+  "setup.drive_selection.no_drives": "Keine geeigneten Laufwerke gefunden. Alle erkannten Laufwerke sind entweder der Live-USB oder zu klein.",
+  "setup.drive_selection.no_partitions": "Keine vorhandenen Partitionen",
+  "setup.drive_selection.next": "Weiter \u2192",
+  "setup.drive_selection.back": "\u2190 Zurück",
+  "setup.drive_selection.tts": "Bitte wähle das Ziellaufwerk für die Installation.",
+
+  "setup.partition_plan.title": "Partitionsplan",
+  "setup.partition_plan.description": "Die folgenden Partitionen werden auf dem ausgewählten Laufwerk erstellt.",
+  "setup.partition_plan.warning": "Dies wird ALLE Daten auf {drive} LÖSCHEN.",
+  "setup.partition_plan.continue": "Fortfahren",
+  "setup.partition_plan.cancel": "Abbrechen",
+  "setup.partition_plan.user_continue": "Mit Partitionierung fortfahren",
+  "setup.partition_plan.user_cancel": "Installation abbrechen",
+
+  "setup.install_confirm.title": "Bereit zur Installation",
+  "setup.install_confirm.card_title": "Installation bestätigen",
+  "setup.install_confirm.card_description": "Überprüfe die Zusammenfassung oben und klicke auf Installieren.",
+  "setup.install_confirm.country": "Land",
+  "setup.install_confirm.locale": "Lokalisierung",
+  "setup.install_confirm.target": "Ziellaufwerk",
+  "setup.install_confirm.partitions": "Partitionen",
+  "setup.install_confirm.install": "AiOS installieren",
+  "setup.install_confirm.cancel": "Abbrechen",
+  "setup.install_confirm.user_install": "AiOS installieren",
+  "setup.install_confirm.user_cancel": "Installation abbrechen",
+
+  "setup.install_progress.starting": "Installation wird gestartet...",
+  "setup.install_progress.failed": "Installation fehlgeschlagen:",
+
+  "setup.reboot.title": "Installation abgeschlossen!",
+  "setup.reboot.body": "Entferne den USB-Stick und drücke Neustart.",
+  "setup.reboot.button": "Neustart"
 }
