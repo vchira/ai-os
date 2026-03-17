@@ -4,8 +4,23 @@
 //! styled chat messages (user, assistant, system, tool) with automatic
 //! code block detection.
 
+use std::cell::RefCell;
+
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Align, Orientation};
+
+// ---------------------------------------------------------------------------
+// Assistant display name — configurable at runtime
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    static ASSISTANT_NAME: RefCell<String> = RefCell::new("Assistant".to_string());
+}
+
+/// Set the display name shown for assistant messages in the chat view.
+pub fn set_assistant_display_name(name: &str) {
+    ASSISTANT_NAME.with(|n| *n.borrow_mut() = name.to_string());
+}
 
 // ---------------------------------------------------------------------------
 // CardHandle — allows a card to dismiss its own interactive input
@@ -420,7 +435,7 @@ fn split_code_blocks(content: &str) -> Vec<ContentPart> {
 fn role_display_name(role: &str) -> String {
     match role {
         "user" => "You".to_string(),
-        "assistant" => "AiOS".to_string(),
+        "assistant" => ASSISTANT_NAME.with(|n| n.borrow().clone()),
         "system" => "System".to_string(),
         "tool" => "Tool".to_string(),
         other => other.to_string(),

@@ -360,6 +360,10 @@ impl AiosApp {
             }
         };
 
+        // Apply assistant display name from config.
+        let assistant_name = config.get_str("assistant.name", "Assistant");
+        crate::ui::chat_view::set_assistant_display_name(&assistant_name);
+
         // Create the shared AppRuntime for multi-channel orchestration.
         let runtime = aios_core::channel::AppRuntime::new();
 
@@ -823,6 +827,10 @@ impl AiosApp {
         // Show boot status on Desktop.
         chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
         chat_view.add_message("system", "Type a message or use /help to see available commands.");
+
+        // Apply assistant display name from config.
+        let assistant_name = config.get_str("assistant.name", "Assistant");
+        crate::ui::chat_view::set_assistant_display_name(&assistant_name);
 
         // --- Channel infrastructure ---
 
