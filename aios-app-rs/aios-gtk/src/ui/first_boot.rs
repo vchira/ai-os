@@ -36,6 +36,12 @@ pub struct SetupResult {
     pub providers: Vec<ProviderSetup>,
     /// The master password chosen by the user.
     pub master_password: String,
+    /// The display name for the AI assistant.
+    pub assistant_name: String,
+    /// The wake word used to activate the assistant by voice.
+    pub wake_word: String,
+    /// The network hostname (reachable as `<name>.local`).
+    pub machine_name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +54,7 @@ enum SetupStep {
     Welcome,
     TestAudioOutput,
     TestAudioInput,
+    NameAssistant,
     ChooseProvider,
     EnterApiKey { provider: String },
     CreatePassword,
@@ -74,6 +81,14 @@ struct SetupState {
     pending_password: String,
     /// The primary provider chosen in ChooseProvider.
     primary_provider: String,
+    /// The display name for the AI assistant (shown in chat).
+    assistant_name: String,
+    /// Whether to use the same name for wake word and hostname.
+    use_same_name: bool,
+    /// Custom wake word (if use_same_name is false).
+    wake_word_custom: String,
+    /// Custom machine/hostname (if use_same_name is false).
+    machine_name_custom: String,
 }
 
 impl Default for SetupState {
@@ -85,6 +100,10 @@ impl Default for SetupState {
             master_password: String::new(),
             pending_password: String::new(),
             primary_provider: String::new(),
+            assistant_name: "Assistant".to_string(),
+            use_same_name: true,
+            wake_word_custom: "Assistant".to_string(),
+            machine_name_custom: "assistant".to_string(),
         }
     }
 }
@@ -157,7 +176,23 @@ impl SetupConversation {
                 // Any voice input means the mic works.
                 self.chat_view.add_message("system",
                     &format!("\u{2705} Mic works! I heard: \"{text}\""));
-                self.advance(SetupStep::ChooseProvider);
+                self.advance(SetupStep::NameAssistant);
+            }
+            SetupStep::NameAssistant => {
+                // Any voice input sets the assistant name and advances.
+                let name = text.trim().to_string();
+                if !name.is_empty() {
+                    let machine = name.to_lowercase().replace(' ', "-");
+                    {
+                        let mut s = self.state.borrow_mut();
+                        s.assistant_name = name.clone();
+                        s.wake_word_custom = name.clone();
+                        s.machine_name_custom = machine;
+                        s.use_same_name = true;
+                    }
+                    self.chat_view.add_message("user", &name);
+                    self.advance(SetupStep::ChooseProvider);
+                }
             }
             SetupStep::ChooseProvider => {
                 if lower.contains("claude") || lower.contains("anthropic") {
@@ -211,6 +246,7 @@ impl SetupConversation {
             SetupStep::Welcome => self.show_welcome(),
             SetupStep::TestAudioOutput => self.show_test_audio_output(),
             SetupStep::TestAudioInput => self.show_test_audio_input(),
+            SetupStep::NameAssistant => self.show_name_assistant(),
             SetupStep::ChooseProvider => self.show_choose_provider(),
             SetupStep::EnterApiKey { ref provider } => {
                 self.show_enter_api_key(provider.clone(), false);
@@ -352,7 +388,7 @@ impl SetupConversation {
             this.chat_view.add_message("user", "Skip audio test");
             this.chat_view.add_message("system",
                 "Audio output skipped. You can configure it later in Settings.");
-            this.advance(SetupStep::ChooseProvider);
+            this.advance(SetupStep::NameAssistant);
         });
 
         // Speak the test phrase.
@@ -495,7 +531,7 @@ impl SetupConversation {
             flag_for_works.store(false, std::sync::atomic::Ordering::Relaxed);
             if let Some(ref h) = h { h.dismiss("Microphone works"); }
             this.chat_view.add_message("user", "Microphone works!");
-            this.advance(SetupStep::ChooseProvider);
+            this.advance(SetupStep::NameAssistant);
         });
 
         // "Skip" button
@@ -509,12 +545,155 @@ impl SetupConversation {
             this.chat_view.add_message("user", "Skip mic test");
             this.chat_view.add_message("system",
                 "Mic test skipped. You can configure voice input later in Settings.");
-            this.advance(SetupStep::ChooseProvider);
+            this.advance(SetupStep::NameAssistant);
         });
 
         self.speak(
             "Now let's test your microphone. Please say something.",
         );
+    }
+
+    // -- Step 1d: Name Your Assistant ----------------------------------------
+
+    fn show_name_assistant(&self) {
+        let input_box = gtk::Box::new(Orientation::Vertical, 8);
+        input_box.set_margin_top(8);
+
+        // Assistant name
+        let name_label = gtk::Label::new(Some("Assistant name (shown in chat):"));
+        name_label.set_halign(Align::Start);
+        input_box.append(&name_label);
+
+        let name_entry = gtk::Entry::builder()
+            .text("Assistant")
+            .hexpand(true)
+            .build();
+        name_entry.add_css_class("setup-input");
+        input_box.append(&name_entry);
+
+        // Same-for-all toggle
+        let same_check = gtk::CheckButton::with_label(
+            "Use same name for wake word and network hostname",
+        );
+        same_check.set_active(true);
+        same_check.set_margin_top(8);
+        input_box.append(&same_check);
+
+        // Extra fields (hidden by default)
+        let extra_box = gtk::Box::new(Orientation::Vertical, 6);
+        extra_box.set_visible(false);
+        extra_box.set_margin_top(8);
+
+        let wake_label = gtk::Label::new(Some("Wake word (what you say to activate):"));
+        wake_label.set_halign(Align::Start);
+        extra_box.append(&wake_label);
+
+        let wake_entry = gtk::Entry::builder()
+            .text("Assistant")
+            .hexpand(true)
+            .build();
+        wake_entry.add_css_class("setup-input");
+        extra_box.append(&wake_entry);
+
+        let host_label = gtk::Label::new(Some("Network hostname (reachable as <name>.local):"));
+        host_label.set_halign(Align::Start);
+        extra_box.append(&host_label);
+
+        let host_entry = gtk::Entry::builder()
+            .text("assistant")
+            .hexpand(true)
+            .build();
+        host_entry.add_css_class("setup-input");
+        extra_box.append(&host_entry);
+
+        input_box.append(&extra_box);
+
+        // Toggle visibility of extra fields
+        {
+            let extra_ref = extra_box.clone();
+            same_check.connect_toggled(move |t| {
+                extra_ref.set_visible(!t.is_active());
+            });
+        }
+
+        let error_label = gtk::Label::new(None);
+        error_label.add_css_class("error");
+        error_label.set_visible(false);
+        error_label.set_halign(Align::Start);
+        input_box.append(&error_label);
+
+        let next_btn = gtk::Button::with_label("Next \u{2192}");
+        next_btn.add_css_class("suggested-action");
+        next_btn.set_halign(Align::Start);
+        next_btn.set_margin_top(4);
+        input_box.append(&next_btn);
+
+        let handle = self.chat_view.add_setup_card(
+            "avatar-default-symbolic",
+            "Name Your Assistant",
+            "Choose a name for your AI assistant.\n\
+             This is shown in chat, used as the wake word, and as the network hostname.",
+            Some(input_box.upcast_ref()),
+        );
+
+        let this = self.clone();
+        let name_ref = name_entry.clone();
+        let same_ref = same_check.clone();
+        let wake_ref = wake_entry.clone();
+        let host_ref = host_entry.clone();
+        let error_ref = error_label.clone();
+        next_btn.connect_clicked(move |b| {
+            let name = name_ref.text().to_string().trim().to_string();
+            if name.is_empty() {
+                error_ref.set_text("Please enter a name");
+                error_ref.set_visible(true);
+                return;
+            }
+
+            let use_same = same_ref.is_active();
+            let wake = if use_same {
+                name.clone()
+            } else {
+                wake_ref.text().to_string().trim().to_string()
+            };
+            let machine = if use_same {
+                name.to_lowercase().replace(' ', "-")
+            } else {
+                host_ref.text().to_string().trim().to_lowercase()
+            };
+
+            // Validate machine name
+            let machine_valid = !machine.is_empty()
+                && machine.len() <= 63
+                && machine.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !machine.starts_with('-')
+                && !machine.ends_with('-');
+
+            if !machine_valid {
+                error_ref.set_text("Invalid hostname: use lowercase letters, numbers, hyphens");
+                error_ref.set_visible(true);
+                return;
+            }
+
+            b.set_sensitive(false);
+            error_ref.set_visible(false);
+
+            {
+                let mut s = this.state.borrow_mut();
+                s.assistant_name = name.clone();
+                s.wake_word_custom = wake;
+                s.machine_name_custom = machine;
+                s.use_same_name = use_same;
+            }
+
+            this.chat_view.add_message("user", &name);
+            if let Some(ref h) = handle {
+                h.dismiss(&name);
+            }
+            this.advance(SetupStep::ChooseProvider);
+        });
+
+        self.speak("What would you like to call me? The default is Assistant.");
     }
 
     // -- Step 2: Choose Provider --------------------------------------------
@@ -1169,6 +1348,9 @@ impl SetupConversation {
                 format!("{display} (API key stored)"),
             ));
         }
+        status.add(StatusLine::new("Assistant name", true, &s.assistant_name));
+        status.add(StatusLine::new("Wake word", true, &s.wake_word_custom));
+        status.add(StatusLine::new("Network", true, format!("{}.local", s.machine_name_custom)));
         status.add(StatusLine::new("Master password", true, "set"));
         status.add(StatusLine::new("Vault", true, "created"));
         status.add(StatusLine::new("Web Channel", true, "http://aios.local"));
@@ -1208,9 +1390,22 @@ impl SetupConversation {
     fn finish(&self) {
         self.chat_view.dismiss_last_card_input();
         let s = self.state.borrow();
+        let wake = if s.use_same_name {
+            s.assistant_name.clone()
+        } else {
+            s.wake_word_custom.clone()
+        };
+        let machine = if s.use_same_name {
+            s.assistant_name.to_lowercase().replace(' ', "-")
+        } else {
+            s.machine_name_custom.clone()
+        };
         let result = SetupResult {
             providers: s.providers.clone(),
             master_password: s.master_password.clone(),
+            assistant_name: s.assistant_name.clone(),
+            wake_word: wake,
+            machine_name: machine,
         };
         drop(s);
 

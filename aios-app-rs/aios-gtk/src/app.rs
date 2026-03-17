@@ -420,6 +420,98 @@ impl AiosApp {
         // Show boot status on Desktop.
         chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
 
+        // Check for hostname collision (set by aios-hostname-check.service at boot).
+        if std::path::Path::new("/tmp/aios-name-conflict").exists() {
+            if let Ok(conflicting) = std::fs::read_to_string("/tmp/aios-name-conflict") {
+                let conflicting = conflicting.trim().to_string();
+                let random_suffix = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos() % 10000) as u16;
+                let suggestion = format!("{conflicting}-{random_suffix}");
+
+                chat_view.add_level_message(
+                    aios_core::types::MessageLevel::Warning,
+                    &format!("Hostname conflict: another machine on this network is already using '{conflicting}.local'"),
+                );
+
+                // Show rename card
+                let input_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+                input_box.set_margin_top(8);
+
+                let entry = gtk4::Entry::builder()
+                    .placeholder_text("New hostname")
+                    .text(&suggestion)
+                    .hexpand(true)
+                    .build();
+                input_box.append(&entry);
+
+                let hint = gtk4::Label::new(Some("Lowercase letters, numbers, and hyphens only. Will be reachable as <name>.local"));
+                hint.add_css_class("dim-label");
+                hint.set_halign(gtk4::Align::Start);
+                hint.set_wrap(true);
+                input_box.append(&hint);
+
+                let error_label = gtk4::Label::new(None);
+                error_label.add_css_class("error");
+                error_label.set_visible(false);
+                error_label.set_halign(gtk4::Align::Start);
+                input_box.append(&error_label);
+
+                let apply_btn = gtk4::Button::with_label("Apply");
+                apply_btn.add_css_class("suggested-action");
+                apply_btn.set_halign(gtk4::Align::Start);
+                apply_btn.set_margin_top(4);
+                input_box.append(&apply_btn);
+
+                let entry_ref = entry.clone();
+                let error_ref = error_label.clone();
+                let chat_ref = chat_view.clone();
+                apply_btn.connect_clicked(move |b| {
+                    let name = entry_ref.text().to_string().trim().to_lowercase();
+
+                    // Validate: lowercase alphanumeric + hyphens, 1-63 chars, no leading/trailing hyphens
+                    let valid = !name.is_empty()
+                        && name.len() <= 63
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                        && !name.starts_with('-')
+                        && !name.ends_with('-');
+
+                    if !valid {
+                        error_ref.set_text("Invalid hostname: use lowercase letters, numbers, hyphens (1-63 chars)");
+                        error_ref.set_visible(true);
+                        return;
+                    }
+
+                    b.set_sensitive(false);
+                    error_ref.set_visible(false);
+
+                    // Apply hostname change
+                    let _ = std::process::Command::new("sudo")
+                        .args(["hostnamectl", "set-hostname", &name])
+                        .status();
+                    let _ = std::process::Command::new("sudo")
+                        .args(["systemctl", "restart", "avahi-daemon"])
+                        .status();
+
+                    // Update config
+                    if let Ok(mut cfg) = aios_core::config::ConfigManager::new() {
+                        let _ = cfg.set("system.machine_name", serde_json::json!(name));
+                    }
+
+                    chat_ref.add_message("system", &format!("Hostname changed to '{name}'. Reachable as {name}.local"));
+                    let _ = std::fs::remove_file("/tmp/aios-name-conflict");
+                });
+
+                chat_view.add_setup_card(
+                    "network-server-symbolic",
+                    "Rename Your Machine",
+                    &format!("Another machine is using '{conflicting}' on this network.\nChoose a different name:"),
+                    Some(input_box.upcast_ref()),
+                );
+            }
+        }
+
         // Create the setup conversation with config for pre-filling API keys.
         let setup = SetupConversation::new(chat_view.clone(), Some(config));
 
@@ -490,7 +582,23 @@ impl AiosApp {
                         _ => {}
                     }
                 }
+
+                // Save assistant identity
+                let _ = config.set("assistant.name", serde_json::json!(result.assistant_name));
+                let _ = config.set("voice.wake_word", serde_json::json!(result.wake_word));
+                let _ = config.set("system.machine_name", serde_json::json!(result.machine_name));
             }
+
+            // Update display name
+            crate::ui::chat_view::set_assistant_display_name(&result.assistant_name);
+
+            // Update system hostname
+            let _ = std::process::Command::new("sudo")
+                .args(["hostnamectl", "set-hostname", &result.machine_name])
+                .status();
+            let _ = std::process::Command::new("sudo")
+                .args(["systemctl", "restart", "avahi-daemon"])
+                .status();
 
             // Transition to normal mode: initialize LLM, wire up the real
             // prompt handler, and show the ready message.
@@ -826,6 +934,99 @@ impl AiosApp {
 
         // Show boot status on Desktop.
         chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
+
+        // Check for hostname collision (set by aios-hostname-check.service at boot).
+        if std::path::Path::new("/tmp/aios-name-conflict").exists() {
+            if let Ok(conflicting) = std::fs::read_to_string("/tmp/aios-name-conflict") {
+                let conflicting = conflicting.trim().to_string();
+                let random_suffix = (std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos() % 10000) as u16;
+                let suggestion = format!("{conflicting}-{random_suffix}");
+
+                chat_view.add_level_message(
+                    aios_core::types::MessageLevel::Warning,
+                    &format!("Hostname conflict: another machine on this network is already using '{conflicting}.local'"),
+                );
+
+                // Show rename card
+                let input_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+                input_box.set_margin_top(8);
+
+                let entry = gtk4::Entry::builder()
+                    .placeholder_text("New hostname")
+                    .text(&suggestion)
+                    .hexpand(true)
+                    .build();
+                input_box.append(&entry);
+
+                let hint = gtk4::Label::new(Some("Lowercase letters, numbers, and hyphens only. Will be reachable as <name>.local"));
+                hint.add_css_class("dim-label");
+                hint.set_halign(gtk4::Align::Start);
+                hint.set_wrap(true);
+                input_box.append(&hint);
+
+                let error_label = gtk4::Label::new(None);
+                error_label.add_css_class("error");
+                error_label.set_visible(false);
+                error_label.set_halign(gtk4::Align::Start);
+                input_box.append(&error_label);
+
+                let apply_btn = gtk4::Button::with_label("Apply");
+                apply_btn.add_css_class("suggested-action");
+                apply_btn.set_halign(gtk4::Align::Start);
+                apply_btn.set_margin_top(4);
+                input_box.append(&apply_btn);
+
+                let entry_ref = entry.clone();
+                let error_ref = error_label.clone();
+                let chat_ref = chat_view.clone();
+                apply_btn.connect_clicked(move |b| {
+                    let name = entry_ref.text().to_string().trim().to_lowercase();
+
+                    // Validate: lowercase alphanumeric + hyphens, 1-63 chars, no leading/trailing hyphens
+                    let valid = !name.is_empty()
+                        && name.len() <= 63
+                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                        && !name.starts_with('-')
+                        && !name.ends_with('-');
+
+                    if !valid {
+                        error_ref.set_text("Invalid hostname: use lowercase letters, numbers, hyphens (1-63 chars)");
+                        error_ref.set_visible(true);
+                        return;
+                    }
+
+                    b.set_sensitive(false);
+                    error_ref.set_visible(false);
+
+                    // Apply hostname change
+                    let _ = std::process::Command::new("sudo")
+                        .args(["hostnamectl", "set-hostname", &name])
+                        .status();
+                    let _ = std::process::Command::new("sudo")
+                        .args(["systemctl", "restart", "avahi-daemon"])
+                        .status();
+
+                    // Update config
+                    if let Ok(mut cfg) = aios_core::config::ConfigManager::new() {
+                        let _ = cfg.set("system.machine_name", serde_json::json!(name));
+                    }
+
+                    chat_ref.add_message("system", &format!("Hostname changed to '{name}'. Reachable as {name}.local"));
+                    let _ = std::fs::remove_file("/tmp/aios-name-conflict");
+                });
+
+                chat_view.add_setup_card(
+                    "network-server-symbolic",
+                    "Rename Your Machine",
+                    &format!("Another machine is using '{conflicting}' on this network.\nChoose a different name:"),
+                    Some(input_box.upcast_ref()),
+                );
+            }
+        }
+
         chat_view.add_message("system", "Type a message or use /help to see available commands.");
 
         // Apply assistant display name from config.
