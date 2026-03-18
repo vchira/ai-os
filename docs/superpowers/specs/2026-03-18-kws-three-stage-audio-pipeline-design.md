@@ -301,15 +301,19 @@ New keys `wake_word_source` and `wake_threshold` are added to `voice` in `defaul
 
 ## `/wake` Command
 
-| Command | Behavior |
-|---------|----------|
-| `/wake` | Show current wake word, source, and status |
-| `/wake <phrase>` | If pre-trained → load immediately. Otherwise → start background training |
-| `/wake on` | Enable wake word detection |
-| `/wake off` | Disable — all speech goes directly to Whisper |
-| `/wake list` | Show all available pre-trained wake words |
-| `/wake train <phrase>` | Force (re)train a custom model |
-| `/wake threshold <0.0-1.0>` | Adjust KWS confidence threshold |
+The current `cmd_wake()` in `commands.rs` handles: empty (show status), `on`, `off`, and catch-all (set phrase). It must be rewritten with explicit match arms in this priority order:
+
+| Priority | Command | Behavior |
+|----------|---------|----------|
+| 1 | `/wake on` | Enable wake word detection |
+| 2 | `/wake off` | Disable — all speech goes directly to Whisper |
+| 3 | `/wake list` | Show all available pre-trained wake words |
+| 4 | `/wake train <phrase>` | Force (re)train a custom model |
+| 5 | `/wake threshold <0.0-1.0>` | Adjust KWS confidence threshold |
+| 6 | `/wake` (no args) | Show current wake word, source, and status |
+| 7 | `/wake <phrase>` (catch-all) | If pre-trained → load immediately. Otherwise → start background training |
+
+The catch-all must be last to avoid capturing `list`, `train`, or `threshold` as wake phrases.
 
 ## Settings Dialog Changes
 
@@ -372,8 +376,72 @@ Selecting a pre-trained wake word clears the custom field and hot-swaps the mode
 | `aios-core/src/config/defaults.rs` | Change `wake_word` default from "Assistant" to "hey assistant"; add `wake_word_source`, `wake_threshold` |
 | `aios-core/src/config/autoconfig.rs` | Add `wake_word` field to `AssistantConfig` |
 | `aios-core/src/config/commands.rs` | Extend `/wake` with `list`, `train`, `threshold` subcommands; `/wake train` returns a new `CommandResult::BackgroundTask` variant |
-| `aios-core/src/types/` | Add `CommandResult::BackgroundTask { description: String, task: BackgroundTaskKind }` variant for async commands |
-| `distro/_inner_build.sh` | Download KWS infrastructure + wake word models, bundle Python training env |
+| `aios-core/src/types/` | Add `CommandResult::BackgroundTask` variant (see below) |
+| `distro/_inner_build.sh` | Download KWS infrastructure + wake word models, rename to clean snake_case names, bundle Python training env |
+
+### `CommandResult::BackgroundTask`
+
+```rust
+pub enum BackgroundTaskKind {
+    WakeWordTraining { phrase: String, output_dir: PathBuf },
+}
+
+// Added to the existing CommandResult enum:
+pub enum CommandResult {
+    // ... existing variants ...
+    BackgroundTask {
+        description: String,
+        task: BackgroundTaskKind,
+    },
+}
+```
+
+The GTK layer handles `BackgroundTask` by:
+1. Showing the description as a `[SYSTEM]` message in chat
+2. Spawning a background thread for the task
+3. Setting `wake_training_in_progress` to `true`
+4. On completion: sending a `[SYSTEM]` message via the existing `stt_tx` channel (with a special prefix like `\x00SYSTEM:` to distinguish from transcriptions), setting `wake_training_in_progress` to `false`, and hot-swapping the KWS model
+
+### Updated `start_voice_listener()` Signature
+
+```rust
+fn start_voice_listener(
+    stt_tx: std::sync::mpsc::Sender<String>,
+    stt_enabled: Arc<AtomicBool>,
+    wake_enabled: Arc<AtomicBool>,
+    wake_training_in_progress: Arc<AtomicBool>,
+    kws_engine: Arc<Mutex<KwsEngine>>,
+) -> std::thread::JoinHandle<()>
+```
+
+The `wake_phrase` and `wake_word_source` parameters are no longer needed — the voice listener reads them from `KwsEngine` via the mutex. The old `WakeWordDetector` fallback is used when `kws_engine.lock().wake_session` is `None`.
+
+### Model File Naming Convention
+
+Models are stored with clean snake_case names in `pretrained/`. The ISO build script renames downloaded files:
+- `hey_jarvis_v0.1.onnx` → `hey_jarvis.onnx`
+- `computer_v1.onnx` or `computer_v2.onnx` → `computer.onnx` (pick the latest version)
+- Community models: strip version suffixes, lowercase, snake_case
+
+### `KwsEngine::process_audio()` with No Wake Model
+
+When `wake_session` is `None` (no model loaded), `process_audio()` returns `KwsResult { confidence: 0.0, triggered: false }`. The voice listener checks this and falls back to the Whisper + keyword match path.
+
+### Recovery on Reboot with `wake_word_source: "training"`
+
+If the system was shut down mid-training (`wake_word_source` is `"training"` at boot):
+1. Boot status shows: `⏳ KWS: restarting training — "phrase"`
+2. Training is restarted automatically in a background thread
+3. Mic button stays disabled until training completes
+4. If training fails 3 times, `wake_word_source` is reset to `"pretrained"` with the default `"hey assistant"` model, and a `[SYSTEM]` error message is shown
+
+### `hey_assistant.onnx` Production
+
+The default `hey_assistant.onnx` model is pre-trained on the dev machine and checked into the repo at `distro/models/kws/hey_assistant.onnx`. This avoids requiring the Python training environment in the Docker ISO builder and ensures reproducible builds. The model is copied into the ISO alongside the downloaded pre-trained models.
+
+### `ort` Crate Version
+
+Pin to `ort = "2.0"` with `download-binaries` feature in `aios-voice/Cargo.toml`. The `download-binaries` feature downloads the correct `libonnxruntime` for the target platform at build time.
 
 ### Boot Status Integration
 
