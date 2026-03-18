@@ -19,35 +19,66 @@ ARG="${1:-}"
 IMAGE="aios-builder"
 
 # ─── Version management ──────────────────────────────────────
-# VERSION file format: MAJOR.MINOR.PATCH
-# --bump-major: increment major, reset minor+patch
-# --bump-minor: increment minor, reset patch
-# Patch is ALWAYS incremented on every build
+# VERSION file format: MAJOR.MINOR.PATCH[-CHANNEL.N]
+#   e.g. 1.0.0-alpha.1  (pre-release channel build)
+#        2.3.1           (stable build)
+#
+# --bump-major: increment major, reset minor/patch/channel suffix
+# --bump-minor: increment minor, reset patch/channel suffix
+# --no-bump:    skip all incrementing (for release builds)
+# Default with channel suffix: increment channel number (alpha.1 → alpha.2)
+# Default without suffix (stable): increment patch
 VERSION_FILE="${REPO_DIR}/VERSION"
 if [ ! -f "${VERSION_FILE}" ]; then
-    echo "2.0.0" > "${VERSION_FILE}"
+    echo "1.0.0" > "${VERSION_FILE}"
 fi
 
 CURRENT_VERSION=$(cat "${VERSION_FILE}" | tr -d '[:space:]')
-IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "${CURRENT_VERSION}"
+
+# Split on '-' to separate base version from optional channel suffix
+V_BASE="${CURRENT_VERSION%%-*}"
+if [[ "${CURRENT_VERSION}" == *"-"* ]]; then
+    V_SUFFIX="${CURRENT_VERSION#*-}"
+else
+    V_SUFFIX=""
+fi
+
+IFS='.' read -r V_MAJOR V_MINOR V_PATCH <<< "${V_BASE}"
 
 if [ "${ARG}" = "--bump-major" ]; then
     V_MAJOR=$((V_MAJOR + 1))
     V_MINOR=0
     V_PATCH=0
+    V_SUFFIX=""
     echo "[*] Bumped major version to ${V_MAJOR}.${V_MINOR}.${V_PATCH}"
     ARG="--clean"  # major bump implies clean build
 elif [ "${ARG}" = "--bump-minor" ]; then
     V_MINOR=$((V_MINOR + 1))
     V_PATCH=0
+    V_SUFFIX=""
     echo "[*] Bumped minor version to ${V_MAJOR}.${V_MINOR}.${V_PATCH}"
     ARG="--clean"  # minor bump implies clean build
+elif [ "${ARG}" = "--no-bump" ]; then
+    # No incrementing — used for release builds to stamp exact version
+    echo "[*] No-bump: keeping version ${CURRENT_VERSION}"
+    ARG=""
+elif [ -n "${V_SUFFIX}" ]; then
+    # Pre-release channel: increment the channel number (e.g. alpha.1 → alpha.2)
+    V_CHANNEL="${V_SUFFIX%.*}"   # e.g. "alpha"
+    V_CHAN_N="${V_SUFFIX##*.}"   # e.g. "1"
+    V_CHAN_N=$((V_CHAN_N + 1))
+    V_SUFFIX="${V_CHANNEL}.${V_CHAN_N}"
+    echo "[*] Incremented channel to ${V_MAJOR}.${V_MINOR}.${V_PATCH}-${V_SUFFIX}"
 else
-    # Auto-increment patch on every build
+    # Stable release: auto-increment patch on every build
     V_PATCH=$((V_PATCH + 1))
 fi
 
-AIOS_VERSION="${V_MAJOR}.${V_MINOR}.${V_PATCH}"
+if [ -n "${V_SUFFIX}" ]; then
+    AIOS_VERSION="${V_MAJOR}.${V_MINOR}.${V_PATCH}-${V_SUFFIX}"
+else
+    AIOS_VERSION="${V_MAJOR}.${V_MINOR}.${V_PATCH}"
+fi
 echo "${AIOS_VERSION}" > "${VERSION_FILE}"
 export AIOS_VERSION
 CACHE_VOL="aios-build-cache"
