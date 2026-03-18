@@ -742,6 +742,15 @@ impl AiosApp {
     /// Called from `Application::connect_activate`. Builds the entire UI and
     /// wires up signals.
     pub fn activate(app: &adw::Application, rt: tokio::runtime::Handle) {
+        // Apply dark theme IMMEDIATELY — before any window is created.
+        // This prevents a visible flash from light (system default) to dark.
+        {
+            let theme = ConfigManager::new()
+                .map(|c| c.get_str("ui.theme", "dark"))
+                .unwrap_or_else(|_| "dark".to_string());
+            Self::apply_theme(&theme);
+        }
+
         // Check if the vault exists. If not, run the first-boot setup.
         let vault_path = ConfigManager::default_config_dir().join("vault.enc");
         let vault = Vault::new(vault_path);
