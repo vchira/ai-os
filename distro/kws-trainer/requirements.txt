@@ -1,0 +1,5 @@
+openwakeword>=0.6.0
+torch>=2.0
+piper-sample-generator
+speechbrain
+onnxruntime

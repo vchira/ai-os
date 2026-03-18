@@ -17,7 +17,9 @@
 pub mod detector;
 pub mod kws;
 pub mod pretrained;
+pub mod trainer;
 
 pub use detector::{WakeWordConfig, WakeWordDetector, WakeWordEvent};
 pub use kws::{KwsEngine, KwsResult};
 pub use pretrained::{PretrainedModel, PRETRAINED_WAKE_WORDS, find_pretrained, pretrained_model_path};
+pub use trainer::KwsTrainer;
