@@ -1558,6 +1558,40 @@ impl AiosApp {
             status.add(StatusLine::new(&t("boot.status.audio_input"), stt && has_whisper,
                 format!("{stt_backend}{}", if !stt { " — disabled" } else { "" })));
 
+            // -- KWS (Wake Word Detection) --
+            {
+                let kws_models_dir = dirs::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
+                    .join(".aios/models/kws");
+                let wake_word = config.get_str("voice.wake_word", "hey assistant");
+                let wake_source = config.get_str("voice.wake_word_source", "pretrained");
+                let infra_present = kws_models_dir.join("melspectrogram.onnx").exists()
+                    || kws_models_dir.join("embedding_model.onnx").exists();
+
+                if !infra_present {
+                    status.add(StatusLine::new("KWS", false, "models not found"));
+                } else if wake_source == "training" {
+                    status.add(StatusLine::new("KWS", false,
+                        format!("training — \"{wake_word}\" (mic disabled until ready)")));
+                } else {
+                    // Check whether the actual model file exists.
+                    let model_available = if let Some(pretrained) = aios_voice::find_pretrained(&wake_word) {
+                        aios_voice::pretrained_model_path(&kws_models_dir, pretrained).exists()
+                    } else {
+                        let sanitized = wake_word.to_lowercase()
+                            .replace(' ', "_")
+                            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+                        kws_models_dir.join("custom").join(format!("{sanitized}.onnx")).exists()
+                    };
+                    if model_available {
+                        status.add(StatusLine::new("KWS", true,
+                            format!("{wake_word} ({wake_source})")));
+                    } else {
+                        status.add(StatusLine::new("KWS", false, "models not found"));
+                    }
+                }
+            }
+
             // -- System --
             let kb_layout = config.get_str("system.keyboard_layout", "us");
             let timezone = std::fs::read_to_string("/etc/timezone")
@@ -1973,11 +2007,23 @@ impl AiosApp {
         let wake_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(wake_word_cfg.1));
         let wake_training_in_progress = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        // Try to create the KWS engine. Infrastructure models live at ~/.aios/models/kws/.
-        // Wrapped in Option — None when ONNX infrastructure models are missing (dev/VM).
+        // Copy KWS infrastructure models from ISO to user dir on first run.
         let kws_models_dir = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
             .join(".aios/models/kws");
+        {
+            let iso_kws_dir = std::path::Path::new("/opt/aios-app/models/kws");
+            if iso_kws_dir.exists() && !kws_models_dir.exists() {
+                if let Err(e) = copy_dir_recursive(iso_kws_dir, &kws_models_dir) {
+                    warn!("KWS: failed to copy models from ISO: {e}");
+                } else {
+                    info!("KWS: copied infrastructure models from ISO to {}", kws_models_dir.display());
+                }
+            }
+        }
+
+        // Try to create the KWS engine. Infrastructure models live at ~/.aios/models/kws/.
+        // Wrapped in Option — None when ONNX infrastructure models are missing (dev/VM).
         let kws_engine: std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> = {
             match aios_voice::KwsEngine::new(&kws_models_dir) {
                 Ok(mut engine) => {
@@ -2032,6 +2078,109 @@ impl AiosApp {
             s.wake_training_in_progress = Some(wake_training_in_progress.clone());
             s.wake_enabled = Some(wake_enabled.clone());
             s.kws_models_dir = kws_models_dir.clone();
+        }
+
+        // Training recovery: if last shutdown happened mid-training, restart or reset.
+        {
+            let wake_source = state.borrow().config.get_str("voice.wake_word_source", "pretrained");
+            if wake_source == "training" {
+                let phrase = state.borrow().config.get_str("voice.wake_word", "hey assistant");
+                let retries = state.borrow().config.get_f64("voice.wake_training_retries", 0.0) as i64;
+                info!("KWS: detected interrupted training for \"{phrase}\" (attempt {retries})");
+
+                if retries >= 3 {
+                    // Too many failures — reset to pretrained default.
+                    {
+                        let mut s = state.borrow_mut();
+                        let _ = s.config.set("voice.wake_word", serde_json::json!("hey assistant"));
+                        let _ = s.config.set("voice.wake_word_source", serde_json::json!("pretrained"));
+                        let _ = s.config.set("voice.wake_training_retries", serde_json::json!(0));
+                    }
+                    chat_view.add_message("system",
+                        "[SYSTEM] Wake word training failed after 3 attempts. Reset to \"Hey Assistant\".");
+                } else {
+                    // Increment retry count and restart training.
+                    {
+                        let mut s = state.borrow_mut();
+                        let _ = s.config.set("voice.wake_training_retries", serde_json::json!(retries + 1));
+                    }
+                    chat_view.add_message("system",
+                        &format!("[SYSTEM] Restarting wake word training for \"{}\" (attempt {})...",
+                            phrase, retries + 1));
+
+                    wake_training_in_progress.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                    let output_dir = kws_models_dir.join("custom");
+                    let chat_for_recovery = chat_view.clone();
+                    let state_for_recovery = state.clone();
+                    let kws_engine_for_recovery = kws_engine.clone();
+                    let wake_enabled_for_recovery = wake_enabled.clone();
+                    let training_flag_for_recovery = wake_training_in_progress.clone();
+                    let phrase_clone = phrase.clone();
+                    let (train_tx, train_rx) = std::sync::mpsc::channel::<Result<std::path::PathBuf, String>>();
+
+                    std::thread::spawn(move || {
+                        let result = aios_voice::KwsTrainer::train(&phrase_clone, &output_dir);
+                        let _ = train_tx.send(result.map_err(|e| e.to_string()));
+                    });
+
+                    glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                        match train_rx.try_recv() {
+                            Ok(Ok(model_path)) => {
+                                info!("KWS recovery training complete: {}", model_path.display());
+                                chat_for_recovery.add_message("system",
+                                    &format!("Wake word training complete for \"{phrase}\". Model saved."));
+
+                                // Hot-swap the model into the KWS engine.
+                                if let Ok(mut guard) = kws_engine_for_recovery.lock() {
+                                    if let Some(ref mut engine) = *guard {
+                                        match engine.load_wake_model(&model_path, &phrase) {
+                                            Ok(()) => {
+                                                info!("KWS: hot-swapped model for \"{}\"", phrase);
+                                                chat_for_recovery.add_message("system",
+                                                    &format!("Wake word \"{phrase}\" is now active."));
+                                            }
+                                            Err(e) => {
+                                                warn!("KWS: failed to load trained model: {e}");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Enable wake word detection and clear retry count.
+                                wake_enabled_for_recovery.store(true, std::sync::atomic::Ordering::Relaxed);
+                                if let Ok(mut cfg) = aios_core::config::ConfigManager::new() {
+                                    let _ = cfg.set("voice.wake_word_source", serde_json::json!("custom"));
+                                    let _ = cfg.set("voice.wake_training_retries", serde_json::json!(0));
+                                }
+
+                                training_flag_for_recovery.store(false, std::sync::atomic::Ordering::Relaxed);
+                                glib::ControlFlow::Break
+                            }
+                            Ok(Err(e)) => {
+                                warn!("KWS recovery training failed: {e}");
+                                chat_for_recovery.add_level_message(
+                                    aios_core::types::MessageLevel::Warning,
+                                    &format!("Wake word training failed: {e}"),
+                                );
+                                let s = state_for_recovery.borrow();
+                                if let Some(ref flag) = s.wake_training_in_progress {
+                                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                let s = state_for_recovery.borrow();
+                                if let Some(ref flag) = s.wake_training_in_progress {
+                                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                glib::ControlFlow::Break
+                            }
+                        }
+                    });
+                }
+            }
         }
 
         // Start voice listener thread — receives transcribed text via mpsc channel.
@@ -2926,6 +3075,23 @@ impl AiosApp {
             }
         });
     }
+}
+
+/// Recursively copy all files from `src` directory into `dst` directory.
+/// Creates `dst` and any intermediate directories as needed.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Internal result type for async upgrade version check.
