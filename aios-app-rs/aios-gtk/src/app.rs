@@ -1326,6 +1326,9 @@ impl AiosApp {
         });
 
         // --- Voice listener + VU meter ---
+        // This block is wrapped defensively — if KWS/voice init fails for any
+        // reason (missing libonnxruntime, audio device issues, etc.), the chat
+        // UI still works. Voice is a nice-to-have, not a hard dependency.
         let stt_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             state.borrow().config.get_bool("voice.stt_enabled", true),
         ));

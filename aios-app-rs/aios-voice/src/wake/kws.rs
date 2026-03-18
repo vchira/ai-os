@@ -96,12 +96,27 @@ impl KwsEngine {
         let lib_path = std::env::var("ORT_DYLIB_PATH")
             .unwrap_or_else(|_| "/opt/aios-app/lib/libonnxruntime.so".to_string());
 
+        // Check if the library file exists before trying to load it.
+        // ort::init_from may panic on some platforms if the file is missing.
+        if !std::path::Path::new(&lib_path).exists() {
+            return Err(VoiceError::Kws(format!(
+                "ONNX Runtime library not found at {lib_path}"
+            )));
+        }
+
+        // Check infrastructure models exist before loading ORT
+        let infra = models_dir.join("infrastructure");
+        if !infra.join("melspectrogram.onnx").exists() || !infra.join("embedding_model.onnx").exists() {
+            return Err(VoiceError::Kws(format!(
+                "KWS infrastructure models not found in {}",
+                infra.display()
+            )));
+        }
+
         ort::init_from(lib_path)
             .map_err(|e| VoiceError::Kws(format!("ONNX Runtime library load failed: {e}")))?
             .with_execution_providers([ort::ep::CPU::default().build()])
             .commit();
-
-        let infra = models_dir.join("infrastructure");
 
         let mel_path = infra.join("melspectrogram.onnx");
         let mel_session = Session::builder()
