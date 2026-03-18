@@ -18,6 +18,32 @@ use aios_core::i18n::{t, t_fmt};
 use super::chat_view::ChatView;
 
 // ---------------------------------------------------------------------------
+// Pretrained wake word catalog
+// ---------------------------------------------------------------------------
+
+/// Pretrained wake word models bundled with AiOS.
+/// Each entry is `(model_id, display_name)`.
+const PRETRAINED_WAKE_WORDS: &[(&str, &str)] = &[
+    ("hey_assistant", "Hey Assistant"),
+    ("hey_jarvis", "Hey Jarvis"),
+    ("computer", "Computer"),
+    ("ok_computer", "OK Computer"),
+    ("hey_friday", "Hey Friday"),
+    ("jarvis", "Jarvis"),
+    ("ok_jarvis", "OK Jarvis"),
+    ("skynet", "Skynet"),
+    ("terminator", "Terminator"),
+    ("hey_house", "Hey House"),
+    ("ok_home", "OK Home"),
+    ("home_assistant", "Home Assistant"),
+    ("mr_anderson", "Mr. Anderson"),
+    ("mr_smith", "Mr. Smith"),
+    ("hey_dick_head", "Hey Dick Head"),
+    ("oi_fuckwhit", "Oi Fuckwhit"),
+    ("yo_homie", "Yo Homie"),
+];
+
+// ---------------------------------------------------------------------------
 // Public result types (unchanged — used by app.rs)
 // ---------------------------------------------------------------------------
 
@@ -96,8 +122,11 @@ struct SetupState {
     assistant_name: String,
     /// Whether to use the same name for wake word and hostname.
     use_same_name: bool,
-    /// Custom wake word (if use_same_name is false).
+    /// Custom wake word (if use_same_name is false and no pretrained selected).
     wake_word_custom: String,
+    /// Pretrained wake word model ID selected from the dropdown.
+    /// Empty string means the user wants a custom/trained wake word.
+    wake_word_pretrained_id: String,
     /// Custom machine/hostname (if use_same_name is false).
     machine_name_custom: String,
     /// Selected country defaults (from Country step).
@@ -121,7 +150,8 @@ impl Default for SetupState {
             primary_provider: String::new(),
             assistant_name: t("setup.name.default"),
             use_same_name: true,
-            wake_word_custom: t("setup.name.default"),
+            wake_word_custom: String::new(),
+            wake_word_pretrained_id: PRETRAINED_WAKE_WORDS[0].0.to_string(),
             machine_name_custom: t("setup.name.default_lowercase"),
             country: None,
             install_to_drive: false,
@@ -242,13 +272,15 @@ impl SetupConversation {
             }
             SetupStep::NameAssistant => {
                 // Any voice input sets the assistant name and advances.
+                // Wake word defaults to the first pretrained option when set via voice.
                 let name = text.trim().to_string();
                 if !name.is_empty() {
                     let machine = name.to_lowercase().replace(' ', "-");
                     {
                         let mut s = self.state.borrow_mut();
                         s.assistant_name = name.clone();
-                        s.wake_word_custom = name.clone();
+                        s.wake_word_pretrained_id = PRETRAINED_WAKE_WORDS[0].0.to_string();
+                        s.wake_word_custom = String::new();
                         s.machine_name_custom = machine;
                         s.use_same_name = true;
                     }
@@ -1251,6 +1283,65 @@ impl SetupConversation {
         name_entry.add_css_class("setup-input");
         input_box.append(&name_entry);
 
+        // ---------------------------------------------------------------------------
+        // Wake word selection — pretrained dropdown + custom entry
+        // ---------------------------------------------------------------------------
+
+        // Section separator and label
+        let wake_section_label = gtk::Label::new(Some("Wake Word"));
+        wake_section_label.set_halign(Align::Start);
+        wake_section_label.add_css_class("heading");
+        wake_section_label.set_margin_top(12);
+        input_box.append(&wake_section_label);
+
+        // Pretrained dropdown
+        let pretrained_names: Vec<&str> = PRETRAINED_WAKE_WORDS.iter()
+            .map(|(_, display)| *display)
+            .collect();
+        // Append "Custom…" as the last entry so users can type their own phrase.
+        let mut dropdown_names = pretrained_names.clone();
+        dropdown_names.push("Custom…");
+        let wake_model = gtk::StringList::new(&dropdown_names);
+        let wake_dropdown = gtk::DropDown::new(Some(wake_model), gtk::Expression::NONE);
+        wake_dropdown.set_hexpand(true);
+        input_box.append(&wake_dropdown);
+
+        // Custom wake word entry (hidden unless "Custom…" is selected)
+        let custom_box = gtk::Box::new(Orientation::Vertical, 4);
+        custom_box.set_visible(false);
+        custom_box.set_margin_top(4);
+
+        let custom_wake_label = gtk::Label::new(Some(
+            "Custom wake phrase — a model will be trained on first boot (~5 min). May be less accurate.",
+        ));
+        custom_wake_label.set_halign(Align::Start);
+        custom_wake_label.set_wrap(true);
+        custom_wake_label.add_css_class("dim-label");
+        custom_box.append(&custom_wake_label);
+
+        let custom_wake_entry = gtk::Entry::builder()
+            .placeholder_text("e.g. Hey Computer")
+            .hexpand(true)
+            .build();
+        custom_wake_entry.add_css_class("setup-input");
+        custom_box.append(&custom_wake_entry);
+
+        input_box.append(&custom_box);
+
+        // Show/hide the custom entry when "Custom…" is selected
+        {
+            let custom_box_ref = custom_box.clone();
+            let pretrained_count = PRETRAINED_WAKE_WORDS.len() as u32;
+            wake_dropdown.connect_selected_notify(move |dd| {
+                // The last entry (index == pretrained_count) is "Custom…"
+                custom_box_ref.set_visible(dd.selected() == pretrained_count);
+            });
+        }
+
+        // ---------------------------------------------------------------------------
+        // Extra fields (hidden by default) — hostname only
+        // ---------------------------------------------------------------------------
+
         // Same-for-all toggle
         let same_check = gtk::CheckButton::with_label(
             &t("setup.name.same_toggle"),
@@ -1259,21 +1350,10 @@ impl SetupConversation {
         same_check.set_margin_top(8);
         input_box.append(&same_check);
 
-        // Extra fields (hidden by default)
+        // Extra fields (hidden by default) — hostname only
         let extra_box = gtk::Box::new(Orientation::Vertical, 6);
         extra_box.set_visible(false);
         extra_box.set_margin_top(8);
-
-        let wake_label = gtk::Label::new(Some(&t("setup.name.wake_label")));
-        wake_label.set_halign(Align::Start);
-        extra_box.append(&wake_label);
-
-        let wake_entry = gtk::Entry::builder()
-            .text(&t("setup.name.default"))
-            .hexpand(true)
-            .build();
-        wake_entry.add_css_class("setup-input");
-        extra_box.append(&wake_entry);
 
         let host_label = gtk::Label::new(Some(&t("setup.name.host_label")));
         host_label.set_halign(Align::Start);
@@ -1318,9 +1398,11 @@ impl SetupConversation {
         let this = self.clone();
         let name_ref = name_entry.clone();
         let same_ref = same_check.clone();
-        let wake_ref = wake_entry.clone();
+        let wake_dd_ref = wake_dropdown.clone();
+        let custom_wake_ref = custom_wake_entry.clone();
         let host_ref = host_entry.clone();
         let error_ref = error_label.clone();
+        let pretrained_count_click = PRETRAINED_WAKE_WORDS.len() as u32;
         next_btn.connect_clicked(move |b| {
             let name = name_ref.text().to_string().trim().to_string();
             if name.is_empty() {
@@ -1329,12 +1411,24 @@ impl SetupConversation {
                 return;
             }
 
-            let use_same = same_ref.is_active();
-            let wake = if use_same {
-                name.clone()
+            // Resolve wake word selection
+            let selected_idx = wake_dd_ref.selected();
+            let (pretrained_id, wake_display) = if selected_idx < pretrained_count_click {
+                // A pretrained model was selected
+                let (id, display) = PRETRAINED_WAKE_WORDS[selected_idx as usize];
+                (id.to_string(), display.to_string())
             } else {
-                wake_ref.text().to_string().trim().to_string()
+                // "Custom…" was selected
+                let custom = custom_wake_ref.text().to_string().trim().to_string();
+                if custom.is_empty() {
+                    error_ref.set_text("Please enter a custom wake phrase.");
+                    error_ref.set_visible(true);
+                    return;
+                }
+                (String::new(), custom)
             };
+
+            let use_same = same_ref.is_active();
             let machine = if use_same {
                 name.to_lowercase().replace(' ', "-")
             } else {
@@ -1360,7 +1454,8 @@ impl SetupConversation {
             {
                 let mut s = this.state.borrow_mut();
                 s.assistant_name = name.clone();
-                s.wake_word_custom = wake;
+                s.wake_word_pretrained_id = pretrained_id;
+                s.wake_word_custom = wake_display;
                 s.machine_name_custom = machine;
                 s.use_same_name = use_same;
             }
@@ -2015,8 +2110,18 @@ impl SetupConversation {
                 t_fmt("setup.complete.api_key_stored", &[("provider", &display)]),
             ));
         }
+        let wake_display = if !s.wake_word_pretrained_id.is_empty() {
+            PRETRAINED_WAKE_WORDS.iter()
+                .find(|(id, _)| *id == s.wake_word_pretrained_id)
+                .map(|(_, display)| display.to_string())
+                .unwrap_or_else(|| s.assistant_name.clone())
+        } else if !s.wake_word_custom.is_empty() {
+            s.wake_word_custom.clone()
+        } else {
+            s.assistant_name.clone()
+        };
         status.add(StatusLine::new(&t("setup.complete.assistant_name"), true, &s.assistant_name));
-        status.add(StatusLine::new(&t("setup.complete.wake_word"), true, &s.wake_word_custom));
+        status.add(StatusLine::new(&t("setup.complete.wake_word"), true, &wake_display));
         status.add(StatusLine::new(&t("setup.complete.network"), true, t_fmt("setup.complete.network_local", &[("name", &s.machine_name_custom)])));
         status.add(StatusLine::new(&t("setup.complete.master_password"), true, &t("setup.complete.master_password_set")));
         status.add(StatusLine::new(&t("setup.complete.vault"), true, &t("setup.complete.vault_created")));
@@ -2057,10 +2162,20 @@ impl SetupConversation {
     fn finish(&self) {
         self.chat_view.dismiss_last_card_input();
         let s = self.state.borrow();
-        let wake = if s.use_same_name {
-            s.assistant_name.clone()
-        } else {
+        // Resolve the effective wake word:
+        // - If a pretrained ID was chosen (non-empty), use the pretrained display name
+        // - Otherwise fall back to the custom text entry value
+        // - If use_same_name was never overridden and both are empty, fall back to assistant name
+        let wake = if !s.wake_word_pretrained_id.is_empty() {
+            // Find the display name for the pretrained ID
+            PRETRAINED_WAKE_WORDS.iter()
+                .find(|(id, _)| *id == s.wake_word_pretrained_id)
+                .map(|(_, display)| display.to_string())
+                .unwrap_or_else(|| s.assistant_name.clone())
+        } else if !s.wake_word_custom.is_empty() {
             s.wake_word_custom.clone()
+        } else {
+            s.assistant_name.clone()
         };
         let machine = if s.use_same_name {
             s.assistant_name.to_lowercase().replace(' ', "-")

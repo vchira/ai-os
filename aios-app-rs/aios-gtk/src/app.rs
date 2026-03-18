@@ -991,6 +991,18 @@ impl AiosApp {
                 let _ = config.set("assistant.name", serde_json::json!(result.assistant_name));
                 let _ = config.set("voice.wake_word", serde_json::json!(result.wake_word));
                 let _ = config.set("system.machine_name", serde_json::json!(result.machine_name));
+
+                // Determine wake word source: pretrained model or custom training
+                let normalized = result.wake_word.to_lowercase().replace(' ', "_");
+                let pretrained_ids = ["hey_assistant", "hey_jarvis", "computer", "ok_computer",
+                    "hey_friday", "jarvis", "ok_jarvis", "skynet", "terminator",
+                    "hey_house", "ok_home", "home_assistant", "mr_anderson", "mr_smith",
+                    "hey_dick_head", "oi_fuckwhit", "yo_homie"];
+                if pretrained_ids.contains(&normalized.as_str()) {
+                    let _ = config.set("voice.wake_word_source", serde_json::json!("pretrained"));
+                } else {
+                    let _ = config.set("voice.wake_word_source", serde_json::json!("training"));
+                }
             }
 
             // Apply country-derived settings to the live or installed system.
