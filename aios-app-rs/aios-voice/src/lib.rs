@@ -44,4 +44,4 @@ pub use controller::VoiceController;
 pub use error::{Result, VoiceError};
 pub use stt::{SttBackend, SttEngine, TranscriptionResult};
 pub use tts::{TtsBackend, TtsEngine, VoiceInfo};
-pub use wake::{WakeWordConfig, WakeWordDetector, WakeWordEvent};
+pub use wake::{WakeWordConfig, WakeWordDetector, WakeWordEvent, PretrainedModel, PRETRAINED_WAKE_WORDS, find_pretrained, pretrained_model_path, KwsEngine, KwsResult, KwsTrainer};

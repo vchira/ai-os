@@ -49,6 +49,27 @@ const PIPER_VOICES: &[(&str, &str)] = &[
     ("ro_RO-mihai-medium", "Mihai (Romanian)"),
 ];
 
+/// Pre-trained wake words: (slug, human name).
+const PRETRAINED_NAMES: &[(&str, &str)] = &[
+    ("hey_assistant", "Hey Assistant"),
+    ("hey_jarvis", "Hey Jarvis"),
+    ("computer", "Computer"),
+    ("ok_computer", "OK Computer"),
+    ("hey_friday", "Hey Friday"),
+    ("jarvis", "Jarvis"),
+    ("ok_jarvis", "OK Jarvis"),
+    ("skynet", "Skynet"),
+    ("terminator", "Terminator"),
+    ("hey_house", "Hey House"),
+    ("ok_home", "OK Home"),
+    ("home_assistant", "Home Assistant"),
+    ("mr_anderson", "Mr. Anderson"),
+    ("mr_smith", "Mr. Smith"),
+    ("hey_dick_head", "Hey Dick Head"),
+    ("oi_fuckwhit", "Oi Fuckwhit"),
+    ("yo_homie", "Yo Homie"),
+];
+
 /// Keyboard layouts: (code, human name).
 const KEYBOARD_LAYOUTS: &[(&str, &str)] = &[
     ("us", "US English"),
@@ -450,6 +471,145 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
     }
 
     page.add(&stt_group);
+
+    // Wake Word group.
+    let wake_group = adw::PreferencesGroup::builder()
+        .title("Wake Word")
+        .build();
+
+    // Wake word enabled switch.
+    let wake_switch = gtk::Switch::new();
+    wake_switch.set_active(config.get_bool("voice.wake_enabled", false));
+    wake_switch.set_valign(gtk::Align::Center);
+    let wake_enabled_row = adw::ActionRow::builder()
+        .title("Wake Word Enabled")
+        .subtitle("Listen for a wake word to activate the assistant")
+        .build();
+    wake_enabled_row.add_suffix(&wake_switch);
+    wake_enabled_row.set_activatable_widget(Some(&wake_switch));
+    wake_group.add(&wake_enabled_row);
+
+    // Save wake enabled on change.
+    {
+        let config_dir = ConfigManager::default_config_dir();
+        wake_switch.connect_state_set(move |_, active| {
+            if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                let _ = cfg.set("voice.wake_enabled", serde_json::json!(active));
+            }
+            gtk::glib::Propagation::Proceed
+        });
+    }
+
+    // Pre-trained wake word combo.
+    let wake_names: Vec<&str> = PRETRAINED_NAMES.iter().map(|(_, name)| *name).collect();
+    let wake_list = gtk::StringList::new(&wake_names);
+    let wake_combo = adw::ComboRow::builder()
+        .title("Pre-trained Wake Word")
+        .subtitle("Choose a built-in wake word")
+        .model(&wake_list)
+        .build();
+    let current_wake = config.get_str("voice.wake_word", "hey_assistant");
+    let wake_idx = PRETRAINED_NAMES
+        .iter()
+        .position(|(slug, _)| *slug == current_wake.as_str())
+        .unwrap_or(0) as u32;
+    wake_combo.set_selected(wake_idx);
+    wake_group.add(&wake_combo);
+
+    // Save pre-trained wake word on change.
+    {
+        let config_dir = ConfigManager::default_config_dir();
+        wake_combo.connect_selected_notify(move |row| {
+            let idx = row.selected() as usize;
+            if let Some((slug, _)) = PRETRAINED_NAMES.get(idx) {
+                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                    let _ = cfg.set("voice.wake_word", serde_json::json!(slug));
+                    let _ = cfg.set("voice.wake_word_source", serde_json::json!("pretrained"));
+                }
+            }
+        });
+    }
+
+    // Custom wake phrase entry.
+    let custom_wake_entry = adw::EntryRow::builder()
+        .title("Custom Wake Phrase")
+        .build();
+    custom_wake_entry.set_tooltip_text(Some(
+        "Custom phrases require training (~5 min) and may be less accurate",
+    ));
+    wake_group.add(&custom_wake_entry);
+
+    // Train button.
+    let train_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    train_box.set_margin_top(4);
+
+    let train_btn = gtk::Button::with_label("Train");
+    train_btn.add_css_class("suggested-action");
+    train_box.append(&train_btn);
+
+    let train_status = gtk::Label::new(Some(""));
+    train_status.add_css_class("dim-label");
+    train_box.append(&train_status);
+
+    let train_row = adw::ActionRow::builder()
+        .title("Train Custom Wake Word")
+        .subtitle("Record samples and train a model for your custom phrase")
+        .build();
+    train_row.add_suffix(&train_box);
+    wake_group.add(&train_row);
+
+    // Train button handler.
+    {
+        let config_dir = ConfigManager::default_config_dir();
+        let entry = custom_wake_entry.clone();
+        let status = train_status.clone();
+        train_btn.connect_clicked(move |_| {
+            let phrase = entry.text().to_string();
+            if phrase.trim().is_empty() {
+                status.set_text("Enter a phrase first");
+                status.add_css_class("error");
+                return;
+            }
+            // Update config with the custom phrase.
+            if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                let _ = cfg.set("voice.wake_word", serde_json::json!(phrase.trim()));
+                let _ = cfg.set("voice.wake_word_source", serde_json::json!("custom"));
+            }
+            status.remove_css_class("error");
+            status.set_text("Config saved. Use /wake train to start training.");
+        });
+    }
+
+    // Threshold spin button.
+    let wake_threshold_adj = gtk::Adjustment::new(
+        config.get_f64("voice.wake_threshold", 0.5),
+        0.1,  // min
+        1.0,  // max
+        0.05, // step
+        0.05, // page step
+        0.0,  // page size
+    );
+    let threshold_spin = gtk::SpinButton::new(Some(&wake_threshold_adj), 0.05, 2);
+    threshold_spin.set_valign(gtk::Align::Center);
+    let threshold_row = adw::ActionRow::builder()
+        .title("Threshold")
+        .subtitle("Detection sensitivity (lower = more sensitive)")
+        .build();
+    threshold_row.add_suffix(&threshold_spin);
+    wake_group.add(&threshold_row);
+
+    // Save threshold on change.
+    {
+        let config_dir = ConfigManager::default_config_dir();
+        threshold_spin.connect_value_changed(move |spin| {
+            let val = spin.value();
+            if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                let _ = cfg.set("voice.wake_threshold", serde_json::json!(val));
+            }
+        });
+    }
+
+    page.add(&wake_group);
 
     // TTS group.
     let tts_group = adw::PreferencesGroup::builder()

@@ -41,6 +41,10 @@ pub enum VoiceError {
     /// The requested backend is not available on this system.
     #[error("unsupported backend: {0}")]
     UnsupportedBackend(String),
+
+    /// KWS model loading or inference failure.
+    #[error("kws error: {0}")]
+    Kws(String),
 }
 
 /// Convenience alias used throughout this crate.

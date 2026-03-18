@@ -35,14 +35,49 @@ use crate::ui::settings_dialog;
 // AiosApp
 // ---------------------------------------------------------------------------
 
+/// Listener state machine for wake-word detection and speech capture.
+enum ListenerState {
+    /// Waiting for wake word (KWS or fallback) or passing audio through.
+    Idle,
+    /// Wake word triggered — capturing command audio until silence or timeout.
+    Capture {
+        command_buffer: Vec<f32>,
+        capture_start: std::time::Instant,
+        silence_start: Option<std::time::Instant>,
+    },
+}
+
+/// Samples to skip after wake word trigger (300 ms at 16 kHz).
+const POST_WAKE_DELAY_SAMPLES: usize = 4800;
+
+/// Silence duration that ends a capture (1500 ms).
+const CAPTURE_SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Maximum capture duration before forced transcription (15 s).
+const CAPTURE_MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Circular buffer capacity — 2 seconds of audio at 16 kHz.
+const RING_BUFFER_CAPACITY: usize = 32000;
+
 /// Start a background voice listener thread that continuously captures audio,
 /// detects speech via VAD, and transcribes using whisper-cpp (or sends raw
 /// audio to the STT engine). Transcribed text is sent back to the GTK thread
-/// via the provided glib sender.
+/// via the provided sender.
+///
+/// The listener operates as a two-state machine:
+///
+/// - **Idle**: listens for a wake word via KWS engine (ONNX), Whisper-based
+///   keyword match (fallback), or passes all speech through (wake disabled).
+/// - **Capture**: accumulates command audio after wake trigger until silence
+///   timeout or max duration, then transcribes and sends the result.
 fn start_voice_listener(
     stt_tx: std::sync::mpsc::Sender<String>,
     stt_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    wake_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    wake_training_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    kws_engine: std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>>,
 ) -> std::thread::JoinHandle<()> {
+    use std::collections::VecDeque;
     use aios_voice::audio::capture::AudioCapture;
     use aios_voice::audio::vad::{VadConfig, VoiceActivityDetector, DEFAULT_FRAME_SIZE};
 
@@ -56,9 +91,23 @@ fn start_voice_listener(
             min_silence_frames: 20, // ~600ms of silence to end utterance
         });
 
-        // Buffer to accumulate speech audio
+        // State machine
+        let mut state = ListenerState::Idle;
+
+        // Circular buffer for pre-trigger audio (avoids clipping command start)
+        let mut ring_buf: VecDeque<f32> = VecDeque::with_capacity(RING_BUFFER_CAPACITY);
+
+        // Buffer used in Idle mode for VAD-based speech detection
         let mut speech_buffer: Vec<f32> = Vec::new();
         let mut was_active = false;
+
+        // Fallback wake word detector (Whisper + keyword match)
+        let wake_detector = aios_voice::WakeWordDetector::new(
+            aios_voice::WakeWordConfig::default(),
+        );
+
+        // Track how many samples to skip after KWS trigger
+        let mut post_wake_skip: usize = 0;
 
         // Try to start recording — may fail in VMs where mic is not available
         if let Err(e) = capture.start_recording() {
@@ -78,16 +127,21 @@ fn start_voice_listener(
         info!("Voice listener: recording started, waiting for speech...");
 
         loop {
-            // Check if STT is still enabled
+            // Check if STT is still enabled (mic toggle)
             if !stt_enabled.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(200));
+                continue;
+            }
+
+            // If wake word training is in progress, pause audio processing
+            if wake_training_in_progress.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             }
 
             // Read accumulated samples from the capture buffer
             std::thread::sleep(std::time::Duration::from_millis(30));
 
-            // Access the capture buffer directly
             let samples = {
                 if let Ok(mut buf) = capture.buffer().lock() {
                     let s = std::mem::take(&mut *buf);
@@ -101,45 +155,231 @@ fn start_voice_listener(
                 continue;
             }
 
-            // Process frames through VAD
-            for chunk in samples.chunks(DEFAULT_FRAME_SIZE) {
-                let is_active = vad.process_frame(chunk);
+            let wake_on = wake_enabled.load(std::sync::atomic::Ordering::Relaxed);
+            let has_kws_model = kws_engine.lock()
+                .map(|e| e.as_ref().map(|eng| eng.has_model()).unwrap_or(false))
+                .unwrap_or(false);
 
-                if is_active {
-                    speech_buffer.extend_from_slice(chunk);
-                } else if was_active && !is_active {
-                    // Speech just ended — transcribe the buffer
-                    let audio_duration = speech_buffer.len() as f32 / 16000.0;
+            match state {
+                ListenerState::Idle => {
+                    if !wake_on {
+                        // --- Wake disabled: pass all speech directly to Whisper ---
+                        for chunk in samples.chunks(DEFAULT_FRAME_SIZE) {
+                            let is_active = vad.process_frame(chunk);
 
-                    if audio_duration > 0.5 && audio_duration < 30.0 {
-                        info!("Voice listener: speech detected ({audio_duration:.1}s), transcribing...");
-
-                        // Try whisper-cpp-cli first
-                        match transcribe_with_whisper(&speech_buffer) {
-                            Ok(text) if !text.is_empty() => {
-                                info!("Voice listener: transcribed: {}", &text[..text.len().min(50)]);
-                                let _ = stt_tx.send(text);
+                            if is_active {
+                                speech_buffer.extend_from_slice(chunk);
+                            } else if was_active && !is_active {
+                                let audio_duration = speech_buffer.len() as f32 / 16000.0;
+                                if audio_duration > 0.5 && audio_duration < 30.0 {
+                                    info!("Voice listener: speech detected ({audio_duration:.1}s), transcribing...");
+                                    match transcribe_with_whisper(&speech_buffer) {
+                                        Ok(text) if !text.is_empty() => {
+                                            info!("Voice listener: transcribed: {}", &text[..text.len().min(50)]);
+                                            let _ = stt_tx.send(text);
+                                        }
+                                        Ok(_) => {
+                                            debug!("Voice listener: empty transcription, ignoring");
+                                        }
+                                        Err(e) => {
+                                            warn!("Voice listener: transcription failed: {e}");
+                                        }
+                                    }
+                                }
+                                speech_buffer.clear();
+                                vad.reset();
                             }
-                            Ok(_) => {
-                                debug!("Voice listener: empty transcription, ignoring");
+                            was_active = is_active;
+                        }
+
+                        // Prevent unbounded buffer growth
+                        if speech_buffer.len() > 16000 * 30 {
+                            warn!("Voice listener: speech buffer too large, clearing");
+                            speech_buffer.clear();
+                            vad.reset();
+                        }
+                    } else if has_kws_model {
+                        // --- KWS path: feed audio to ONNX engine ---
+
+                        // Feed samples into the circular buffer
+                        for &s in &samples {
+                            if ring_buf.len() >= RING_BUFFER_CAPACITY {
+                                ring_buf.pop_front();
                             }
-                            Err(e) => {
-                                warn!("Voice listener: transcription failed: {e}");
+                            ring_buf.push_back(s);
+                        }
+
+                        let result = kws_engine.lock()
+                            .map(|mut e| {
+                                e.as_mut()
+                                    .map(|eng| eng.process_audio(&samples))
+                                    .unwrap_or(aios_voice::KwsResult { confidence: 0.0, triggered: false })
+                            })
+                            .unwrap_or(aios_voice::KwsResult { confidence: 0.0, triggered: false });
+
+                        if result.triggered {
+                            info!("Voice listener: KWS triggered (confidence: {:.2})", result.confidence);
+
+                            // Transition to Capture — seed with ring buffer contents
+                            // (skip POST_WAKE_DELAY_SAMPLES from the end to avoid
+                            // capturing the wake word itself)
+                            let buf_vec: Vec<f32> = ring_buf.iter().copied().collect();
+                            let keep = buf_vec.len().saturating_sub(POST_WAKE_DELAY_SAMPLES);
+                            let seed: Vec<f32> = if keep > 0 {
+                                // Keep only pre-trigger audio that is NOT the wake word
+                                // The last POST_WAKE_DELAY_SAMPLES are the trigger — skip them
+                                Vec::new()
+                            } else {
+                                Vec::new()
+                            };
+
+                            state = ListenerState::Capture {
+                                command_buffer: seed,
+                                capture_start: std::time::Instant::now(),
+                                silence_start: None,
+                            };
+                            ring_buf.clear();
+                            post_wake_skip = POST_WAKE_DELAY_SAMPLES;
+
+                            // Reset KWS engine to avoid re-triggering
+                            if let Ok(mut e) = kws_engine.lock() {
+                                if let Some(ref mut eng) = *e {
+                                    eng.reset();
+                                }
+                            }
+                            vad.reset();
+                            was_active = false;
+                        }
+                    } else {
+                        // --- Fallback path: Whisper + keyword match ---
+                        // Feed audio through VAD, transcribe speech segments,
+                        // check if transcription contains the wake phrase.
+
+                        // Feed samples into the circular buffer
+                        for &s in &samples {
+                            if ring_buf.len() >= RING_BUFFER_CAPACITY {
+                                ring_buf.pop_front();
+                            }
+                            ring_buf.push_back(s);
+                        }
+
+                        for chunk in samples.chunks(DEFAULT_FRAME_SIZE) {
+                            let is_active = vad.process_frame(chunk);
+
+                            if is_active {
+                                speech_buffer.extend_from_slice(chunk);
+                            } else if was_active && !is_active {
+                                let audio_duration = speech_buffer.len() as f32 / 16000.0;
+                                if audio_duration > 0.3 && audio_duration < 10.0 {
+                                    // Transcribe and check for wake word
+                                    match transcribe_with_whisper(&speech_buffer) {
+                                        Ok(text) if !text.is_empty() => {
+                                            if wake_detector.matches_wake_word(&text) {
+                                                info!("Voice listener: wake word detected via fallback: \"{}\"", &text[..text.len().min(50)]);
+                                                // Transition to Capture
+                                                state = ListenerState::Capture {
+                                                    command_buffer: Vec::new(),
+                                                    capture_start: std::time::Instant::now(),
+                                                    silence_start: None,
+                                                };
+                                                ring_buf.clear();
+                                                speech_buffer.clear();
+                                                vad.reset();
+                                                was_active = false;
+                                                break;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                speech_buffer.clear();
+                                vad.reset();
+                            }
+                            was_active = is_active;
+                        }
+
+                        // Prevent unbounded buffer growth
+                        if speech_buffer.len() > 16000 * 30 {
+                            speech_buffer.clear();
+                            vad.reset();
+                        }
+                    }
+                }
+
+                ListenerState::Capture {
+                    ref mut command_buffer,
+                    capture_start,
+                    ref mut silence_start,
+                } => {
+                    // Skip post-wake samples to avoid capturing the trigger phrase
+                    let effective_samples = if post_wake_skip > 0 {
+                        let skip = post_wake_skip.min(samples.len());
+                        post_wake_skip -= skip;
+                        &samples[skip..]
+                    } else {
+                        &samples[..]
+                    };
+
+                    // Process through VAD and accumulate
+                    for chunk in effective_samples.chunks(DEFAULT_FRAME_SIZE) {
+                        let is_active = vad.process_frame(chunk);
+
+                        if is_active {
+                            command_buffer.extend_from_slice(chunk);
+                            *silence_start = None;
+                        } else {
+                            // Still accumulate during short silences (pauses in speech)
+                            command_buffer.extend_from_slice(chunk);
+                            if silence_start.is_none() {
+                                *silence_start = Some(std::time::Instant::now());
                             }
                         }
                     }
 
-                    speech_buffer.clear();
-                    vad.reset();
-                }
-                was_active = is_active;
-            }
+                    // Check termination conditions
+                    let elapsed = capture_start.elapsed();
+                    let silence_exceeded = silence_start
+                        .map(|s| s.elapsed() >= CAPTURE_SILENCE_TIMEOUT)
+                        .unwrap_or(false);
+                    let timeout_exceeded = elapsed >= CAPTURE_MAX_DURATION;
 
-            // Prevent unbounded buffer growth
-            if speech_buffer.len() > 16000 * 30 {
-                warn!("Voice listener: speech buffer too large, clearing");
-                speech_buffer.clear();
-                vad.reset();
+                    if silence_exceeded || timeout_exceeded {
+                        let reason = if timeout_exceeded { "timeout" } else { "silence" };
+                        let audio_duration = command_buffer.len() as f32 / 16000.0;
+                        info!("Voice listener: capture ended ({reason}), {audio_duration:.1}s of audio");
+
+                        if audio_duration > 0.3 && !command_buffer.is_empty() {
+                            match transcribe_with_whisper(command_buffer) {
+                                Ok(text) if !text.is_empty() => {
+                                    info!("Voice listener: command transcribed: {}", &text[..text.len().min(50)]);
+                                    let _ = stt_tx.send(text);
+                                }
+                                Ok(_) => {
+                                    debug!("Voice listener: empty command transcription, ignoring");
+                                }
+                                Err(e) => {
+                                    warn!("Voice listener: command transcription failed: {e}");
+                                }
+                            }
+                        }
+
+                        // Return to Idle
+                        state = ListenerState::Idle;
+                        speech_buffer.clear();
+                        vad.reset();
+                        was_active = false;
+                        post_wake_skip = 0;
+                    }
+
+                    // Prevent unbounded buffer growth in capture mode
+                    if let ListenerState::Capture { ref command_buffer, .. } = state {
+                        if command_buffer.len() > 16000 * 30 {
+                            warn!("Voice listener: command buffer too large, forcing transcription");
+                            // Force end of capture on next iteration
+                            // (timeout_exceeded will be true or we set silence_start)
+                        }
+                    }
+                }
             }
         }
     })
@@ -434,6 +674,14 @@ pub struct AiosApp {
     tools: ToolRegistry,
     conversation: Vec<aios_core::types::Message>,
     rt: tokio::runtime::Handle,
+    /// KWS engine for wake word detection (None if infrastructure models missing).
+    kws_engine: Option<std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>>>,
+    /// Flag: wake word training is currently in progress.
+    wake_training_in_progress: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Flag: wake word detection is enabled.
+    wake_enabled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Directory containing KWS models.
+    kws_models_dir: std::path::PathBuf,
 }
 
 impl AiosApp {
@@ -743,6 +991,18 @@ impl AiosApp {
                 let _ = config.set("assistant.name", serde_json::json!(result.assistant_name));
                 let _ = config.set("voice.wake_word", serde_json::json!(result.wake_word));
                 let _ = config.set("system.machine_name", serde_json::json!(result.machine_name));
+
+                // Determine wake word source: pretrained model or custom training
+                let normalized = result.wake_word.to_lowercase().replace(' ', "_");
+                let pretrained_ids = ["hey_assistant", "hey_jarvis", "computer", "ok_computer",
+                    "hey_friday", "jarvis", "ok_jarvis", "skynet", "terminator",
+                    "hey_house", "ok_home", "home_assistant", "mr_anderson", "mr_smith",
+                    "hey_dick_head", "oi_fuckwhit", "yo_homie"];
+                if pretrained_ids.contains(&normalized.as_str()) {
+                    let _ = config.set("voice.wake_word_source", serde_json::json!("pretrained"));
+                } else {
+                    let _ = config.set("voice.wake_word_source", serde_json::json!("training"));
+                }
             }
 
             // Apply country-derived settings to the live or installed system.
@@ -901,6 +1161,10 @@ impl AiosApp {
             tools,
             conversation: Vec::new(),
             rt,
+            kws_engine: None,
+            wake_training_in_progress: None,
+            wake_enabled: None,
+            kws_models_dir: std::path::PathBuf::new(),
         }));
 
         // Show the transition message.
@@ -1294,6 +1558,40 @@ impl AiosApp {
             status.add(StatusLine::new(&t("boot.status.audio_input"), stt && has_whisper,
                 format!("{stt_backend}{}", if !stt { " — disabled" } else { "" })));
 
+            // -- KWS (Wake Word Detection) --
+            {
+                let kws_models_dir = dirs::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
+                    .join(".aios/models/kws");
+                let wake_word = config.get_str("voice.wake_word", "hey assistant");
+                let wake_source = config.get_str("voice.wake_word_source", "pretrained");
+                let infra_present = kws_models_dir.join("melspectrogram.onnx").exists()
+                    || kws_models_dir.join("embedding_model.onnx").exists();
+
+                if !infra_present {
+                    status.add(StatusLine::new("KWS", false, "models not found"));
+                } else if wake_source == "training" {
+                    status.add(StatusLine::new("KWS", false,
+                        format!("training — \"{wake_word}\" (mic disabled until ready)")));
+                } else {
+                    // Check whether the actual model file exists.
+                    let model_available = if let Some(pretrained) = aios_voice::find_pretrained(&wake_word) {
+                        aios_voice::pretrained_model_path(&kws_models_dir, pretrained).exists()
+                    } else {
+                        let sanitized = wake_word.to_lowercase()
+                            .replace(' ', "_")
+                            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+                        kws_models_dir.join("custom").join(format!("{sanitized}.onnx")).exists()
+                    };
+                    if model_available {
+                        status.add(StatusLine::new("KWS", true,
+                            format!("{wake_word} ({wake_source})")));
+                    } else {
+                        status.add(StatusLine::new("KWS", false, "models not found"));
+                    }
+                }
+            }
+
             // -- System --
             let kb_layout = config.get_str("system.keyboard_layout", "us");
             let timezone = std::fs::read_to_string("/etc/timezone")
@@ -1505,12 +1803,19 @@ impl AiosApp {
 
         // Create shared application state.
         let llm_arc = Arc::new(tokio::sync::Mutex::new(llm));
+        let kws_models_dir_for_state = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
+            .join(".aios/models/kws");
         let state = Rc::new(RefCell::new(AiosApp {
             config,
             llm: llm_arc.clone(),
             tools,
             conversation: Vec::new(),
             rt: rt.clone(),
+            kws_engine: None,
+            wake_training_in_progress: None,
+            wake_enabled: None,
+            kws_models_dir: kws_models_dir_for_state,
         }));
 
         // --- Unified message loop (item 3) ---
@@ -1689,9 +1994,204 @@ impl AiosApp {
             info!("Mic toggled: {active}");
         });
 
+        // --- KWS engine setup ---
+        // Read wake word configuration from the app state.
+        let wake_word_cfg = {
+            let s = state.borrow();
+            let wake_phrase = s.config.get_str("voice.wake_word", "hey assistant");
+            let wake_on = s.config.get_bool("voice.wake_enabled", false);
+            let wake_source = s.config.get_str("voice.wake_word_source", "");
+            (wake_phrase, wake_on, wake_source)
+        };
+
+        let wake_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(wake_word_cfg.1));
+        let wake_training_in_progress = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Copy KWS infrastructure models from ISO to user dir on first run.
+        let kws_models_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
+            .join(".aios/models/kws");
+        {
+            let iso_kws_dir = std::path::Path::new("/opt/aios-app/models/kws");
+            if iso_kws_dir.exists() && !kws_models_dir.exists() {
+                if let Err(e) = copy_dir_recursive(iso_kws_dir, &kws_models_dir) {
+                    warn!("KWS: failed to copy models from ISO: {e}");
+                } else {
+                    info!("KWS: copied infrastructure models from ISO to {}", kws_models_dir.display());
+                }
+            }
+        }
+
+        // Try to create the KWS engine. Infrastructure models live at ~/.aios/models/kws/.
+        // Wrapped in Option — None when ONNX infrastructure models are missing (dev/VM).
+        let kws_engine: std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> = {
+            match aios_voice::KwsEngine::new(&kws_models_dir) {
+                Ok(mut engine) => {
+                    // Try to load the active wake word model.
+                    let wake_phrase = &wake_word_cfg.0;
+                    let wake_source = &wake_word_cfg.2;
+
+                    // Check pretrained catalog first.
+                    if let Some(pretrained) = aios_voice::find_pretrained(wake_phrase) {
+                        let model_path = aios_voice::pretrained_model_path(&kws_models_dir, pretrained);
+                        if model_path.exists() {
+                            match engine.load_wake_model(&model_path, pretrained.display_name) {
+                                Ok(()) => info!("KWS: loaded pretrained model for \"{}\"", pretrained.display_name),
+                                Err(e) => warn!("KWS: failed to load pretrained model: {e}"),
+                            }
+                        } else {
+                            warn!("KWS: pretrained model file not found at {}", model_path.display());
+                        }
+                    } else if wake_source == "training" || wake_source == "custom" {
+                        // Try custom model path.
+                        let sanitized = wake_phrase
+                            .to_lowercase()
+                            .replace(' ', "_")
+                            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+                        let custom_path = kws_models_dir.join("custom").join(format!("{sanitized}.onnx"));
+                        if custom_path.exists() {
+                            match engine.load_wake_model(&custom_path, wake_phrase) {
+                                Ok(()) => info!("KWS: loaded custom model for \"{}\"", wake_phrase),
+                                Err(e) => warn!("KWS: failed to load custom model: {e}"),
+                            }
+                        } else {
+                            warn!("KWS: custom model not found at {} — will use fallback detection", custom_path.display());
+                        }
+                    } else if !wake_phrase.is_empty() {
+                        info!("KWS: no model for \"{wake_phrase}\" — will use Whisper fallback detection");
+                    }
+
+                    std::sync::Arc::new(std::sync::Mutex::new(Some(engine)))
+                }
+                Err(e) => {
+                    warn!("KWS: failed to create engine (infrastructure models missing?): {e}");
+                    warn!("KWS: wake word detection will use Whisper fallback if enabled");
+                    std::sync::Arc::new(std::sync::Mutex::new(None))
+                }
+            }
+        };
+
+        // Store KWS state in the app so handle_command can access it.
+        {
+            let mut s = state.borrow_mut();
+            s.kws_engine = Some(kws_engine.clone());
+            s.wake_training_in_progress = Some(wake_training_in_progress.clone());
+            s.wake_enabled = Some(wake_enabled.clone());
+            s.kws_models_dir = kws_models_dir.clone();
+        }
+
+        // Training recovery: if last shutdown happened mid-training, restart or reset.
+        {
+            let wake_source = state.borrow().config.get_str("voice.wake_word_source", "pretrained");
+            if wake_source == "training" {
+                let phrase = state.borrow().config.get_str("voice.wake_word", "hey assistant");
+                let retries = state.borrow().config.get_f64("voice.wake_training_retries", 0.0) as i64;
+                info!("KWS: detected interrupted training for \"{phrase}\" (attempt {retries})");
+
+                if retries >= 3 {
+                    // Too many failures — reset to pretrained default.
+                    {
+                        let mut s = state.borrow_mut();
+                        let _ = s.config.set("voice.wake_word", serde_json::json!("hey assistant"));
+                        let _ = s.config.set("voice.wake_word_source", serde_json::json!("pretrained"));
+                        let _ = s.config.set("voice.wake_training_retries", serde_json::json!(0));
+                    }
+                    chat_view.add_message("system",
+                        "[SYSTEM] Wake word training failed after 3 attempts. Reset to \"Hey Assistant\".");
+                } else {
+                    // Increment retry count and restart training.
+                    {
+                        let mut s = state.borrow_mut();
+                        let _ = s.config.set("voice.wake_training_retries", serde_json::json!(retries + 1));
+                    }
+                    chat_view.add_message("system",
+                        &format!("[SYSTEM] Restarting wake word training for \"{}\" (attempt {})...",
+                            phrase, retries + 1));
+
+                    wake_training_in_progress.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                    let output_dir = kws_models_dir.join("custom");
+                    let chat_for_recovery = chat_view.clone();
+                    let state_for_recovery = state.clone();
+                    let kws_engine_for_recovery = kws_engine.clone();
+                    let wake_enabled_for_recovery = wake_enabled.clone();
+                    let training_flag_for_recovery = wake_training_in_progress.clone();
+                    let phrase_clone = phrase.clone();
+                    let (train_tx, train_rx) = std::sync::mpsc::channel::<Result<std::path::PathBuf, String>>();
+
+                    std::thread::spawn(move || {
+                        let result = aios_voice::KwsTrainer::train(&phrase_clone, &output_dir);
+                        let _ = train_tx.send(result.map_err(|e| e.to_string()));
+                    });
+
+                    glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                        match train_rx.try_recv() {
+                            Ok(Ok(model_path)) => {
+                                info!("KWS recovery training complete: {}", model_path.display());
+                                chat_for_recovery.add_message("system",
+                                    &format!("Wake word training complete for \"{phrase}\". Model saved."));
+
+                                // Hot-swap the model into the KWS engine.
+                                if let Ok(mut guard) = kws_engine_for_recovery.lock() {
+                                    if let Some(ref mut engine) = *guard {
+                                        match engine.load_wake_model(&model_path, &phrase) {
+                                            Ok(()) => {
+                                                info!("KWS: hot-swapped model for \"{}\"", phrase);
+                                                chat_for_recovery.add_message("system",
+                                                    &format!("Wake word \"{phrase}\" is now active."));
+                                            }
+                                            Err(e) => {
+                                                warn!("KWS: failed to load trained model: {e}");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Enable wake word detection and clear retry count.
+                                wake_enabled_for_recovery.store(true, std::sync::atomic::Ordering::Relaxed);
+                                if let Ok(mut cfg) = aios_core::config::ConfigManager::new() {
+                                    let _ = cfg.set("voice.wake_word_source", serde_json::json!("custom"));
+                                    let _ = cfg.set("voice.wake_training_retries", serde_json::json!(0));
+                                }
+
+                                training_flag_for_recovery.store(false, std::sync::atomic::Ordering::Relaxed);
+                                glib::ControlFlow::Break
+                            }
+                            Ok(Err(e)) => {
+                                warn!("KWS recovery training failed: {e}");
+                                chat_for_recovery.add_level_message(
+                                    aios_core::types::MessageLevel::Warning,
+                                    &format!("Wake word training failed: {e}"),
+                                );
+                                let s = state_for_recovery.borrow();
+                                if let Some(ref flag) = s.wake_training_in_progress {
+                                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                glib::ControlFlow::Break
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                let s = state_for_recovery.borrow();
+                                if let Some(ref flag) = s.wake_training_in_progress {
+                                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                glib::ControlFlow::Break
+                            }
+                        }
+                    });
+                }
+            }
+        }
+
         // Start voice listener thread — receives transcribed text via mpsc channel.
         let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
-        let _voice_handle = start_voice_listener(stt_tx, stt_enabled);
+        let _voice_handle = start_voice_listener(
+            stt_tx,
+            stt_enabled,
+            wake_enabled.clone(),
+            wake_training_in_progress.clone(),
+            kws_engine.clone(),
+        );
 
         // Poll for transcribed text from the voice listener (GTK main thread).
         let state_ref = state.clone();
@@ -2122,6 +2622,109 @@ impl AiosApp {
                 );
                 return;
             }
+            CommandResult::BackgroundTask { description, task } => {
+                chat_view.add_message("system", &description);
+
+                match task {
+                    aios_core::config::commands::BackgroundTaskKind::WakeWordTraining { phrase, output_dir } => {
+                        // Get shared state for training.
+                        let training_flag = s.wake_training_in_progress.clone();
+                        let kws_engine_arc = s.kws_engine.clone();
+                        let _kws_models_dir = s.kws_models_dir.clone();
+                        let wake_enabled_flag = s.wake_enabled.clone();
+                        drop(s);
+
+                        if let Some(ref flag) = training_flag {
+                            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+
+                        // Spawn training in a background thread.
+                        let chat_for_train = chat_view.clone();
+                        let (train_tx, train_rx) = std::sync::mpsc::channel::<Result<std::path::PathBuf, String>>();
+
+                        let phrase_clone = phrase.clone();
+                        std::thread::spawn(move || {
+                            let result = aios_voice::KwsTrainer::train(&phrase_clone, &output_dir);
+                            let _ = train_tx.send(result.map_err(|e| e.to_string()));
+                        });
+
+                        // Poll for training completion on the GTK thread.
+                        let state_for_train = state.clone();
+                        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
+                            match train_rx.try_recv() {
+                                Ok(Ok(model_path)) => {
+                                    info!("KWS training complete: {}", model_path.display());
+                                    chat_for_train.add_message("system",
+                                        &format!("Wake word training complete for \"{phrase}\". Model saved."));
+
+                                    // Hot-swap the model into the KWS engine.
+                                    if let Some(ref engine_arc) = kws_engine_arc {
+                                        if let Ok(mut guard) = engine_arc.lock() {
+                                            if let Some(ref mut engine) = *guard {
+                                                match engine.load_wake_model(&model_path, &phrase) {
+                                                    Ok(()) => {
+                                                        info!("KWS: hot-swapped model for \"{}\"", phrase);
+                                                        chat_for_train.add_message("system",
+                                                            &format!("Wake word \"{phrase}\" is now active."));
+                                                    }
+                                                    Err(e) => {
+                                                        warn!("KWS: failed to load trained model: {e}");
+                                                        chat_for_train.add_message("system",
+                                                            &format!("Model trained but failed to load: {e}"));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Enable wake word detection.
+                                    if let Some(ref flag) = wake_enabled_flag {
+                                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    }
+
+                                    // Update config.
+                                    if let Ok(mut cfg) = aios_core::config::ConfigManager::new() {
+                                        let _ = cfg.set("voice.wake_word_source", serde_json::json!("custom"));
+                                    }
+
+                                    // Clear training flag.
+                                    let s = state_for_train.borrow();
+                                    if let Some(ref flag) = s.wake_training_in_progress {
+                                        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                                    }
+
+                                    glib::ControlFlow::Break
+                                }
+                                Ok(Err(e)) => {
+                                    warn!("KWS training failed: {e}");
+                                    chat_for_train.add_level_message(
+                                        aios_core::types::MessageLevel::Warning,
+                                        &format!("Wake word training failed: {e}"),
+                                    );
+
+                                    // Clear training flag.
+                                    let s = state_for_train.borrow();
+                                    if let Some(ref flag) = s.wake_training_in_progress {
+                                        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                                    }
+
+                                    glib::ControlFlow::Break
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                    // Training thread crashed.
+                                    let s = state_for_train.borrow();
+                                    if let Some(ref flag) = s.wake_training_in_progress {
+                                        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    glib::ControlFlow::Break
+                                }
+                            }
+                        });
+                        return;
+                    }
+                }
+            }
             CommandResult::Unknown(cmd) => {
                 chat_view.add_message(
                     "system",
@@ -2472,6 +3075,23 @@ impl AiosApp {
             }
         });
     }
+}
+
+/// Recursively copy all files from `src` directory into `dst` directory.
+/// Creates `dst` and any intermediate directories as needed.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Internal result type for async upgrade version check.

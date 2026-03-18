@@ -118,6 +118,9 @@ pub struct AssistantConfig {
     /// Effort level: "auto", "low", "medium", "high".
     #[serde(default = "default_effort")]
     pub effort: String,
+    /// Wake word phrase (e.g., "hey assistant", "jarvis").
+    #[serde(default = "default_wake_word")]
+    pub wake_word: String,
 }
 
 impl Default for AssistantConfig {
@@ -125,12 +128,14 @@ impl Default for AssistantConfig {
         Self {
             name: default_assistant_name(),
             effort: default_effort(),
+            wake_word: default_wake_word(),
         }
     }
 }
 
 fn default_assistant_name() -> String { "Assistant".to_string() }
 fn default_effort() -> String { "auto".to_string() }
+fn default_wake_word() -> String { "hey assistant".to_string() }
 
 /// Search for and load an autoconfig file.
 ///
@@ -239,7 +244,8 @@ mod tests {
             },
             "assistant": {
                 "name": "Buddy",
-                "effort": "high"
+                "effort": "high",
+                "wake_word": "hey computer"
             },
             "debug": true
         }"#;
@@ -253,6 +259,7 @@ mod tests {
         assert_eq!(cfg.install.target_disk, "auto");
         assert!(!cfg.install.confirm);
         assert_eq!(cfg.assistant.name, "Buddy");
+        assert_eq!(cfg.assistant.wake_word, "hey computer");
         assert!(cfg.debug);
     }
 
@@ -268,6 +275,7 @@ mod tests {
         assert_eq!(cfg.system.keyboard, "us");
         assert!(!cfg.install.enabled);
         assert_eq!(cfg.assistant.name, "Assistant");
+        assert_eq!(cfg.assistant.wake_word, "hey assistant");
     }
 
     #[test]
@@ -277,5 +285,6 @@ mod tests {
         assert_eq!(cfg.provider.primary, "claude");
         assert_eq!(cfg.system.keyboard, "us");
         assert!(!cfg.debug);
+        assert_eq!(cfg.assistant.wake_word, "hey assistant");
     }
 }

@@ -30,8 +30,10 @@ pub const DEFAULTS_JSON: &str = r#"{
         "tts_voice": "en_US-amy-medium",
         "tts_gender": "female",
         "tts_rate": 1.0,
-        "wake_word": "Assistant",
-        "wake_enabled": true
+        "wake_word": "hey assistant",
+        "wake_enabled": true,
+        "wake_word_source": "pretrained",
+        "wake_threshold": 0.5
     },
     "ui": {
         "theme": "dark",

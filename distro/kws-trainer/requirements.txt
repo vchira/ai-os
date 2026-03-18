@@ -1,0 +1,9 @@
+# openWakeWord training dependencies
+# Note: The openWakeWord repo must be cloned separately — the pip package
+# does not include the training script. Clone to /opt/aios-app/kws-trainer/openwakeword/
+openwakeword>=0.4.0
+torch>=2.0
+speechbrain
+onnxruntime
+piper-sample-generator
+pyyaml
