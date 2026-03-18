@@ -226,9 +226,9 @@ fn start_voice_listener(
                             let buf_vec: Vec<f32> = ring_buf.iter().copied().collect();
                             let keep = buf_vec.len().saturating_sub(POST_WAKE_DELAY_SAMPLES);
                             let seed: Vec<f32> = if keep > 0 {
-                                // Keep only pre-trigger audio that is NOT the wake word
-                                // The last POST_WAKE_DELAY_SAMPLES are the trigger — skip them
-                                Vec::new()
+                                // Keep only pre-trigger audio that is NOT the wake word.
+                                // The last POST_WAKE_DELAY_SAMPLES are the trigger — skip them.
+                                buf_vec[..keep].to_vec()
                             } else {
                                 Vec::new()
                             };
@@ -1565,8 +1565,8 @@ impl AiosApp {
                     .join(".aios/models/kws");
                 let wake_word = config.get_str("voice.wake_word", "hey assistant");
                 let wake_source = config.get_str("voice.wake_word_source", "pretrained");
-                let infra_present = kws_models_dir.join("melspectrogram.onnx").exists()
-                    || kws_models_dir.join("embedding_model.onnx").exists();
+                let infra_present = kws_models_dir.join("infrastructure/melspectrogram.onnx").exists()
+                    || kws_models_dir.join("infrastructure/embedding_model.onnx").exists();
 
                 if !infra_present {
                     status.add(StatusLine::new("KWS", false, "models not found"));
@@ -1999,7 +1999,7 @@ impl AiosApp {
         let wake_word_cfg = {
             let s = state.borrow();
             let wake_phrase = s.config.get_str("voice.wake_word", "hey assistant");
-            let wake_on = s.config.get_bool("voice.wake_enabled", false);
+            let wake_on = s.config.get_bool("voice.wake_enabled", true);
             let wake_source = s.config.get_str("voice.wake_word_source", "");
             (wake_phrase, wake_on, wake_source)
         };

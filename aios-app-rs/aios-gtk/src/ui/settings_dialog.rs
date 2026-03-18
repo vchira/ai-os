@@ -488,7 +488,7 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
 
     // Wake word enabled switch.
     let wake_switch = gtk::Switch::new();
-    wake_switch.set_active(config.get_bool("voice.wake_enabled", false));
+    wake_switch.set_active(config.get_bool("voice.wake_enabled", true));
     wake_switch.set_valign(gtk::Align::Center);
     let wake_enabled_row = adw::ActionRow::builder()
         .title("Wake Word Enabled")

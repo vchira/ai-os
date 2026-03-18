@@ -212,6 +212,11 @@ impl KwsEngine {
         let mel_features = self.run_mel(chunk)?;
         self.mel_buf.push(mel_features);
 
+        // Cap the mel buffer to prevent unbounded growth (keep last 128 frames).
+        if self.mel_buf.len() > 128 {
+            self.mel_buf.drain(..self.mel_buf.len() - 128);
+        }
+
         // Step 2: embedding (needs accumulated mel frames)
         let embedding = self.run_embedding()?;
         self.emb_buf.push(embedding);
