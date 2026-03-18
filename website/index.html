@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AiOS — The AI-Native Linux Distribution</title>
+  <meta name="description" content="AiOS is an AI-native Linux distribution where the AI is the interface. Voice-first, multi-channel, privacy-respecting.">
+  <meta property="og:title" content="AiOS — The AI-Native Linux Distribution">
+  <meta property="og:description" content="The AI is the interface. Voice-first, multi-channel, privacy-respecting Linux distribution.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://aios.pages.dev">
+  <meta property="og:image" content="https://aios.pages.dev/img/logo.svg">
+  <link rel="icon" type="image/svg+xml" href="img/logo.svg">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container">
+      <a href="/" class="nav-logo">
+        <img src="img/logo.svg" alt="AiOS logo" width="120" height="40">
+      </a>
+      <ul class="nav-links">
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="docs/">Docs</a></li>
+        <li><a href="about.html">About</a></li>
+        <li><a href="https://github.com/swit-work/ai-os" target="_blank" rel="noopener">GitHub</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <section class="hero">
+    <div class="container">
+      <h1 class="hero-title">AiOS</h1>
+      <p class="hero-subtitle">The AI Is The Interface</p>
+      <p class="hero-description">
+        AiOS is an AI-native Linux distribution where the AI is the primary interface between
+        human intent and system execution. Speak or type what you want — the AI understands,
+        decides, and acts using a rich set of tools.
+      </p>
+      <div class="hero-buttons">
+        <a href="releases.html" class="btn btn-primary">Download Latest</a>
+        <a href="#quickstart" class="btn btn-secondary">Try in a VM</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="container">
+      <h2 class="section-title">Built for the AI Era</h2>
+      <div class="features-grid">
+
+        <div class="feature-card">
+          <span class="feature-icon" aria-hidden="true">&#x1F3A4;</span>
+          <h3 class="feature-title">Voice-First</h3>
+          <p class="feature-description">
+            Wake word activation, local speech-to-text with Whisper, and natural
+            text-to-speech with Piper. All voice processing runs on your hardware.
+          </p>
+        </div>
+
+        <div class="feature-card">
+          <span class="feature-icon" aria-hidden="true">&#x1F4E1;</span>
+          <h3 class="feature-title">Multi-Channel</h3>
+          <p class="feature-description">
+            One AI brain, multiple surfaces. Interact through the Desktop app,
+            a Web browser on your LAN, or Signal messenger — seamlessly.
+          </p>
+        </div>
+
+        <div class="feature-card">
+          <span class="feature-icon" aria-hidden="true">&#x1F6E0;&#xFE0F;</span>
+          <h3 class="feature-title">AI Tools</h3>
+          <p class="feature-description">
+            An extensible tool system lets the AI manage files, run commands,
+            search the web, process data, and delegate to specialized sub-agents.
+          </p>
+        </div>
+
+        <div class="feature-card">
+          <span class="feature-icon" aria-hidden="true">&#x1F512;</span>
+          <h3 class="feature-title">Privacy</h3>
+          <p class="feature-description">
+            Voice processing stays local. Secrets live in an AES-256-GCM encrypted
+            vault with Argon2id key derivation. The AI asks before accessing anything sensitive.
+          </p>
+        </div>
+
+        <div class="feature-card">
+          <span class="feature-icon" aria-hidden="true">&#x1F4BB;</span>
+          <h3 class="feature-title">VM Ready</h3>
+          <p class="feature-description">
+            Download the ISO and boot it in QEMU, VirtualBox, or VMware. Full
+            experience in a virtual machine — no dedicated hardware required.
+          </p>
+        </div>
+
+        <div class="feature-card">
+          <span class="feature-icon" aria-hidden="true">&#x1F9E0;</span>
+          <h3 class="feature-title">Smart</h3>
+          <p class="feature-description">
+            Context-aware conversations with episodic memory, cost optimization
+            through intelligent model routing, and automatic complexity detection.
+          </p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <section class="quickstart" id="quickstart">
+    <div class="container">
+      <h2 class="section-title">Quick Start</h2>
+      <div class="steps">
+
+        <div class="step">
+          <div class="step-number">1</div>
+          <div class="step-content">
+            <h3>Download</h3>
+            <p>
+              Grab the latest ISO image from the
+              <a href="releases.html">Releases page</a> or from
+              <a href="https://github.com/swit-work/ai-os/releases" target="_blank" rel="noopener">GitHub Releases</a>.
+            </p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">2</div>
+          <div class="step-content">
+            <h3>Boot in a VM</h3>
+            <p>
+              Launch AiOS in QEMU with audio and clipboard support:
+            </p>
+            <pre>qemu-system-x86_64 \
+  -cdrom aios-*.iso \
+  -m 4G \
+  -smp 2 \
+  -enable-kvm \
+  -device virtio-vga-gl \
+  -display sdl,gl=on \
+  -device intel-hda \
+  -device hda-duplex \
+  -nic user,model=virtio-net-pci</pre>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step-number">3</div>
+          <div class="step-content">
+            <h3>Or Write to USB</h3>
+            <p>
+              For bare-metal installation, write the ISO to a USB drive:
+            </p>
+            <pre>sudo dd if=aios-*.iso of=/dev/sdX bs=4M status=progress oflag=sync</pre>
+            <p>
+              Replace <code>/dev/sdX</code> with your USB device. All data on the drive will be erased.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="container">
+      <span class="footer-text">&copy; 2026 swIT.work GmbH &middot; BSL 1.1</span>
+      <ul class="footer-links">
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="about.html">About</a></li>
+        <li><a href="https://github.com/swit-work/ai-os" target="_blank" rel="noopener">GitHub</a></li>
+      </ul>
+    </div>
+  </footer>
+
+</body>
+</html>
