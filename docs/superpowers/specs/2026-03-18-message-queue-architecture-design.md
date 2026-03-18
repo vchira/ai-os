@@ -51,7 +51,20 @@ CREATE TABLE clear_markers (
 );
 
 CREATE INDEX idx_clear_channel ON clear_markers(channel);
+
+-- FTS5 virtual table for full-text search on message content
+CREATE VIRTUAL TABLE messages_fts USING fts5(content, content=messages, content_rowid=id);
+
+-- Schema version tracking for future migrations
+CREATE TABLE schema_version (
+    version INTEGER NOT NULL
+);
+INSERT INTO schema_version VALUES (1);
 ```
+
+### Database Size Management
+
+Messages are never deleted. For typical usage (~100 messages/day), the database grows ~10MB/year. SQLite handles databases up to 281 TB. No retention policy needed for v1. If needed later, a `/history prune --before <date>` command can be added.
 
 ### QueuedMessage Type
 
@@ -59,15 +72,38 @@ CREATE INDEX idx_clear_channel ON clear_markers(channel);
 pub struct QueuedMessage {
     pub id: i64,
     pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub channel: String,
-    pub role: String,          // "user", "assistant", "system", "tool"
+    pub channel: ChannelKind,   // uses existing enum (Desktop, Web, Signal, Voice)
+    pub role: Role,             // uses existing enum (User, Assistant, System, Tool)
     pub source: Option<String>, // "claude-sonnet-4", "gpt-4o", "user", "whisper", etc.
     pub content: Option<String>,
-    pub level: Option<String>,  // "info", "success", "warning", "error"
-    pub tool_calls: Option<String>, // JSON
+    pub level: Option<MessageLevel>, // uses existing enum (Info, Success, Warning, Error)
+    pub tool_calls: Option<String>,  // JSON serialized Vec<ToolCall>
     pub tool_call_id: Option<String>,
-    pub metadata: Option<String>,   // JSON
+    pub metadata: Option<String>,    // JSON blob (card_type for setup, etc.)
 }
+
+// Conversion to existing LLM Message type:
+impl From<&QueuedMessage> for Message {
+    fn from(qm: &QueuedMessage) -> Self {
+        Message {
+            role: qm.role.clone(),
+            content: qm.content.clone(),
+            tool_call_id: qm.tool_call_id.clone(),
+            tool_calls: qm.tool_calls.as_ref()
+                .and_then(|j| serde_json::from_str(j).ok())
+                .unwrap_or_default(),
+        }
+    }
+}
+```
+
+Note: `ChannelKind` and `Role` are stored in SQLite as their string representations (via serde). The `ChannelKind` enum is extended with a `System` variant for boot/setup messages that don't originate from a specific channel.
+
+### Voice: Modality, Not a Separate Channel
+
+Voice is NOT an independent channel — it's a modality applied on top of Desktop. When the user speaks via wake word, the transcribed text is pushed to the queue with `channel: Desktop` and `source: "whisper"`. The TTS output is triggered by the Desktop channel's `render_message()` when voice is enabled.
+
+The `VoiceChannel` listed in Section 2 is removed. Voice input (STT) and output (TTS) are handled by the `DesktopChannel` with voice-specific logic.
 ```
 
 ### API
@@ -131,7 +167,12 @@ pub enum QueueEvent {
 
 ### Thread Safety
 
-`MessageQueue` is wrapped in `Arc<Mutex<MessageQueue>>` for shared access across channels and the message loop. The mutex is held briefly for each push/query — SQLite operations take <1ms.
+`MessageQueue` is wrapped in `Arc<tokio::sync::RwLock<MessageQueue>>` for shared access. SQLite is opened in WAL mode for concurrent read support.
+
+- **Writes** (`push`, `clear`): take a write lock, execute INSERT, then release lock BEFORE notifying subscribers (to avoid blocking under lock)
+- **Reads** (`get_latest`, `get_before`, `search`, `get_llm_context`): take a read lock — multiple readers do not block each other
+- **Subscribers**: use `tokio::sync::mpsc::UnboundedSender<QueueEvent>` — sending never blocks
+- **push(&self)**: uses `&self` not `&mut self` — the `RwLock` provides interior mutability. SQLite WAL mode handles concurrent access safely.
 
 ## 2. Channel Trait (`aios-core/src/channel/`)
 
@@ -146,7 +187,12 @@ pub struct ChannelBase {
 }
 
 /// Trait that every channel implements.
-pub trait Channel: Send {
+///
+/// No `Send` bound — DesktopChannel holds GTK widgets which are not Send.
+/// Queue event dispatch is handled per-channel: Desktop events are marshaled
+/// to the GTK main thread via `glib::idle_add_local`, Web/Signal events
+/// run on the Tokio runtime directly.
+pub trait Channel {
     /// Channel identity.
     fn kind(&self) -> ChannelKind;
     fn capabilities(&self) -> &ChannelCapabilities;
@@ -164,6 +210,11 @@ pub trait Channel: Send {
     /// Whether this channel is currently active/visible.
     fn is_active(&self) -> bool;
 }
+
+// GTK thread safety note: DesktopChannel methods MUST be called from the
+// GTK main thread. The event dispatch layer polls queue events via
+// glib::timeout_add_local and calls render_message on the main thread.
+// Web and Signal channels can receive events on any thread.
 ```
 
 ### Implementations
@@ -234,9 +285,23 @@ queue.push(role: "assistant", source: "system", content: "Please enter your Clau
 queue.push(role: "system", source: "system", level: "success", content: "Setup complete!")
 ```
 
-No special `SetupConversation` state machine. No `SetupCard` widgets. The same chat bubbles, the same queue, the same rendering pipeline. The setup conversation is scrollable, searchable, and persisted.
+No special `SetupConversation` state machine. The same queue, the same rendering pipeline. The setup conversation is scrollable, searchable, and persisted.
 
-**Setup state tracking:** A simple state enum in `setup.rs` tracks which step we're on (provider selection, API key, password, etc.). Each user message advances the state. No GTK-specific UI — just queue messages.
+**Interactive elements via metadata:** Setup steps that need rich UI (provider selection buttons, password fields, wake word dropdowns) use the `metadata` JSON field to describe the card:
+
+```json
+{
+  "card_type": "provider_select",
+  "options": ["Claude", "OpenAI"],
+  "description": "Choose your AI provider"
+}
+```
+
+The `DesktopChannel` renders these as interactive GTK cards (buttons, entries, dropdowns) — same as today's setup cards but driven by queue metadata. `WebChannel` renders them as HTML forms. `SignalChannel` renders as numbered text options. Once the user interacts, the response is pushed to the queue as a normal user message and the card is dismissed.
+
+**Card types:** `provider_select`, `api_key_entry`, `password_entry`, `dropdown_select`, `wake_word_select`, `confirmation`. Each is a simple JSON schema in metadata — the channel renders it according to its capabilities.
+
+**Setup state tracking:** A simple state enum in `setup.rs` tracks which step we're on (provider selection, API key, password, etc.). Each user message advances the state. The state machine pushes the next card to the queue.
 
 ### Autoconfig Path
 
@@ -300,6 +365,17 @@ impl ChatView {
 
 The `DesktopChannel` calls these methods. Nothing else does.
 
+### Thinking Placeholder
+
+The "thinking dots" indicator is **local UI state**, not a queue message. When the LLM is processing:
+
+1. `DesktopChannel` shows a thinking placeholder widget (animated dots)
+2. When the LLM response arrives → pushed to queue → `QueueEvent::NewMessage` received
+3. `DesktopChannel` removes the placeholder, renders the real message
+4. TTS signal flag works the same — placeholder stays until voice starts
+
+The thinking state is per-channel, transient, never persisted. Only real messages go to the queue.
+
 ## 5. Conversation History Tool
 
 ### Location
@@ -327,7 +403,9 @@ Description: Search and browse past conversations from the persistent message qu
 
 ### Integration
 
-The tool receives a read-only reference to `MessageQueue` (via `Arc<Mutex<MessageQueue>>`). It only reads — never pushes messages or modifies the queue.
+**Injection:** The tool receives a read-only reference to `MessageQueue` via constructor injection: `ConversationHistoryTool::new(queue: Arc<RwLock<MessageQueue>>)`. Registered in `ToolRegistry` during startup. Read-only — never pushes or modifies.
+
+**Search implementation:** Uses SQLite FTS5 for the `search()` action. An FTS5 virtual table indexes the `content` column for fast full-text search.
 
 The LLM can call this tool like any other:
 - User: "What did we discuss yesterday?"
@@ -346,15 +424,22 @@ Before each LLM call:
 
 ```rust
 let context = queue.get_llm_context(50);
-// Filters: role in (user, assistant, tool), after latest clear_all marker
-// Returns QueuedMessages, converted to the LLM's expected Message format
 ```
+
+**Filtering rules for `get_llm_context`:**
+- Include: `role` in (User, Assistant, Tool)
+- Exclude: `role` = System (boot messages, info/warning/error)
+- Respects `clear_all` markers — returns nothing before the latest `clear_all` marker
+- Per-channel `/clear` does NOT affect LLM context (only `/clear -all` does)
+- Includes messages from ALL channels (one AI brain, one conversation — a Signal message and a Desktop message are both part of the context)
+- Includes tool_call and tool_result messages (needed for the LLM to understand tool interactions)
+- Returns results converted via `From<&QueuedMessage> for Message`
 
 Context pruning/summarization (already in `aios-llm/src/context.rs`) works on the query result, same as before.
 
 ### Cross-Session Context
 
-Because the queue persists, the LLM can see messages from before the last reboot. The `get_llm_context()` method returns the most recent N messages regardless of session boundaries. This gives the AI natural continuity.
+Because the queue persists, the LLM can see messages from before the last reboot. The `get_llm_context()` method returns the most recent N messages regardless of session boundaries (but respects `clear_all` markers). This gives the AI natural continuity.
 
 ## 7. `/clear` Command
 
@@ -474,7 +559,7 @@ No data migration needed.
 
 | File | Reason |
 |------|--------|
-| `aios-gtk/src/ui/first_boot.rs` | Setup is queue messages now |
+| `aios-gtk/src/ui/first_boot.rs` | ~2,300 lines — setup is queue messages now |
 
 ## 12. Testing
 
