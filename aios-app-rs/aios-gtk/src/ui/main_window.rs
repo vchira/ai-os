@@ -215,13 +215,19 @@ const SETTINGS_BUTTON_NAME: &str = "settings-button";
 /// - A `ScrolledWindow` holding the chat view (vertical, expands).
 /// - A `Separator` and the prompt input area at the bottom.
 /// - A [`ChannelOverlay`] that appears when the AI is talking on another channel.
+/// Result of building the main window — the window plus the VU meter widget.
+pub struct MainWindowResult {
+    pub window: adw::ApplicationWindow,
+    pub vu_meter: gtk::LevelBar,
+}
+
 pub fn build_main_window(
     app: &adw::Application,
     chat_view: &ChatView,
     prompt_input: &PromptInput,
     channel_overlay: &ChannelOverlay,
     available_providers: &[&str],
-) -> adw::ApplicationWindow {
+) -> MainWindowResult {
     // Load CSS.
     let css_provider = gtk::CssProvider::new();
     #[allow(deprecated)]
@@ -360,7 +366,7 @@ pub fn build_main_window(
         gtk::glib::Propagation::Stop
     });
 
-    window
+    MainWindowResult { window, vu_meter }
 }
 
 // ---------------------------------------------------------------------------

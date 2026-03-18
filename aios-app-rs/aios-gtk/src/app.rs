@@ -815,7 +815,8 @@ impl AiosApp {
             aios_core::i18n::set_language(&lang);
         }
 
-        let window = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay, &[&t("setup.window_title")]);
+        let mw = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay, &[&t("setup.window_title")]);
+        let window = mw.window;
 
         // Hide the prompt input during setup — it will be shown in transition_to_normal_mode.
         prompt_input.widget().set_visible(false);
@@ -1343,9 +1344,10 @@ impl AiosApp {
         aios_core::i18n::init();
         aios_core::i18n::set_language(&auto.system.language);
 
-        let window = main_window::build_main_window(
+        let mw = main_window::build_main_window(
             app, &chat_view, &prompt_input, &channel_overlay, &["AiOS"],
         );
+        let window = mw.window;
         prompt_input.widget().set_visible(false);
 
         // Show boot status.
@@ -1515,13 +1517,15 @@ impl AiosApp {
         }
         let provider_refs: Vec<&str> = available_providers.iter().map(|s| *s).collect();
 
-        let window = main_window::build_main_window(
+        let mw = main_window::build_main_window(
             app,
             &chat_view,
             &prompt_input,
             &channel_overlay,
             &provider_refs,
         );
+        let window = mw.window;
+        let vu_meter_widget = mw.vu_meter;
 
         // Normal boot — show settings button (it starts hidden for setup flow).
         main_window::set_settings_button_visible(&window, true);
@@ -2258,18 +2262,14 @@ impl AiosApp {
             audio_level.clone(),
         );
 
-        // VU meter: poll audio level and drive the level bar in the main window.
-        // The VU meter was created in main_window.rs with widget name "vu-meter".
+        // VU meter: poll audio level and drive the level bar.
         let vu_level = audio_level.clone();
-        let vu_bar = main_window::find_widget_by_name::<gtk4::LevelBar>(window.upcast_ref(), "vu-meter");
-        if let Some(vu_bar) = vu_bar {
-            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                let level = vu_level.load(std::sync::atomic::Ordering::Relaxed);
-                // Scale 0-100 to 0-20 (20 discrete segments)
-                vu_bar.set_value(level as f64 / 5.0);
-                glib::ControlFlow::Continue
-            });
-        }
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            let level = vu_level.load(std::sync::atomic::Ordering::Relaxed);
+            // Scale 0-100 to 0-20 (20 discrete segments)
+            vu_meter_widget.set_value(level as f64 / 5.0);
+            glib::ControlFlow::Continue
+        });
 
         // Poll for transcribed text from the voice listener (GTK main thread).
         let state_ref = state.clone();
