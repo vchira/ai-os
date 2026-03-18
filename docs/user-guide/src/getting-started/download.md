@@ -4,7 +4,7 @@
 
 Download the latest AiOS ISO image from the official releases page:
 
-> **[github.com/AiOS-Project/ai-os/releases](https://github.com/AiOS-Project/ai-os/releases)**
+> **[github.com/swit-work/ai-os/releases](https://github.com/swit-work/ai-os/releases)**
 
 The ISO file is approximately 900 MB. The filename follows the pattern:
 
@@ -51,7 +51,7 @@ No additional downloads are needed after booting. The only external requirement 
 If you prefer to build your own ISO, you can do so from the source repository. This requires Docker:
 
 ```bash
-git clone https://github.com/AiOS-Project/ai-os.git
+git clone https://github.com/swit-work/ai-os.git
 cd ai-os
 ./start.sh          # Build and boot in QEMU
 ./start.sh --clean  # Full clean rebuild

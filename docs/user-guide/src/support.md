@@ -35,7 +35,7 @@ The AI has access to system tools and can diagnose problems in real time.
 
 If you encounter a bug, please report it on the GitHub issue tracker:
 
-> **[github.com/AiOS-Project/ai-os/issues](https://github.com/AiOS-Project/ai-os/issues)**
+> **[github.com/swit-work/ai-os/issues](https://github.com/swit-work/ai-os/issues)**
 
 When reporting a bug, include:
 
@@ -57,11 +57,11 @@ AiOS is an open-source project. Contributions are welcome:
 
 See the project repository for contribution guidelines:
 
-> **[github.com/AiOS-Project/ai-os](https://github.com/AiOS-Project/ai-os)**
+> **[github.com/swit-work/ai-os](https://github.com/swit-work/ai-os)**
 
 ## Community
 
 Join the AiOS community to discuss ideas, ask questions, and share experiences:
 
-- **GitHub Discussions** -- [github.com/AiOS-Project/ai-os/discussions](https://github.com/AiOS-Project/ai-os/discussions)
-- **Issue Tracker** -- [github.com/AiOS-Project/ai-os/issues](https://github.com/AiOS-Project/ai-os/issues)
+- **GitHub Discussions** -- [github.com/swit-work/ai-os/discussions](https://github.com/swit-work/ai-os/discussions)
+- **Issue Tracker** -- [github.com/swit-work/ai-os/issues](https://github.com/swit-work/ai-os/issues)

@@ -11,7 +11,7 @@ build-dir = "book"
 [output.html]
 default-theme = "coal"
 preferred-dark-theme = "coal"
-git-repository-url = "https://github.com/AiOS-Project/ai-os"
+git-repository-url = "https://github.com/swit-work/ai-os"
 additional-css = ["src/theme/custom.css"]
 
 [output.html.search]

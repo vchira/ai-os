@@ -125,6 +125,10 @@ On startup, AiOS shows an INFO message with green/red indicators for each channe
 # Deep clean (also purge Docker cache volumes)
 ./clean.sh --deep
 
+# Release
+./release.sh alpha|beta|release   # Build + publish to GitHub Releases
+./deploy-website.sh               # Deploy website to Cloudflare Pages
+
 # Development workflow
 make check              # Fast compilation check
 make test               # Run all 563+ workspace tests
@@ -444,6 +448,9 @@ Code execution (`execute_code` tool) always uses sandbox — Docker preferred, p
 ### Root Scripts
 - `start.sh` — Build + boot (`--clean` for full rebuild)
 - `clean.sh` — Remove all artifacts (`--deep` for Docker volumes)
+- `release.sh` — Secret scan + ISO build + GitHub Release publishing
+- `deploy-website.sh` — Deploy website to Cloudflare Pages
+- `RELEASE.md` — Release process documentation
 - `.env` — API keys (not in git, baked into ISO at build time)
 
 ## First-Boot Setup

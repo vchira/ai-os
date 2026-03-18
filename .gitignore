@@ -28,3 +28,6 @@ autoconfig-*.json
 # OS files
 .DS_Store
 Thumbs.db
+
+# Website generated docs
+website/docs/

@@ -1,14 +1,33 @@
 # License
 
-AiOS is open-source software. The project and its components are licensed as follows:
-
 ## AiOS application
 
-The AiOS application (the Rust codebase in `aios-app-rs/`) is licensed under the terms specified in the project repository.
+AiOS (the Rust application in `aios-app-rs/` and all scripts in this repository) is licensed under the **Business Source License 1.1 (BSL 1.1)**.
 
-See the LICENSE file in the repository root for the full license text:
+### What BSL 1.1 means in plain language
 
-> **[github.com/AiOS-Project/ai-os](https://github.com/AiOS-Project/ai-os)**
+BSL 1.1 is a source-available license designed to be fair to both users and developers. Here is what it means for you:
+
+**You are free to:**
+- Use AiOS personally on your own machines
+- Use AiOS in an educational context (schools, universities, self-learning)
+- Deploy AiOS internally within your company for your own employees
+- Evaluate AiOS to decide if it fits your needs
+- Read, study, and modify the source code for the above purposes
+
+**You need written approval from [swIT.work GmbH](https://swit.work) for:**
+- Distributing AiOS or a modified version to others (commercially or publicly)
+- Building a derivative distribution based on AiOS
+- Offering AiOS as a hosted or cloud service to customers
+- Bundling AiOS with hardware for sale
+
+**Change date:** After 5 years from the release date of each version, that version automatically converts to the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0), which is a fully permissive open-source license.
+
+The full license text is in the repository:
+
+> **[github.com/swit-work/ai-os — LICENSE](https://github.com/swit-work/ai-os/blob/main/LICENSE)**
+
+For commercial licensing inquiries, contact: [swit.work](https://swit.work)
 
 ## Base system
 
