@@ -583,18 +583,41 @@ fn summarize_for_tts(raw: &str, api_key: &str) -> String {
 /// Runs in a background thread so it doesn't block the GTK main loop.
 /// For long responses, uses Claude Haiku to generate a one-sentence summary.
 fn speak_if_enabled(text: &str, config: &ConfigManager) {
+    speak_if_enabled_with_signal(text, config, None);
+}
+
+/// Speak the response text via TTS if enabled.
+///
+/// If `tts_started` is provided, the flag is set to `true` just before the
+/// TTS audio begins playing. This allows the UI to keep a "thinking"
+/// indicator visible until the voice actually starts.
+fn speak_if_enabled_with_signal(
+    text: &str,
+    config: &ConfigManager,
+    tts_started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) {
     let tts_enabled = config.get_bool("voice.tts_enabled", true);
     if !tts_enabled {
+        // Signal immediately if TTS is off — caller should remove thinking now
+        if let Some(flag) = tts_started {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         return;
     }
 
     // Short responses: speak directly (no LLM call needed)
     if let Some(short) = prepare_tts_text_short(text) {
         if short.is_empty() {
+            if let Some(flag) = tts_started {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             return;
         }
         let speak_text = short;
         std::thread::spawn(move || {
+            if let Some(flag) = tts_started {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             do_tts(&speak_text);
         });
         return;
@@ -605,6 +628,9 @@ fn speak_if_enabled(text: &str, config: &ConfigManager) {
     let api_key = config.get_str("llm.claude_api_key", "");
     std::thread::spawn(move || {
         let speak_text = summarize_for_tts(&raw, &api_key);
+        if let Some(flag) = tts_started {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         do_tts(&speak_text);
     });
 }
@@ -3004,6 +3030,9 @@ impl AiosApp {
         // Stop any active TTS when the user sends a new message
         stop_tts();
 
+        // Show thinking placeholder immediately
+        let thinking_handle = chat_view.add_thinking();
+
         let s = state.borrow();
         let llm = s.llm.clone();
         let rt = s.rt.clone();
@@ -3052,26 +3081,60 @@ impl AiosApp {
             }
         });
 
-        // Poll the channel from the GTK main thread.
+        // Poll for LLM response. Once it arrives, start TTS and wait for
+        // voice to begin before removing the thinking placeholder.
         let chat_view_ref = chat_view.clone();
         let state_ref = state.clone();
+        let tts_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Phase 1: wait for LLM response
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
             match rx.try_recv() {
                 Ok(LlmResult::Success { content, updated_history }) => {
-                    chat_view_ref.add_message("assistant", &content);
-                    speak_if_enabled(&content, &state_ref.borrow().config);
+                    // Response arrived — start TTS with signal
+                    let tts_flag = tts_started.clone();
+                    speak_if_enabled_with_signal(
+                        &content,
+                        &state_ref.borrow().config,
+                        Some(tts_flag.clone()),
+                    );
+
+                    // Update conversation history
                     let mut s = state_ref.borrow_mut();
                     s.conversation = updated_history;
                     s.conversation
                         .push(aios_core::types::Message::assistant(&content));
+                    drop(s);
+
+                    // Phase 2: wait for TTS to start, then swap thinking → real message
+                    let cv = chat_view_ref.clone();
+                    let handle = thinking_handle.clone();
+                    let content_for_display = content.clone();
+                    glib::timeout_add_local(
+                        std::time::Duration::from_millis(30),
+                        move || {
+                            if tts_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                cv.remove_thinking(&handle);
+                                cv.add_message("assistant", &content_for_display);
+                                glib::ControlFlow::Break
+                            } else {
+                                glib::ControlFlow::Continue
+                            }
+                        },
+                    );
+
                     glib::ControlFlow::Break
                 }
                 Ok(LlmResult::Error(err)) => {
+                    chat_view_ref.remove_thinking(&thinking_handle);
                     chat_view_ref.add_message("system", &format!("Error: {err}"));
                     glib::ControlFlow::Break
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    chat_view_ref.remove_thinking(&thinking_handle);
+                    glib::ControlFlow::Break
+                }
             }
         });
     }

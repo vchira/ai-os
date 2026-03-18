@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 
+use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{self as gtk, Align, Orientation};
 
@@ -59,6 +60,15 @@ impl CardHandle {
 // ---------------------------------------------------------------------------
 // ChatView
 // ---------------------------------------------------------------------------
+
+/// Handle to a thinking/loading placeholder message.
+///
+/// Call [`ChatView::remove_thinking`] with this handle to remove the
+/// placeholder when the real response is ready to display.
+#[derive(Clone)]
+pub struct ThinkingHandle {
+    widget: gtk::Box,
+}
 
 /// Chat message display area.
 ///
@@ -376,6 +386,67 @@ impl ChatView {
                 }
             }
         }
+    }
+
+    /// Add a thinking/loading placeholder message.
+    ///
+    /// Shows an animated "thinking" indicator in the assistant's position.
+    /// Returns a [`ThinkingHandle`] — pass it to [`remove_thinking`] to
+    /// remove the placeholder when the real response is ready.
+    pub fn add_thinking(&self) -> ThinkingHandle {
+        let row = gtk::Box::new(Orientation::Vertical, 2);
+        row.add_css_class("message-row");
+        row.add_css_class("message-assistant");
+        row.set_halign(Align::Start);
+        row.set_margin_start(0);
+        row.set_margin_end(60);
+        row.set_hexpand(true);
+
+        // Role label
+        let role_label = gtk::Label::new(Some(&role_display_name("assistant")));
+        role_label.add_css_class("message-role-label");
+        role_label.set_halign(Align::Start);
+        row.append(&role_label);
+
+        // Thinking bubble with animated dots
+        let bubble = gtk::Box::new(Orientation::Horizontal, 6);
+        bubble.add_css_class("message-bubble");
+        bubble.add_css_class("thinking-bubble");
+
+        let dots_label = gtk::Label::new(Some("\u{2022} \u{2022} \u{2022}"));
+        dots_label.add_css_class("thinking-dots");
+        dots_label.set_opacity(0.5);
+        bubble.append(&dots_label);
+
+        // Animate the dots opacity
+        let dots = dots_label.clone();
+        let tick = std::cell::Cell::new(0u32);
+        glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
+            let t = tick.get();
+            tick.set(t + 1);
+            let opacity = match t % 3 {
+                0 => 0.3,
+                1 => 0.6,
+                _ => 0.9,
+            };
+            dots.set_opacity(opacity);
+            // Stop if the widget has been removed from the tree
+            if dots.parent().is_none() {
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
+
+        row.append(&bubble);
+        self.container.append(&row);
+        self.scroll_to_bottom();
+
+        ThinkingHandle { widget: row }
+    }
+
+    /// Remove a thinking placeholder previously added with [`add_thinking`].
+    pub fn remove_thinking(&self, handle: &ThinkingHandle) {
+        self.container.remove(&handle.widget);
     }
 
     /// Remove all messages from the chat view.
