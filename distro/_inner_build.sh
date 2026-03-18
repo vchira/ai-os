@@ -878,6 +878,59 @@ if [ ! -f "${PIPER_VOICE_DIR}/en_US-amy-medium.onnx" ]; then
     curl -fsSL "${VOICE_URL}/en_US-amy-medium.onnx.json" -o "${PIPER_VOICE_DIR}/en_US-amy-medium.onnx.json" 2>/dev/null || true
 fi
 
+# ── KWS (Keyword Spotting) models ──
+echo "[AiOS] Setting up KWS models..."
+mkdir -p /opt/aios-app/models/kws/infrastructure
+mkdir -p /opt/aios-app/models/kws/pretrained
+
+# Download openWakeWord v0.5.1 infrastructure models (embedding + mel + VAD)
+OWW_BASE="https://github.com/dscripka/openWakeWord/releases/download/v0.5.1"
+wget -q -O /opt/aios-app/models/kws/infrastructure/embedding_model.onnx \
+    "${OWW_BASE}/embedding_model.onnx" 2>/dev/null || \
+    echo "WARN: Failed to download embedding_model.onnx"
+wget -q -O /opt/aios-app/models/kws/infrastructure/melspectrogram.onnx \
+    "${OWW_BASE}/melspectrogram.onnx" 2>/dev/null || \
+    echo "WARN: Failed to download melspectrogram.onnx"
+wget -q -O /opt/aios-app/models/kws/infrastructure/silero_vad.onnx \
+    "${OWW_BASE}/silero_vad.onnx" 2>/dev/null || \
+    echo "WARN: Failed to download silero_vad.onnx"
+
+# Download official openWakeWord wake word model
+wget -q -O /opt/aios-app/models/kws/pretrained/hey_jarvis.onnx \
+    "${OWW_BASE}/hey_jarvis_v0.1.onnx" 2>/dev/null || \
+    echo "WARN: Failed to download hey_jarvis.onnx"
+
+# Download community wake word models from home-assistant-wakewords-collection
+HA_WW_BASE="https://raw.githubusercontent.com/fwartner/home-assistant-wakewords-collection/main/en"
+wget -q -O /opt/aios-app/models/kws/pretrained/computer.onnx "$HA_WW_BASE/computer/computer_v2.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/ok_computer.onnx "$HA_WW_BASE/ok_computer/ok_computer.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/hey_friday.onnx "$HA_WW_BASE/hey_friday/hey_friday!.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/jarvis.onnx "$HA_WW_BASE/jarvis/jarvis_v2.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/ok_jarvis.onnx "$HA_WW_BASE/ok_jarvis/ok_jarvis.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/skynet.onnx "$HA_WW_BASE/skynet/Skynet.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/terminator.onnx "$HA_WW_BASE/terminator/Terminator.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/hey_house.onnx "$HA_WW_BASE/hey_house/hey_house.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/ok_home.onnx "$HA_WW_BASE/ok_home/ok_home.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/home_assistant.onnx "$HA_WW_BASE/home_assistant/Home_assistant.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/mr_anderson.onnx "$HA_WW_BASE/mr_anderson/Mr._Anderson.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/mr_smith.onnx "$HA_WW_BASE/mr_smith/mr_smith.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/hey_dick_head.onnx "$HA_WW_BASE/hey_dick_head/hey_dick_head.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/oi_fuckwhit.onnx "$HA_WW_BASE/oi_fuckwhit/oi_fuckwhit_v2.onnx" 2>/dev/null || true
+wget -q -O /opt/aios-app/models/kws/pretrained/yo_homie.onnx "$HA_WW_BASE/yo_homie/yo_homie.onnx" 2>/dev/null || true
+
+# Copy pre-trained default wake word (built on dev machine and baked into ISO)
+if [ -f /opt/aios-app/models/kws/pretrained/hey_assistant.onnx ]; then
+    echo "[AiOS] hey_assistant.onnx already present"
+else
+    echo "INFO: No hey_assistant.onnx in ISO — user can train via /wake train"
+fi
+
+# First-boot: copy KWS models to user home directory (app handles this at startup)
+# mkdir -p ~/.aios/models/kws/{infrastructure,pretrained,custom}
+# cp -n /opt/aios-app/models/kws/infrastructure/* ~/.aios/models/kws/infrastructure/
+# cp -n /opt/aios-app/models/kws/pretrained/* ~/.aios/models/kws/pretrained/
+echo "[AiOS] KWS models setup complete."
+
 # ── AiOS config (API keys from build config, injected before chroot) ──
 # CLAUDE_KEY and OPENAI_KEY are already set from /tmp/aios-build-config
 [ -z "${CLAUDE_KEY:-}" ] && CLAUDE_KEY=""
@@ -1109,6 +1162,31 @@ if [ -f /work/aios-app-rs/target/release/aios ]; then
 else
     echo "ERROR: Rust binary not found. Build with: cd aios-app-rs && cargo build --release"
     exit 1
+fi
+
+# Copy KWS trainer scripts into ISO
+mkdir -p config/includes.chroot/opt/aios-app/kws-trainer
+if [ -f /work/distro/kws-trainer/train.py ]; then
+    cp /work/distro/kws-trainer/train.py config/includes.chroot/opt/aios-app/kws-trainer/
+    echo "[*] KWS train.py copied into ISO"
+else
+    echo "WARN: kws-trainer/train.py not found — skipping"
+fi
+if [ -f /work/distro/kws-trainer/requirements.txt ]; then
+    cp /work/distro/kws-trainer/requirements.txt config/includes.chroot/opt/aios-app/kws-trainer/
+    echo "[*] KWS requirements.txt copied into ISO"
+else
+    echo "WARN: kws-trainer/requirements.txt not found — skipping"
+fi
+
+# Copy pre-trained hey_assistant wake word model into ISO (if built on dev machine)
+if [ -f /work/distro/models/kws/hey_assistant.onnx ]; then
+    mkdir -p config/includes.chroot/opt/aios-app/models/kws/pretrained
+    cp /work/distro/models/kws/hey_assistant.onnx \
+        config/includes.chroot/opt/aios-app/models/kws/pretrained/hey_assistant.onnx
+    echo "[*] hey_assistant.onnx baked into ISO"
+else
+    echo "[*] No hey_assistant.onnx in distro/models/kws/ — skipping (user can train via /wake train)"
 fi
 
 # Build and include user documentation (mdBook HTML)
