@@ -2265,7 +2265,8 @@ impl AiosApp {
         if let Some(vu_bar) = vu_bar {
             glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
                 let level = vu_level.load(std::sync::atomic::Ordering::Relaxed);
-                vu_bar.set_value(level as f64 / 100.0);
+                // Scale 0-100 to 0-20 (20 discrete segments)
+                vu_bar.set_value(level as f64 / 5.0);
                 glib::ControlFlow::Continue
             });
         }

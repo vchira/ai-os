@@ -123,22 +123,26 @@ const APP_CSS: &str = r#"
     margin: 4px 12px;
 }
 
-/* VU meter — audio level indicator above chat */
+/* VU meter — audio level indicator above prompt (discrete segments) */
 .vu-meter {
-    margin: 0;
-    min-height: 4px;
+    margin: 4px 12px;
+    min-height: 10px;
 }
 .vu-meter trough {
-    min-height: 4px;
-    background-color: alpha(@window_fg_color, 0.08);
+    min-height: 10px;
+    background-color: transparent;
     border-radius: 0;
+}
+.vu-meter block {
+    min-height: 10px;
+    border-radius: 2px;
+    margin: 0 1px;
 }
 .vu-meter block.filled {
     background-color: #2ed573;
-    border-radius: 0;
 }
 .vu-meter block.empty {
-    background-color: transparent;
+    background-color: alpha(@window_fg_color, 0.12);
 }
 
 .welcome-label {
@@ -314,11 +318,13 @@ pub fn build_main_window(
     content_box.append(&separator);
 
     // VU meter — real-time audio level indicator above the prompt.
-    // Shows whether the mic is picking up sound (green = audio detected).
+    // Shows whether the mic is picking up sound (green = audio, gray = silent).
+    // Discrete mode with 20 segments for a classic "squares" VU look.
     let vu_meter = gtk::LevelBar::builder()
         .min_value(0.0)
-        .max_value(1.0)
+        .max_value(20.0)
         .value(0.0)
+        .mode(gtk::LevelBarMode::Discrete)
         .build();
     vu_meter.set_widget_name("vu-meter");
     vu_meter.add_css_class("vu-meter");
