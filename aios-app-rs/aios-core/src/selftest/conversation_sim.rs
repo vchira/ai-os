@@ -157,7 +157,7 @@ pub fn run_dialog(dialog: &Dialog) -> DialogResult {
             }
 
             DialogStep::ToolCall { tool, args } => {
-                // Mock all 12 built-in tools for simulation.
+                // Mock all 13 built-in tools for simulation.
                 let result = mock_tool_call(tool, args);
                 messages.push(("tool".to_string(), result.output.clone()));
                 last_tool_result = Some(result);
@@ -335,10 +335,10 @@ pub fn format_dialog_report(results: &[DialogResult]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Tool mocking — covers all 12 built-in tools
+// Tool mocking — covers all 13 built-in tools
 // ---------------------------------------------------------------------------
 
-/// Mock a tool call for simulation. Returns realistic results for all 12 tools.
+/// Mock a tool call for simulation. Returns realistic results for all 13 tools.
 fn mock_tool_call(tool: &str, args: &serde_json::Value) -> ToolResult {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
     match tool {
@@ -1336,8 +1336,8 @@ mod tests {
     }
 
     #[test]
-    fn all_12_tools_covered_in_deep_dialogs() {
-        let dialogs = generate_stress_dialogs_deep(12);
+    fn all_13_tools_covered_in_deep_dialogs() {
+        let dialogs = generate_stress_dialogs_deep(13);
         let all_tools: std::collections::HashSet<String> = dialogs.iter()
             .flat_map(|d| d.steps.iter())
             .filter_map(|s| match s {
@@ -1348,12 +1348,12 @@ mod tests {
         let expected = [
             "memory", "system", "files", "display", "web", "ui_panel",
             "delegate_to", "reflect", "recall_episodes", "execute_code",
-            "process_data", "find_content",
+            "process_data", "find_content", "browse_url",
         ];
         for tool in &expected {
             assert!(all_tools.contains(*tool), "Tool '{tool}' not covered in deep dialogs");
         }
-        assert_eq!(all_tools.len(), 12, "Expected exactly 12 tools, got {}", all_tools.len());
+        assert_eq!(all_tools.len(), 13, "Expected exactly 13 tools, got {}", all_tools.len());
     }
 
     #[test]
