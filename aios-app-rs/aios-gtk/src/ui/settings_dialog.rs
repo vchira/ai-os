@@ -329,18 +329,24 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
     stt_model_row.set_selected(model_idx);
     stt_group.add(&stt_model_row);
 
-    // Mic test button + level meter
-    let mic_test_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    mic_test_box.set_margin_top(4);
-
-    let mic_test_btn = gtk::Button::with_label("Test Microphone");
+    // Mic test — record button row
+    let mic_test_btn = gtk::Button::with_label("Test");
     mic_test_btn.add_css_class("suggested-action");
-    mic_test_box.append(&mic_test_btn);
+    mic_test_btn.set_valign(gtk::Align::Center);
 
+    let mic_test_row = adw::ActionRow::builder()
+        .title("Microphone Test")
+        .subtitle("Record a short clip and show signal level")
+        .build();
+    mic_test_row.add_suffix(&mic_test_btn);
+    mic_test_row.set_activatable_widget(Some(&mic_test_btn));
+    stt_group.add(&mic_test_row);
+
+    // Mic test — playback row (play button + level bar + status)
     let mic_play_btn = gtk::Button::from_icon_name("media-playback-start-symbolic");
     mic_play_btn.set_tooltip_text(Some("Play back recording"));
     mic_play_btn.set_sensitive(false);
-    mic_test_box.append(&mic_play_btn);
+    mic_play_btn.set_valign(gtk::Align::Center);
 
     let mic_level = gtk::LevelBar::builder()
         .min_value(0.0)
@@ -349,18 +355,21 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
         .hexpand(true)
         .build();
     mic_level.set_valign(gtk::Align::Center);
-    mic_test_box.append(&mic_level);
 
     let mic_status = gtk::Label::new(Some(""));
     mic_status.add_css_class("dim-label");
-    mic_test_box.append(&mic_status);
 
-    let mic_test_row = adw::ActionRow::builder()
-        .title("Microphone Test")
-        .subtitle("Record a short clip and show signal level")
+    let mic_result_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    mic_result_box.set_valign(gtk::Align::Center);
+    mic_result_box.append(&mic_play_btn);
+    mic_result_box.append(&mic_level);
+    mic_result_box.append(&mic_status);
+
+    let mic_result_row = adw::ActionRow::builder()
+        .title("Playback")
         .build();
-    mic_test_row.add_suffix(&mic_test_box);
-    stt_group.add(&mic_test_row);
+    mic_result_row.add_suffix(&mic_result_box);
+    stt_group.add(&mic_result_row);
 
     // Play button: plays back the recorded mic test
     {
@@ -695,22 +704,24 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
     tts_group.add(&rate_row);
 
     // TTS test button
-    let tts_test_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    tts_test_box.set_margin_top(4);
-
-    let tts_test_btn = gtk::Button::with_label("Test Audio Output");
+    let tts_test_btn = gtk::Button::with_label("Test");
     tts_test_btn.add_css_class("suggested-action");
-    tts_test_box.append(&tts_test_btn);
+    tts_test_btn.set_valign(gtk::Align::Center);
 
     let tts_status = gtk::Label::new(Some(""));
     tts_status.add_css_class("dim-label");
-    tts_test_box.append(&tts_status);
+
+    let tts_suffix = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    tts_suffix.set_valign(gtk::Align::Center);
+    tts_suffix.append(&tts_status);
+    tts_suffix.append(&tts_test_btn);
 
     let tts_test_row = adw::ActionRow::builder()
         .title("Audio Output Test")
         .subtitle("Play a short test message using current voice")
         .build();
-    tts_test_row.add_suffix(&tts_test_box);
+    tts_test_row.add_suffix(&tts_suffix);
+    tts_test_row.set_activatable_widget(Some(&tts_test_btn));
     tts_group.add(&tts_test_row);
 
     {
