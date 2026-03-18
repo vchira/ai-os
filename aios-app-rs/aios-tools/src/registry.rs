@@ -148,16 +148,19 @@ impl ToolRegistry {
 
     /// Populate the registry with all built-in tools.
     ///
-    /// This registers: `memory`, `system`, `files`, `web`, `display`,
-    /// `ui_panel`, `delegate_to`, `reflect`, `recall_episodes`,
-    /// `execute_code`, `process_data`, `find_content`.
+    /// This registers: `memory`, `notes`, `system`, `files`, `web`, `display`,
+    /// `browse_url`, `ui_panel`, `delegate_to`, `reflect`, `recall_episodes`,
+    /// `execute_code`, `process_data`, `find_content`, `show_image`,
+    /// `show_map`, `send_email`.
     pub fn load_builtins(&mut self) {
         let builtins: Vec<Box<dyn Tool>> = vec![
             Box::new(builtin::MemoryTool::new(None)),
+            Box::new(builtin::NotesTool::new(None)),
             Box::new(builtin::SystemTool),
             Box::new(builtin::FilesTool),
             Box::new(builtin::WebTool::new()),
             Box::new(builtin::DisplayTool::new()),
+            Box::new(builtin::BrowseUrlTool::new()),
             Box::new(builtin::UiPanelTool::new()),
             Box::new(builtin::DelegateTool::new()),
             Box::new(builtin::ReflectTool::new()),
@@ -165,6 +168,9 @@ impl ToolRegistry {
             Box::new(builtin::CodeExecTool),
             Box::new(builtin::DataProcessTool),
             Box::new(builtin::FindContentTool::with_default_index()),
+            Box::new(builtin::ShowImageTool::new()),
+            Box::new(builtin::ShowMapTool::new()),
+            Box::new(builtin::SendEmailTool::new()),
         ];
 
         for tool in builtins {
@@ -302,9 +308,12 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.load_builtins();
         let ui_tools = reg.get_tools_by_category("ui");
-        assert_eq!(ui_tools.len(), 2);
+        assert_eq!(ui_tools.len(), 5);
         let names: Vec<&str> = ui_tools.iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"browse_url"));
         assert!(names.contains(&"display"));
+        assert!(names.contains(&"show_image"));
+        assert!(names.contains(&"show_map"));
         assert!(names.contains(&"ui_panel"));
     }
 
@@ -313,13 +322,15 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.load_builtins();
         let schemas = reg.get_schemas_by_categories(&["memory", "network"]);
-        // memory category: memory, recall_episodes, reflect (3) + network: web (1) = 4
+        // memory category: memory, notes, recall_episodes, reflect (4) + network: web, send_email (2) = 6
         let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"memory"));
+        assert!(names.contains(&"notes"));
         assert!(names.contains(&"recall_episodes"));
         assert!(names.contains(&"reflect"));
         assert!(names.contains(&"web"));
-        assert_eq!(schemas.len(), 4);
+        assert!(names.contains(&"send_email"));
+        assert_eq!(schemas.len(), 6);
     }
 
     #[test]
@@ -442,8 +453,8 @@ mod tests {
     fn load_builtins_registers_expected_count() {
         let mut reg = ToolRegistry::new();
         reg.load_builtins();
-        // Should have 12 built-in tools.
-        assert_eq!(reg.len(), 12);
+        // Should have 17 built-in tools.
+        assert_eq!(reg.len(), 17);
     }
 
     // -- New comprehensive tests --
@@ -590,7 +601,7 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.load_builtins();
         let schemas = reg.get_schemas();
-        assert_eq!(schemas.len(), 12);
+        assert_eq!(schemas.len(), 17);
         // Verify schemas are sorted by name.
         for pair in schemas.windows(2) {
             assert!(
@@ -603,16 +614,16 @@ mod tests {
     }
 
     #[test]
-    fn after_register_queue_tools_tool_count_is_13() {
+    fn after_register_queue_tools_tool_count_is_18() {
         let mut reg = ToolRegistry::new();
         reg.load_builtins();
-        assert_eq!(reg.len(), 12);
+        assert_eq!(reg.len(), 17);
 
         let queue = aios_core::queue::MessageQueue::open_in_memory().unwrap();
         let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
         reg.register_queue_tools(queue);
 
-        assert_eq!(reg.len(), 13);
+        assert_eq!(reg.len(), 18);
         let names = reg.list_tools();
         assert!(names.contains(&"conversation_history".to_string()));
     }
@@ -638,9 +649,9 @@ mod tests {
         assert!(sys_names.contains(&"delegate_to"));
         assert_eq!(sys_schemas.len(), 3);
 
-        // ui category: display, ui_panel.
+        // ui category: browse_url, display, show_image, show_map, ui_panel.
         let ui_schemas = reg.get_schemas_by_categories(&["ui"]);
-        assert_eq!(ui_schemas.len(), 2);
+        assert_eq!(ui_schemas.len(), 5);
     }
 
     #[test]
@@ -668,15 +679,20 @@ mod tests {
         reg.load_builtins();
         let names = reg.list_tools();
         let expected = [
+            "browse_url",
             "delegate_to",
             "display",
             "execute_code",
             "files",
             "find_content",
             "memory",
+            "notes",
             "process_data",
             "recall_episodes",
             "reflect",
+            "send_email",
+            "show_image",
+            "show_map",
             "system",
             "ui_panel",
             "web",

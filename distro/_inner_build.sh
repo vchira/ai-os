@@ -174,8 +174,10 @@ scdoc
 hwdata
 libseat-dev
 squashfs-tools
+sqlite3
 gdisk
 dosfstools
+file
 grub-efi-amd64-bin
 grub-pc-bin
 EOF
@@ -1129,14 +1131,10 @@ cat > /home/aios/.config/labwc/rc.xml << RCEOF
     <context name="Root"/>
   </mouse>
   <windowRules>
-    <!-- AiOS main window: no minimize (it IS the desktop), no decoration -->
-    <windowRule identifier="dev.aios.app" serverDecoration="no">
-      <action name="DisableMinimize"/>
-    </windowRule>
-    <!-- System Prompt terminal: can move, resize, close — but not minimize -->
-    <windowRule title="System Prompt">
-      <action name="DisableMinimize"/>
-    </windowRule>
+    <!-- AiOS main window: no decoration (it IS the desktop), skip taskbar -->
+    <windowRule identifier="dev.aios.app" serverDecoration="no" skipTaskbar="yes" />
+    <!-- System Prompt terminal: normal window, skip taskbar -->
+    <windowRule title="System Prompt" skipTaskbar="yes" />
   </windowRules>
 </labwc_config>
 RCEOF

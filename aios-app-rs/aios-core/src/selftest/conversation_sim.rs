@@ -432,6 +432,10 @@ fn mock_tool_call(tool: &str, args: &serde_json::Value) -> ToolResult {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("documents");
             ToolResult::ok(format!("Semantic search for '{query}':\n  1. notes.txt (0.92 similarity)\n  2. readme.md (0.85 similarity)"))
         }
+        "browse_url" => {
+            let url = args.get("url").and_then(|v| v.as_str()).unwrap_or("https://example.com");
+            ToolResult::ok(format!("Opened {url} in the browser."))
+        }
         _ => ToolResult::ok(format!("Tool '{tool}' executed.")),
     }
 }
@@ -511,6 +515,9 @@ fn tool_args_for_stress(tool: &str, dialog_id: usize, step: usize) -> serde_json
         }
         "find_content" => {
             serde_json::json!({"query": format!("content from step {step} dialog {dialog_id}")})
+        }
+        "browse_url" => {
+            serde_json::json!({"url": format!("https://example.com/page/{dialog_id}/{step}")})
         }
         _ => serde_json::json!({"action": "default"}),
     }
@@ -1050,7 +1057,7 @@ pub fn generate_stress_dialogs(count: usize) -> Vec<Dialog> {
     let tools = [
         "memory", "system", "files", "display", "web", "ui_panel",
         "delegate_to", "reflect", "recall_episodes", "execute_code",
-        "process_data", "find_content",
+        "process_data", "find_content", "browse_url",
     ];
     let commands = [
         "/help", "/info", "/tools", "/channel", "/wake",
@@ -1115,7 +1122,7 @@ pub fn generate_stress_dialogs_deep(count: usize) -> Vec<Dialog> {
     let tools = [
         "memory", "system", "files", "display", "web", "ui_panel",
         "delegate_to", "reflect", "recall_episodes", "execute_code",
-        "process_data", "find_content",
+        "process_data", "find_content", "browse_url",
     ];
     let commands = [
         "/help", "/info", "/tools", "/channel", "/wake",
@@ -1155,8 +1162,8 @@ pub fn generate_stress_dialogs_deep(count: usize) -> Vec<Dialog> {
             ));
         }
 
-        // Phase 3: Tool usage (36 steps) — all 12 tools, each called once
-        for j in 0..12 {
+        // Phase 3: Tool usage (39 steps) — all 13 tools, each called once
+        for j in 0..13 {
             let tool = tools[j % tools.len()];
             let args = tool_args_for_stress(tool, i, j);
             steps.push(DialogStep::ToolCall { tool: tool.into(), args });

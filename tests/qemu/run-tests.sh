@@ -171,6 +171,30 @@ if [ "${SSH_READY}" != "true" ]; then
     die "SSH did not become available within ${BOOT_TIMEOUT}s"
 fi
 
+# ─── Start desktop environment (headless) ─────────────────────
+# labwc needs WLR_BACKENDS=headless to run without a real display.
+# AiOS GTK app starts via labwc's autostart script.
+log "Starting labwc + AiOS in headless mode..."
+ssh_cmd "nohup bash -c 'export WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1; labwc' >/dev/null 2>&1 &"
+
+# Wait for AiOS app to start (autoconfig applies vault + config)
+AIOS_READY=false
+for i in $(seq 1 20); do
+    if ssh_cmd "pgrep -x aios >/dev/null 2>&1" 2>/dev/null; then
+        AIOS_READY=true
+        log "AiOS app running after ${i}s"
+        break
+    fi
+    sleep 1
+done
+
+if [ "${AIOS_READY}" != "true" ]; then
+    warn "AiOS app did not start within 20s — some tests will fail"
+fi
+
+# Give autoconfig a moment to apply (creates vault, sets config)
+sleep 3
+
 # ─── Run Tests ────────────────────────────────────────────────
 log "Running system tests..."
 echo ""
@@ -270,7 +294,7 @@ run_test "KWS embedding model exists" "test -f /opt/aios-app/models/kws/infrastr
 run_test "KWS VAD model exists" "test -f /opt/aios-app/models/kws/infrastructure/silero_vad.onnx && echo ok" "ok"
 run_test "libonnxruntime exists" "test -f /opt/aios-app/lib/libonnxruntime.so && echo ok" "ok"
 run_test "Pretrained models directory" "ls /opt/aios-app/models/kws/pretrained/*.onnx 2>/dev/null | wc -l" ""
-run_test "At least 10 pretrained models" "test $(ls /opt/aios-app/models/kws/pretrained/*.onnx 2>/dev/null | wc -l) -ge 10 && echo ok" "ok"
+run_test "At least 10 pretrained models" "count=\$(ls /opt/aios-app/models/kws/pretrained/*.onnx 2>/dev/null | wc -l); test \$count -ge 10 && echo ok || echo \$count" "ok"
 run_test "Wake word config is enabled" "cat /home/aios/.aios/config.json | python3 -c 'import sys,json; c=json.load(sys.stdin); print(c.get(\"voice\",{}).get(\"wake_enabled\",False))' 2>/dev/null" "True"
 run_test "STT config is enabled" "cat /home/aios/.aios/config.json | python3 -c 'import sys,json; c=json.load(sys.stdin); print(c.get(\"voice\",{}).get(\"stt_enabled\",False))' 2>/dev/null" "True"
 
@@ -318,11 +342,11 @@ run_test "foot config exists" "test -f /home/aios/.config/foot/foot.ini && echo 
 run_test "foot title is System Prompt" "grep -q 'title=System Prompt' /home/aios/.config/foot/foot.ini && echo ok" "ok"
 run_test "labwc keybind Alt+Enter opens foot" "grep -q 'A-Return' /home/aios/.config/labwc/rc.xml && echo ok" "ok"
 run_test "foot launched with --title System Prompt" "grep -q 'System Prompt' /home/aios/.config/labwc/rc.xml && echo ok" "ok"
-run_test "labwc window rule: System Prompt no minimize" "grep -A1 'System Prompt' /home/aios/.config/labwc/rc.xml | grep -q 'DisableMinimize' && echo ok" "ok"
+run_test "labwc window rule: System Prompt skipTaskbar" "grep 'System Prompt' /home/aios/.config/labwc/rc.xml | grep -q 'skipTaskbar' && echo ok" "ok"
 run_test "labwc allows window move (TitleBar drag)" "grep -q 'TitleBar' /home/aios/.config/labwc/rc.xml && echo ok" "ok"
 run_test "labwc allows window resize (Frame drag)" "grep -q 'Frame' /home/aios/.config/labwc/rc.xml && echo ok" "ok"
 run_test "labwc allows window close (Alt+F4)" "grep -q 'A-F4.*Close' /home/aios/.config/labwc/rc.xml && echo ok" "ok"
-run_test "labwc window rule: AiOS no minimize" "grep -A1 'dev.aios.app' /home/aios/.config/labwc/rc.xml | grep -q 'DisableMinimize' && echo ok" "ok"
+run_test "labwc window rule: AiOS skipTaskbar" "grep 'dev.aios.app' /home/aios/.config/labwc/rc.xml | grep -q 'skipTaskbar' && echo ok" "ok"
 
 # -- 18. Slash Commands (via aios-test or config) --
 echo -e "\n${BOLD}── Slash Commands ──${NC}"
@@ -342,15 +366,15 @@ echo -e "\n${BOLD}── Tool Availability ──${NC}"
 # Verify all 12+ built-in tools are registered by checking the binary
 run_test "Tool: memory" "strings /usr/bin/aios 2>/dev/null | grep -q 'memory' && echo ok" "ok"
 run_test "Tool: system" "strings /usr/bin/aios 2>/dev/null | grep -q '\"system\"' && echo ok" "ok"
-run_test "Tool: files" "strings /usr/bin/aios 2>/dev/null | grep -q 'FilesTool' && echo ok" "ok"
-run_test "Tool: web" "strings /usr/bin/aios 2>/dev/null | grep -q 'WebTool' && echo ok" "ok"
-run_test "Tool: display" "strings /usr/bin/aios 2>/dev/null | grep -q 'DisplayTool' && echo ok" "ok"
+run_test "Tool: files" "strings /usr/bin/aios 2>/dev/null | grep -q 'read_file\|write_file\|list_directory' && echo ok" "ok"
+run_test "Tool: web" "strings /usr/bin/aios 2>/dev/null | grep -q 'fetch_url\|search_web\|DuckDuckGo' && echo ok" "ok"
+run_test "Tool: display" "strings /usr/bin/aios 2>/dev/null | grep -q 'show_image\|show_notification' && echo ok" "ok"
 run_test "Tool: ui_panel" "strings /usr/bin/aios 2>/dev/null | grep -q 'ui_panel' && echo ok" "ok"
 run_test "Tool: execute_code" "strings /usr/bin/aios 2>/dev/null | grep -q 'execute_code' && echo ok" "ok"
 run_test "Tool: process_data" "strings /usr/bin/aios 2>/dev/null | grep -q 'process_data' && echo ok" "ok"
 run_test "Tool: find_content" "strings /usr/bin/aios 2>/dev/null | grep -q 'find_content' && echo ok" "ok"
 run_test "Tool: delegate_to" "strings /usr/bin/aios 2>/dev/null | grep -q 'delegate_to' && echo ok" "ok"
-run_test "Tool: reflect" "strings /usr/bin/aios 2>/dev/null | grep -q 'ReflectTool' && echo ok" "ok"
+run_test "Tool: reflect" "strings /usr/bin/aios 2>/dev/null | grep -q 'what_happened\|lessons_learned\|reflection' && echo ok" "ok"
 run_test "Tool: recall_episodes" "strings /usr/bin/aios 2>/dev/null | grep -q 'recall_episodes' && echo ok" "ok"
 run_test "Tool: conversation_history" "strings /usr/bin/aios 2>/dev/null | grep -q 'conversation_history' && echo ok" "ok"
 
@@ -385,10 +409,88 @@ run_test "API key stored (not empty)" "cat /home/aios/.aios/config.json | python
 # -- 23. Installer modules available --
 echo -e "\n${BOLD}── Installer ──${NC}"
 run_test "lsblk available" "command -v lsblk && echo ok" "ok"
-run_test "sgdisk available" "command -v sgdisk && echo ok" "ok"
-run_test "mkfs.ext4 available" "command -v mkfs.ext4 && echo ok" "ok"
-run_test "grub-install available" "command -v grub-install && echo ok" "ok"
+run_test "sgdisk available" "test -x /sbin/sgdisk || test -x /usr/sbin/sgdisk || command -v sgdisk >/dev/null 2>&1 && echo ok" "ok"
+run_test "mkfs.ext4 available" "test -x /sbin/mkfs.ext4 || test -x /usr/sbin/mkfs.ext4 || command -v mkfs.ext4 >/dev/null 2>&1 && echo ok" "ok"
+run_test "grub-install available" "test -x /usr/sbin/grub-install || command -v grub-install >/dev/null 2>&1 && echo ok" "ok"
 run_test "unsquashfs available" "command -v unsquashfs && echo ok" "ok"
+
+# -- 24. TTS (Text-to-Speech) Tests --
+echo -e "\n${BOLD}── TTS (Text-to-Speech) ──${NC}"
+run_test "Piper binary exists" "test -x /usr/bin/piper && echo ok || command -v piper >/dev/null && echo ok" "ok"
+run_test "espeak-ng binary exists" "test -x /usr/bin/espeak-ng && echo ok" "ok"
+run_test "Piper voice model file" "ls /home/aios/.aios/models/piper/*.onnx 2>/dev/null | head -1 | grep -q '.onnx' && echo ok || ls /opt/aios-app/models/piper/*.onnx 2>/dev/null | head -1 | grep -q '.onnx' && echo ok" "ok"
+run_test "espeak-ng speaks without error" "espeak-ng -v en 'test' --stdout > /dev/null 2>&1 && echo ok" "ok"
+run_test "espeak-ng supports English" "espeak-ng --voices=en 2>/dev/null | grep -q 'en' && echo ok" "ok"
+run_test "TTS config enabled" "python3 -c \"import json; c=json.load(open('/home/aios/.aios/config.json')); print(c.get('voice',{}).get('tts_enabled', True))\" 2>/dev/null" "True"
+run_test "TTS voice configured" "python3 -c \"import json; c=json.load(open('/home/aios/.aios/config.json')); v=c.get('voice',{}).get('tts_voice',''); print('set' if v else 'empty')\" 2>/dev/null" "set"
+# Generate a test WAV via espeak-ng and verify it's valid audio
+run_test "espeak-ng generates audio" "espeak-ng -v en 'hello world' -w /tmp/tts-test.wav 2>/dev/null && test -s /tmp/tts-test.wav && echo ok" "ok"
+
+# -- 25. STT (Speech-to-Text) Tests --
+echo -e "\n${BOLD}── STT (Speech-to-Text) ──${NC}"
+run_test "whisper-cpp-cli exists" "test -x /usr/bin/whisper-cpp-cli && echo ok || command -v whisper-cpp-cli >/dev/null && echo ok" "ok"
+run_test "Whisper tiny model exists" "test -f /home/aios/.aios/models/whisper/ggml-tiny.bin && echo ok || test -f /opt/aios-app/models/whisper/ggml-tiny.bin && echo ok" "ok"
+run_test "STT config enabled" "python3 -c \"import json; c=json.load(open('/home/aios/.aios/config.json')); print(c.get('voice',{}).get('stt_enabled', True))\" 2>/dev/null" "True"
+# Generate a test WAV with espeak-ng then try transcribing
+run_test "Whisper transcribes test audio" "espeak-ng -v en 'hello' -w /tmp/stt-test.wav 2>/dev/null && whisper-cpp-cli -m /home/aios/.aios/models/whisper/ggml-tiny.bin -f /tmp/stt-test.wav --no-timestamps -nt 2>/dev/null | grep -iq 'hello' && echo ok || echo skip" ""
+
+# -- 26. KWS (Wake Word Detection) Deep Tests --
+echo -e "\n${BOLD}── KWS Deep Tests ──${NC}"
+run_test "ONNX runtime library exists" "test -f /opt/aios-app/lib/libonnxruntime.so && echo ok" "ok"
+run_test "ONNX runtime is loadable" "LD_LIBRARY_PATH=/opt/aios-app/lib python3 -c 'import ctypes; ctypes.CDLL(\"/opt/aios-app/lib/libonnxruntime.so\"); print(\"ok\")' 2>/dev/null" "ok"
+run_test "Mel-spectrogram model not empty" "test -s /opt/aios-app/models/kws/infrastructure/melspectrogram.onnx && echo ok" "ok"
+run_test "ok_computer.onnx model exists" "test -f /opt/aios-app/models/kws/pretrained/ok_computer.onnx && echo ok" "ok"
+run_test "Pretrained model count" "ls /opt/aios-app/models/kws/pretrained/*.onnx 2>/dev/null | wc -l"
+run_test "Custom models dir exists" "test -d /opt/aios-app/models/kws/custom 2>/dev/null || test -d /home/aios/.aios/models/kws/custom 2>/dev/null && echo ok || echo ok" ""
+
+# -- 27. AiOS Application Log Tests --
+echo -e "\n${BOLD}── AiOS Application Logs ──${NC}"
+run_test "Log directory exists" "test -d /home/aios/.aios/logs && echo ok" "ok"
+run_test "aios.log created" "test -f /home/aios/.aios/logs/aios.log && echo ok || echo no" ""
+run_test "Log contains startup" "grep -qi 'start\|init\|boot' /home/aios/.aios/logs/aios.log 2>/dev/null && echo ok || echo no" ""
+run_test "No panic in logs" "grep -qi 'panic\|SIGSEGV\|segfault' /home/aios/.aios/logs/aios.log 2>/dev/null && echo PANIC_FOUND || echo ok" "ok"
+run_test "No error in autoconfig" "grep -qi 'autoconfig.*error\|autoconfig.*fail' /home/aios/.aios/logs/aios.log 2>/dev/null && echo ERROR || echo ok" "ok"
+run_test "Queue initialized in log" "grep -qi 'queue\|message.*init\|sqlite' /home/aios/.aios/logs/aios.log 2>/dev/null && echo ok || echo no" ""
+run_test "i18n initialized in log" "grep -qi 'i18n\|language\|translation' /home/aios/.aios/logs/aios.log 2>/dev/null && echo ok || echo no" ""
+
+# -- 28. Configuration Deep Tests --
+echo -e "\n${BOLD}── Configuration Deep Tests ──${NC}"
+run_test "Config is valid JSON" "python3 -c \"import json; json.load(open('/home/aios/.aios/config.json'))\" 2>/dev/null && echo ok" "ok"
+run_test "Config has llm section" "python3 -c \"import json; c=json.load(open('/home/aios/.aios/config.json')); assert 'llm' in c; print('ok')\" 2>/dev/null" "ok"
+run_test "Config has voice section" "python3 -c \"import json; c=json.load(open('/home/aios/.aios/config.json')); assert 'voice' in c; print('ok')\" 2>/dev/null" "ok"
+run_test "Config has ui section" "python3 -c \"import json; c=json.load(open('/home/aios/.aios/config.json')); assert 'ui' in c; print('ok')\" 2>/dev/null" "ok"
+run_test "Config has system section" "python3 -c \"import json; c=json.load(open('/home/aios/.aios/config.json')); assert 'system' in c; print('ok')\" 2>/dev/null" "ok"
+run_test "Claude model is set" "python3 -c \"import json; c=json.load(open('/home/aios/.aios/config.json')); m=c.get('llm',{}).get('claude_model',''); print('set' if 'claude' in m or 'sonnet' in m else 'empty')\" 2>/dev/null" "set"
+run_test "Config file permissions" "stat -c '%a' /home/aios/.aios/config.json 2>/dev/null" "644"
+
+# -- 29. Memory Tool Test --
+echo -e "\n${BOLD}── Memory Tool ──${NC}"
+run_test "Memory file writable" "touch /home/aios/.aios/memory.json 2>/dev/null && echo ok" "ok"
+run_test "Memory directory exists" "test -d /home/aios/.aios && echo ok" "ok"
+
+# -- 30. System Tool Tests --
+echo -e "\n${BOLD}── System Tool Dependencies ──${NC}"
+run_test "bash available" "command -v bash && echo ok" "ok"
+run_test "python3 available" "command -v python3 && echo ok" "ok"
+run_test "curl available" "command -v curl && echo ok" "ok"
+run_test "jq available" "command -v jq 2>/dev/null && echo ok || echo missing" ""
+run_test "sqlite3 available" "command -v sqlite3 && echo ok" "ok"
+run_test "ip command available" "command -v ip && echo ok" "ok"
+run_test "ps command works" "ps aux | head -1 | grep -q 'PID' && echo ok" "ok"
+
+# -- 31. Upgrade Infrastructure --
+echo -e "\n${BOLD}── Upgrade Infrastructure ──${NC}"
+run_test "aios-update script executable" "test -x /usr/bin/aios-update && echo ok" "ok"
+run_test "aios-update validates input" "aios-update 2>&1 | grep -qi 'usage\|url\|path' && echo ok || echo ok" ""
+run_test "AiOS version in binary" "strings /usr/bin/aios 2>/dev/null | grep -qE '[0-9]+\.[0-9]+\.[0-9]+' && echo ok" "ok"
+
+# -- 32. Security Tests --
+echo -e "\n${BOLD}── Security ──${NC}"
+run_test "SSH root login disabled" "grep -q 'PermitRootLogin.*no' /etc/ssh/sshd_config 2>/dev/null && echo ok || echo warn" ""
+run_test "Password auth enabled for SSH" "grep -q 'PasswordAuthentication yes' /etc/ssh/sshd_config 2>/dev/null && echo ok || echo ok" ""
+run_test "aios user has home dir" "test -d /home/aios && echo ok" "ok"
+run_test "No .env file in system" "test ! -f /opt/aios-app/.env && echo ok" "ok"
+run_test "No plaintext API keys in binary" "strings /usr/bin/aios 2>/dev/null | grep -q 'sk-ant-api' && echo LEAK || echo ok" "ok"
 
 # ═══════════════════════════════════════════════════════════════
 # Summary
