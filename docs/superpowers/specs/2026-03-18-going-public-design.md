@@ -24,7 +24,7 @@
 | File | Action |
 |------|--------|
 | `LICENSE` | Create — full BSL 1.1 text with above parameters |
-| `Cargo.toml` | Change `license = "MIT"` to `license = "BSL-1.1"` in `[workspace.package]` |
+| `Cargo.toml` | Replace `license = "MIT"` with `license-file = "LICENSE"` in `[workspace.package]` (BSL 1.1 has no standard SPDX identifier) |
 | `docs/user-guide/src/license.md` | Update to reference BSL 1.1 and explain the terms |
 
 ## 2. Versioning
@@ -34,7 +34,8 @@
 - Single source of truth: `VERSION` file in repo root
 - Format: `MAJOR.MINOR.PATCH` for stable, `MAJOR.MINOR.PATCH-CHANNEL.N` for pre-release
 - Channels: `alpha`, `beta`, stable (no suffix)
-- Dev builds auto-bump patch via `distro/build.sh` (existing behavior)
+- Dev builds auto-bump the channel number (e.g., `alpha.1` → `alpha.2`) via `distro/build.sh`
+- `distro/build.sh` must be updated to parse the new format: split on `-` first to separate `MAJOR.MINOR.PATCH` from `CHANNEL.N`, then increment `N`. For stable versions (no `-`), bump `PATCH` as before.
 - Channel transitions (alpha → beta → stable) are manual edits to VERSION
 
 ### Initial version
@@ -86,23 +87,25 @@ Scanned patterns:
 - `.env` file with actual content (not `.env.example`)
 - `autoconfig-*.json` files (not `*.sample.json`)
 - `autoconfig.json` symlink
-- Strings matching `sk-ant-api03-` (Anthropic API keys)
+- Strings matching `sk-ant-` (Anthropic API keys — any version prefix)
 - Strings matching `sk-` followed by 20+ alphanumeric chars (OpenAI keys)
+- Any high-entropy string that looks like an API key (future-proofing)
 - Any `vault.enc` files
 - Any file containing `master_password` with a non-empty value
 
-Scanned locations:
-- Repo root (`.env`, `autoconfig*.json`)
-- `distro/` build directory
-- Files that would be baked into the ISO
+Scanned locations (operates on the **working tree**, not just git-tracked files):
+- Repo root (`.env`, `autoconfig*.json`, `autoconfig.json` symlink)
+- `distro/` build directory, including `distro/build/config/includes.chroot/` (files baked into ISO)
+- Specifically check that `_inner_build.sh` does not copy any `autoconfig.json` with real API keys (the build script at line ~241 copies `autoconfig.json` into the ISO — release builds must not have this)
 
 ### Build process
 
 1. Read `VERSION` file
 2. Validate channel parameter matches VERSION
 3. Run secret scan — abort if anything found
-4. Build clean ISO via `distro/build.sh` (Docker-based, isolated)
-5. Rename ISO to `aios-{VERSION}-amd64.iso`
+4. Save current VERSION before build
+5. Build clean ISO via `distro/build.sh --no-bump` (Docker-based, isolated). `distro/build.sh` must accept a `--no-bump` flag that skips the auto-increment, so the release version matches exactly what was in VERSION.
+6. Rename ISO to `aios-{VERSION}-amd64.iso` (ISO produced by live-build is typically `live-image-amd64.hybrid.iso`)
 6. Generate SHA256 checksum file
 7. Create git tag `v{VERSION}`
 8. Push tag to GitHub
@@ -141,7 +144,7 @@ Brief: Humans interact through voice and text. The AI is the interface.
 - Voice-first (wake word, STT, TTS — all local)
 - Multi-channel (Desktop, Web, Signal)
 - Built-in AI tool system (extensible)
-- Local inference, privacy-first
+- Local voice processing — all STT/TTS runs on your hardware
 - VM compatible (QEMU, VirtualBox, VMware)
 - Encrypted vault for API keys and secrets
 
@@ -266,13 +269,20 @@ website/
 
 The repo should be transferred to a GitHub organization for the company:
 
-- **Organization:** `swit-work` (or similar) on GitHub
+- **Organization:** `swit-work` on GitHub (to be created by the user)
 - **Repo:** `swit-work/ai-os`
 - **Transfer:** done manually via GitHub Settings → Transfer repository
 
 All scripts and website references use `swit-work/ai-os` as the repo path. The `release.sh` script creates GitHub Releases on this repo.
 
 This is a manual step done before the first public release — not automated.
+
+**Repo URL migration:** The current codebase references `AiOS-Project/ai-os` and `vchira/ai-os` in multiple files. All references must be updated to `swit-work/ai-os`:
+- `docs/user-guide/book.toml`
+- `docs/user-guide/src/license.md`
+- `docs/user-guide/src/support.md`
+- `docs/user-guide/src/getting-started/download.md`
+- Any other markdown files referencing the old GitHub URLs
 
 ## 9. Deliverables Summary
 
@@ -290,6 +300,11 @@ This is a manual step done before the first public release — not automated.
 | `website/js/releases.js` | Create | GitHub Releases fetch + render |
 | `website/img/` | Create | Logo, screenshot, favicon |
 | `VERSION` | Modify | Reset to `1.0.0-alpha.1` |
-| `Cargo.toml` | Modify | License field → BSL-1.1 |
-| `docs/user-guide/src/license.md` | Modify | Update license info |
+| `Cargo.toml` | Modify | License field → `license-file = "LICENSE"` |
+| `distro/build.sh` | Modify | Add `--no-bump` flag, update version parsing for channel suffix format |
+| `.gitignore` | Modify | Add `website/docs/` (generated mdbook output) |
+| `CLAUDE.md` | Modify | Add `release.sh` and `deploy-website.sh` to build commands and key files |
+| `docs/user-guide/src/license.md` | Modify | Update license info to BSL 1.1 |
 | `docs/user-guide/book.toml` | Modify | Update repo URL to swit-work/ai-os |
+| `docs/user-guide/src/support.md` | Modify | Update repo URL to swit-work/ai-os |
+| `docs/user-guide/src/getting-started/download.md` | Modify | Update repo URL to swit-work/ai-os |
