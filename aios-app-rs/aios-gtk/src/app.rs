@@ -599,9 +599,9 @@ fn speak_if_enabled(text: &str, config: &ConfigManager) {
 
 /// Speak the response text via TTS if enabled.
 ///
-/// If `tts_started` is provided, the flag is set to `true` just before the
-/// TTS audio begins playing. This allows the UI to keep a "thinking"
-/// indicator visible until the voice actually starts.
+/// If `tts_started` is provided, the flag is set to `true` when the TTS
+/// audio actually begins playing (not when summarization finishes). This
+/// keeps the "thinking" indicator visible until the voice starts.
 fn speak_if_enabled_with_signal(
     text: &str,
     config: &ConfigManager,
@@ -626,10 +626,7 @@ fn speak_if_enabled_with_signal(
         }
         let speak_text = short;
         std::thread::spawn(move || {
-            if let Some(flag) = tts_started {
-                flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            do_tts(&speak_text);
+            do_tts_with_signal(&speak_text, tts_started);
         });
         return;
     }
@@ -639,15 +636,25 @@ fn speak_if_enabled_with_signal(
     let api_key = config.get_str("llm.claude_api_key", "");
     std::thread::spawn(move || {
         let speak_text = summarize_for_tts(&raw, &api_key);
-        if let Some(flag) = tts_started {
-            flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        do_tts(&speak_text);
+        do_tts_with_signal(&speak_text, tts_started);
     });
 }
 
-/// Actually perform TTS (called from background thread).
-fn do_tts(speak_text: &str) {
+/// Perform TTS with an optional signal that fires when audio starts playing.
+///
+/// The signal flag is set right when the audio playback process (`aplay` or
+/// `espeak-ng`) is spawned — not when summarization finishes. This ensures
+/// the thinking placeholder stays visible until the voice actually begins.
+fn do_tts_with_signal(
+    speak_text: &str,
+    tts_started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) {
+    let signal = |flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>| {
+        if let Some(f) = flag {
+            f.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    };
+
     // Try Piper first (high-quality, natural sounding voice)
     let piper_model = "/home/aios/.aios/models/piper/en_US-amy-medium.onnx";
     if std::path::Path::new(piper_model).exists() {
@@ -661,6 +668,7 @@ fn do_tts(speak_text: &str) {
             Ok(c) => c,
             Err(_) => {
                 // Piper not available, fall through to espeak
+                signal(&tts_started);
                 let _ = std::process::Command::new("espeak-ng")
                     .args(["-v", "en", "-s", "170"])
                     .arg(speak_text)
@@ -678,26 +686,35 @@ fn do_tts(speak_text: &str) {
             drop(stdin); // Close stdin to signal EOF
         }
 
-        // Pipe piper's raw audio output to aplay
+        // Pipe piper's raw audio output to aplay — signal when aplay starts
         if let Some(stdout) = child.stdout.take() {
+            signal(&tts_started); // Voice is about to start!
             let _ = std::process::Command::new("aplay")
                 .args(["-r", "22050", "-f", "S16_LE", "-t", "raw", "-c", "1"])
                 .stdin(stdout)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
+        } else {
+            signal(&tts_started);
         }
         let _ = child.wait();
         return;
     }
 
-    // Fallback: espeak-ng (robotic but always available)
+    // Fallback: espeak-ng — signal right before it speaks
+    signal(&tts_started);
     let _ = std::process::Command::new("espeak-ng")
         .args(["-v", "en", "-s", "170"])
         .arg(speak_text)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+/// Actually perform TTS (called from background thread, no signal).
+fn do_tts(speak_text: &str) {
+    do_tts_with_signal(speak_text, None);
 }
 
 /// Application-level state shared across signal handlers.
