@@ -76,6 +76,7 @@ fn start_voice_listener(
     wake_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     wake_training_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
     kws_engine: std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>>,
+    audio_level: std::sync::Arc<std::sync::atomic::AtomicU32>,
 ) -> std::thread::JoinHandle<()> {
     use std::collections::VecDeque;
     use aios_voice::audio::capture::AudioCapture;
@@ -152,8 +153,18 @@ fn start_voice_listener(
             };
 
             if samples.is_empty() {
+                audio_level.store(0, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
+
+            // Compute RMS energy level for the VU meter (0-100 scale)
+            let rms = {
+                let sum: f32 = samples.iter().map(|s| s * s).sum();
+                (sum / samples.len() as f32).sqrt()
+            };
+            // Map RMS to 0-100: typical speech is 0.02-0.10, scale so 0.05 = ~50
+            let level = ((rms / 0.1) * 100.0).min(100.0) as u32;
+            audio_level.store(level, std::sync::atomic::Ordering::Relaxed);
 
             let wake_on = wake_enabled.load(std::sync::atomic::Ordering::Relaxed);
             let has_kws_model = kws_engine.lock()
@@ -2211,13 +2222,27 @@ impl AiosApp {
 
         // Start voice listener thread — receives transcribed text via mpsc channel.
         let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
+        let audio_level = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let _voice_handle = start_voice_listener(
             stt_tx,
             stt_enabled,
             wake_enabled.clone(),
             wake_training_in_progress.clone(),
             kws_engine.clone(),
+            audio_level.clone(),
         );
+
+        // VU meter: poll audio level and drive the level bar in the main window.
+        // The VU meter was created in main_window.rs with widget name "vu-meter".
+        let vu_level = audio_level.clone();
+        let vu_bar = main_window::find_widget_by_name::<gtk4::LevelBar>(window.upcast_ref(), "vu-meter");
+        if let Some(vu_bar) = vu_bar {
+            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                let level = vu_level.load(std::sync::atomic::Ordering::Relaxed);
+                vu_bar.set_value(level as f64 / 100.0);
+                glib::ControlFlow::Continue
+            });
+        }
 
         // Poll for transcribed text from the voice listener (GTK main thread).
         let state_ref = state.clone();

@@ -123,6 +123,24 @@ const APP_CSS: &str = r#"
     margin: 4px 12px;
 }
 
+/* VU meter — audio level indicator above chat */
+.vu-meter {
+    margin: 0;
+    min-height: 4px;
+}
+.vu-meter trough {
+    min-height: 4px;
+    background-color: alpha(@window_fg_color, 0.08);
+    border-radius: 0;
+}
+.vu-meter block.filled {
+    background-color: #2ed573;
+    border-radius: 0;
+}
+.vu-meter block.empty {
+    background-color: transparent;
+}
+
 .welcome-label {
     color: alpha(@window_fg_color, 0.4);
     font-size: 1.1em;
@@ -295,14 +313,16 @@ pub fn build_main_window(
     let separator = Separator::new(Orientation::Horizontal);
     content_box.append(&separator);
 
-    // Voice level bar (hidden by default).
-    let level_bar = gtk::LevelBar::new();
-    level_bar.set_min_value(0.0);
-    level_bar.set_max_value(1.0);
-    level_bar.set_value(0.0);
-    level_bar.set_visible(false);
-    level_bar.add_css_class("level-bar-recording");
-    content_box.append(&level_bar);
+    // VU meter — real-time audio level indicator above the prompt.
+    // Shows whether the mic is picking up sound (green = audio detected).
+    let vu_meter = gtk::LevelBar::builder()
+        .min_value(0.0)
+        .max_value(1.0)
+        .value(0.0)
+        .build();
+    vu_meter.set_widget_name("vu-meter");
+    vu_meter.add_css_class("vu-meter");
+    content_box.append(&vu_meter);
 
     // Prompt input.
     content_box.append(prompt_input.widget());
@@ -457,7 +477,7 @@ pub fn connect_speaker_toggle(
 /// Recursively search the widget tree for a widget with the given name.
 ///
 /// Returns the first match, cast to `T`, or `None`.
-fn find_widget_by_name<T: IsA<gtk::Widget>>(
+pub fn find_widget_by_name<T: IsA<gtk::Widget>>(
     root: &gtk::Widget,
     name: &str,
 ) -> Option<T> {
