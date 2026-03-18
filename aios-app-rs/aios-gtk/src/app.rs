@@ -817,6 +817,7 @@ impl AiosApp {
 
         let mw = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay, &[&t("setup.window_title")]);
         let window = mw.window;
+        let vu_meter_ref = mw.vu_meter;
 
         // Hide the prompt input during setup — it will be shown in transition_to_normal_mode.
         prompt_input.widget().set_visible(false);
@@ -989,6 +990,7 @@ impl AiosApp {
         let chat_view_ref = chat_view.clone();
         let prompt_ref = prompt_input.clone();
         let window_ref = window.clone();
+        let vu_meter_for_transition = vu_meter_ref.clone();
         setup.on_complete(move |result| {
             info!(
                 "First-boot setup complete: {} provider(s) configured",
@@ -1125,6 +1127,7 @@ impl AiosApp {
                 &chat_view_ref,
                 &prompt_ref,
                 &window_ref,
+                Some(vu_meter_for_transition.clone()),
             );
         });
 
@@ -1157,6 +1160,7 @@ impl AiosApp {
         chat_view: &ChatView,
         prompt_input: &PromptInput,
         window: &adw::ApplicationWindow,
+        vu_meter_widget: Option<gtk4::LevelBar>,
     ) {
         // Load configuration (now includes the keys we just stored).
         let config = match ConfigManager::new() {
@@ -1320,6 +1324,78 @@ impl AiosApp {
             // Send to LLM asynchronously.
             Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
         });
+
+        // --- Voice listener + VU meter ---
+        let stt_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            state.borrow().config.get_bool("voice.stt_enabled", true),
+        ));
+        let stt_flag = stt_enabled.clone();
+        let state_ref = state.clone();
+        // Re-connect mic toggle to actually control the STT flag
+        main_window::connect_mic_toggle(window, move |active| {
+            let mut s = state_ref.borrow_mut();
+            let _ = s.config.set("voice.stt_enabled", serde_json::json!(active));
+            stt_flag.store(active, std::sync::atomic::Ordering::Relaxed);
+            info!("Mic toggled (voice): {active}");
+        });
+
+        let wake_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            state.borrow().config.get_bool("voice.wake_enabled", true),
+        ));
+        let wake_training = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // KWS engine (best-effort — None if models not found)
+        let kws_models_dir = aios_core::config::ConfigManager::default_config_dir().join("models/kws");
+        let kws_engine: std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> = {
+            match aios_voice::KwsEngine::new(&kws_models_dir) {
+                Ok(engine) => {
+                    info!("KWS engine initialized in transition mode");
+                    std::sync::Arc::new(std::sync::Mutex::new(Some(engine)))
+                }
+                Err(e) => {
+                    info!("KWS engine not available: {e} — using fallback");
+                    std::sync::Arc::new(std::sync::Mutex::new(None))
+                }
+            }
+        };
+
+        let audio_level = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
+        let _voice_handle = start_voice_listener(
+            stt_tx,
+            stt_enabled,
+            wake_enabled,
+            wake_training,
+            kws_engine,
+            audio_level.clone(),
+        );
+
+        // VU meter polling
+        if let Some(vu) = vu_meter_widget {
+            let vu_level = audio_level.clone();
+            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                let level = vu_level.load(std::sync::atomic::Ordering::Relaxed);
+                vu.set_value(level as f64 / 5.0);
+                glib::ControlFlow::Continue
+            });
+        }
+
+        // Poll for transcribed text from the voice listener
+        let state_ref = state.clone();
+        let chat_view_ref = chat_view.clone();
+        let prompt_ref = prompt_input.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            while let Ok(text) = stt_rx.try_recv() {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                info!("STT transcription received: {}", &text[..text.len().min(50)]);
+                chat_view_ref.add_message("user", &format!("\u{1f3a4} {text}"));
+                Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     /// Apply autoconfig — show status, create vault, store keys, configure system, then boot normally.
@@ -1348,6 +1424,7 @@ impl AiosApp {
             app, &chat_view, &prompt_input, &channel_overlay, &["AiOS"],
         );
         let window = mw.window;
+        let vu_meter_autoconfig = mw.vu_meter;
         prompt_input.widget().set_visible(false);
 
         // Show boot status.
@@ -1457,6 +1534,7 @@ impl AiosApp {
         gtk4::glib::idle_add_local_once(move || {
             Self::transition_to_normal_mode(
                 &app_clone, rt, &chat_view_clone, &prompt_clone, &window_clone,
+                Some(vu_meter_autoconfig),
             );
         });
 
