@@ -11,6 +11,27 @@ use serde_json::json;
 use super::ConfigManager;
 use crate::i18n::{t, t_fmt};
 
+/// Pretrained wake word IDs (duplicated from aios-voice::wake::pretrained to avoid circular dep).
+const PRETRAINED_WAKE_WORD_IDS: &[(&str, &str)] = &[
+    ("hey_assistant", "Hey Assistant"),
+    ("hey_jarvis", "Hey Jarvis"),
+    ("computer", "Computer"),
+    ("ok_computer", "OK Computer"),
+    ("hey_friday", "Hey Friday"),
+    ("jarvis", "Jarvis"),
+    ("ok_jarvis", "OK Jarvis"),
+    ("skynet", "Skynet"),
+    ("terminator", "Terminator"),
+    ("hey_house", "Hey House"),
+    ("ok_home", "OK Home"),
+    ("home_assistant", "Home Assistant"),
+    ("mr_anderson", "Mr. Anderson"),
+    ("mr_smith", "Mr. Smith"),
+    ("hey_dick_head", "Hey Dick Head"),
+    ("oi_fuckwhit", "Oi Fuckwhit"),
+    ("yo_homie", "Yo Homie"),
+];
+
 // ---------------------------------------------------------------------------
 // CommandInfo — metadata for autocomplete
 // ---------------------------------------------------------------------------
@@ -76,6 +97,17 @@ pub enum PanelFieldKind {
     },
 }
 
+/// Kinds of background tasks that commands can trigger.
+/// Must derive the same traits as `CommandResult` (Debug, Clone).
+#[derive(Debug, Clone)]
+pub enum BackgroundTaskKind {
+    /// Train a custom wake word model.
+    WakeWordTraining {
+        phrase: String,
+        output_dir: std::path::PathBuf,
+    },
+}
+
 /// Outcome of executing a slash command.
 #[derive(Debug, Clone)]
 pub enum CommandResult {
@@ -107,6 +139,13 @@ pub enum CommandResult {
         fields: Vec<PanelField>,
         /// The config key prefix to update when the user selects a value.
         config_key: String,
+    },
+    /// A background task that should be spawned by the GTK layer.
+    BackgroundTask {
+        /// Human-readable description shown as a system message.
+        description: String,
+        /// The kind of background task to spawn.
+        task: BackgroundTaskKind,
     },
     /// The command was not recognised.
     Unknown(String),
@@ -474,31 +513,92 @@ impl<'a> CommandHandler<'a> {
 
     fn cmd_wake(&mut self, args: &str) -> CommandResult {
         let phrase = args.trim();
+
+        // No args — show status
         if phrase.is_empty() {
-            let current = self.config.get_str("voice.wake_word", "Assistant");
+            let current = self.config.get_str("voice.wake_word", "hey assistant");
             let enabled = self.config.get_bool("voice.wake_enabled", true);
+            let source = self.config.get_str("voice.wake_word_source", "pretrained");
+            let threshold = self.config.get_f64("voice.wake_threshold", 0.5);
             let status = if enabled { "enabled" } else { "disabled" };
-            return CommandResult::Response(
-                t_fmt("cmd.wake.status", &[("current", &current), ("status", status)]),
-            );
+            return CommandResult::Response(format!(
+                "Wake word: \"{current}\" ({source}) — {status}, threshold: {threshold:.1}"
+            ));
         }
 
         match phrase.to_lowercase().as_str() {
-            "off" => {
-                let _ = self.config.set("voice.wake_enabled", json!(false));
-                CommandResult::Response(t("cmd.wake.disabled"))
-            }
             "on" => {
                 let _ = self.config.set("voice.wake_enabled", json!(true));
-                let current = self.config.get_str("voice.wake_word", "Assistant");
-                CommandResult::Response(
-                    t_fmt("cmd.wake.enabled", &[("current", &current)]),
-                )
+                let current = self.config.get_str("voice.wake_word", "hey assistant");
+                CommandResult::Response(format!("Wake word detection enabled: \"{current}\""))
+            }
+            "off" => {
+                let _ = self.config.set("voice.wake_enabled", json!(false));
+                CommandResult::Response("Wake word detection disabled — all speech goes to STT".to_string())
+            }
+            "list" => {
+                let mut lines = vec!["Available pre-trained wake words:".to_string()];
+                let current = self.config.get_str("voice.wake_word", "");
+                let current_id = current.to_lowercase().replace(' ', "_");
+                for &(id, display) in PRETRAINED_WAKE_WORD_IDS {
+                    let marker = if id == current_id { " (active)" } else { "" };
+                    lines.push(format!("  {id} — {display}{marker}"));
+                }
+                lines.push(String::new());
+                lines.push("Tip: /wake <name> to switch, or /wake <custom phrase> to train a new one.".to_string());
+                CommandResult::Response(lines.join("\n"))
+            }
+            s if s.starts_with("train ") => {
+                let train_phrase = phrase[6..].trim();
+                if train_phrase.is_empty() {
+                    return CommandResult::Response("Usage: /wake train <phrase>".to_string());
+                }
+                let _ = self.config.set("voice.wake_word", json!(train_phrase));
+                let _ = self.config.set("voice.wake_word_source", json!("training"));
+                let _ = self.config.set("voice.wake_enabled", json!(true));
+                let output_dir = ConfigManager::default_config_dir()
+                    .join("models/kws/custom");
+                CommandResult::BackgroundTask {
+                    description: format!("Training custom wake word \"{train_phrase}\"... this takes a few minutes."),
+                    task: BackgroundTaskKind::WakeWordTraining {
+                        phrase: train_phrase.to_string(),
+                        output_dir,
+                    },
+                }
+            }
+            s if s.starts_with("threshold ") => {
+                let val_str = phrase[10..].trim();
+                match val_str.parse::<f64>() {
+                    Ok(val) if (0.0..=1.0).contains(&val) => {
+                        let _ = self.config.set("voice.wake_threshold", json!(val));
+                        CommandResult::Response(format!("Wake word threshold set to {val:.1}"))
+                    }
+                    _ => CommandResult::Response("Usage: /wake threshold <0.0-1.0>".to_string()),
+                }
             }
             _ => {
+                // Catch-all: set as wake word
+                let phrase = args.trim();
                 let _ = self.config.set("voice.wake_word", json!(phrase));
                 let _ = self.config.set("voice.wake_enabled", json!(true));
-                CommandResult::Response(t_fmt("cmd.wake.set", &[("phrase", phrase)]))
+
+                // Check if it's a pre-trained model
+                let normalized = phrase.to_lowercase().replace(' ', "_");
+                if PRETRAINED_WAKE_WORD_IDS.iter().any(|&(id, _)| id == normalized) {
+                    let _ = self.config.set("voice.wake_word_source", json!("pretrained"));
+                    CommandResult::Response(format!("Wake word set to \"{phrase}\" (pretrained — active immediately)"))
+                } else {
+                    let _ = self.config.set("voice.wake_word_source", json!("training"));
+                    let output_dir = ConfigManager::default_config_dir()
+                        .join("models/kws/custom");
+                    CommandResult::BackgroundTask {
+                        description: format!("No pre-trained model for \"{phrase}\". Training a custom model... this takes a few minutes."),
+                        task: BackgroundTaskKind::WakeWordTraining {
+                            phrase: phrase.to_string(),
+                            output_dir,
+                        },
+                    }
+                }
             }
         }
     }
@@ -1073,7 +1173,9 @@ mod tests {
         match result {
             CommandResult::Response(text) => {
                 assert!(text.contains("Wake word:"));
-                assert!(text.contains("Assistant"));
+                assert!(text.contains("hey assistant"));
+                assert!(text.contains("pretrained"));
+                assert!(text.contains("threshold"));
             }
             other => panic!("expected Response, got {other:?}"),
         }
@@ -1087,6 +1189,7 @@ mod tests {
         match result {
             CommandResult::Response(text) => {
                 assert!(text.contains("ok computer"));
+                assert!(text.contains("pretrained"));
             }
             other => panic!("expected Response, got {other:?}"),
         }
@@ -1125,6 +1228,109 @@ mod tests {
             }
         }
         assert!(cfg.get_bool("voice.wake_enabled", false));
+    }
+
+    #[test]
+    fn wake_list_shows_pretrained() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/wake list");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("hey_assistant"));
+                assert!(text.contains("hey_jarvis"));
+                assert!(text.contains("computer"));
+                assert!(text.contains("Available pre-trained wake words:"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wake_train_returns_background_task() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/wake train hey custom");
+        match result {
+            CommandResult::BackgroundTask { description, task } => {
+                assert!(description.contains("Training custom wake word"));
+                assert!(description.contains("hey custom"));
+                match task {
+                    BackgroundTaskKind::WakeWordTraining { phrase, output_dir } => {
+                        assert_eq!(phrase, "hey custom");
+                        assert!(output_dir.ends_with("models/kws/custom"));
+                    }
+                }
+            }
+            other => panic!("expected BackgroundTask, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("voice.wake_word", ""), "hey custom");
+        assert_eq!(cfg.get_str("voice.wake_word_source", ""), "training");
+    }
+
+    #[test]
+    fn wake_threshold_sets_value() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/wake threshold 0.3");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("threshold"));
+                assert!(text.contains("0.3"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+        let val = cfg.get_f64("voice.wake_threshold", 0.5);
+        assert!((val - 0.3).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn wake_threshold_rejects_invalid() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/wake threshold 1.5");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("Usage"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wake_nonexistent_phrase_triggers_training() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/wake nonexistent phrase");
+        match result {
+            CommandResult::BackgroundTask { description, task } => {
+                assert!(description.contains("No pre-trained model"));
+                assert!(description.contains("nonexistent phrase"));
+                match task {
+                    BackgroundTaskKind::WakeWordTraining { phrase, .. } => {
+                        assert_eq!(phrase, "nonexistent phrase");
+                    }
+                }
+            }
+            other => panic!("expected BackgroundTask, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("voice.wake_word_source", ""), "training");
+    }
+
+    #[test]
+    fn wake_pretrained_jarvis() {
+        let (_dir, mut cfg) = temp_config();
+        let mut handler = CommandHandler::new(&mut cfg);
+        let result = handler.execute("/wake jarvis");
+        match result {
+            CommandResult::Response(text) => {
+                assert!(text.contains("jarvis"));
+                assert!(text.contains("pretrained"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+        assert_eq!(cfg.get_str("voice.wake_word", ""), "jarvis");
+        assert_eq!(cfg.get_str("voice.wake_word_source", ""), "pretrained");
     }
 
     #[test]

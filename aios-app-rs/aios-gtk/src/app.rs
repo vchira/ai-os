@@ -2122,6 +2122,10 @@ impl AiosApp {
                 );
                 return;
             }
+            CommandResult::BackgroundTask { description, .. } => {
+                chat_view.add_message("system", &description);
+                // TODO: spawn the background task (e.g. wake word training)
+            }
             CommandResult::Unknown(cmd) => {
                 chat_view.add_message(
                     "system",
