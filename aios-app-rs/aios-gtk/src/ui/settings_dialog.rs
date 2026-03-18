@@ -369,6 +369,7 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
         .title("Playback")
         .build();
     mic_result_row.add_suffix(&mic_result_box);
+    mic_result_row.set_visible(false); // Hidden until a recording is made
     stt_group.add(&mic_result_row);
 
     // Play button: plays back the recorded mic test
@@ -397,9 +398,11 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
         let status = mic_status.clone();
         let btn = mic_test_btn.clone();
         let play = mic_play_btn.clone();
+        let result_row = mic_result_row.clone();
         mic_test_btn.connect_clicked(move |_| {
             btn.set_sensitive(false);
             play.set_sensitive(false);
+            result_row.set_visible(true); // Show playback row when test starts
             status.set_text("Recording...");
             level.set_value(0.0);
 
