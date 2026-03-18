@@ -15,7 +15,9 @@
 //!    [`WakeWordEvent::SpeechCaptured`].
 
 pub mod detector;
+pub mod kws;
 pub mod pretrained;
 
 pub use detector::{WakeWordConfig, WakeWordDetector, WakeWordEvent};
+pub use kws::{KwsEngine, KwsResult};
 pub use pretrained::{PretrainedModel, PRETRAINED_WAKE_WORDS, find_pretrained, pretrained_model_path};
