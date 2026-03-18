@@ -54,13 +54,19 @@ The `start_voice_listener()` thread operates as a two-state machine:
 4. If speech ends without wake match — discard buffer, stay idle
 
 ### Capture Mode (recording the command)
-1. Wake word detected — start a new buffer for command audio
-2. Skip `post_wake_delay_ms` (300ms) to avoid wake word tail
-3. VAD monitors command speech — accumulate into command buffer
-4. Circular buffer: keep rolling 2-second audio buffer so we don't cut off the first word if the user speaks without pausing after the wake word
-5. When VAD detects speech end — send command buffer to Whisper
-6. Send transcribed text to GTK thread via `stt_tx` channel
-7. Return to Idle Mode
+
+The voice listener always maintains a rolling 2-second circular buffer of raw audio alongside the KWS processing. When KWS triggers:
+
+1. Wake word detected — the circular buffer contains the last 2 seconds of audio, which includes overlapping command audio if the user spoke without pausing (e.g., "hey jarvis what time is it")
+2. Copy the circular buffer contents into a new command buffer, then trim: discard everything before the KWS trigger point, plus skip `post_wake_delay_ms` (300ms) after the trigger to drop the wake word tail
+3. Continue accumulating new audio into the command buffer as it arrives
+4. VAD monitors the command audio — when speech ends, send command buffer to Whisper
+5. Send transcribed text to GTK thread via `stt_tx` channel
+6. Return to Idle Mode
+
+This means:
+- If user pauses between wake word and command: the 300ms skip drops the wake word tail, then new speech is captured cleanly
+- If user speaks without pausing ("hey jarvis what time is it"): the circular buffer has the overlapping audio, the 300ms skip is applied from the trigger point, and the remaining audio ("what time is it") is preserved
 
 ### Timeouts
 - Capture mode max duration: 15 seconds — force-transcribe and return to idle
@@ -81,6 +87,14 @@ If wake word is enabled but no KWS model is loaded (custom training in progress)
 ### `KwsEngine` Struct
 
 ```rust
+/// Result from processing an audio chunk through the KWS model.
+pub struct KwsResult {
+    /// Confidence score (0.0-1.0) for the active wake word.
+    pub confidence: f32,
+    /// Whether the confidence exceeded the threshold.
+    pub triggered: bool,
+}
+
 pub struct KwsEngine {
     // Infrastructure models (loaded once)
     embedding_session: ort::Session,
@@ -93,14 +107,16 @@ pub struct KwsEngine {
     threshold: f32,
 
     // Internal state for rolling prediction
+    // openWakeWord expects 80ms chunks (1280 samples at 16kHz) — this is
+    // specific to its architecture, not a generic KWS requirement.
     audio_buffer: Vec<f32>,
     embedding_buffer: Vec<Vec<f32>>,
 }
 
 impl KwsEngine {
-    pub fn new(models_dir: &Path) -> Result<Self>;
-    pub fn load_wake_model(&mut self, model_path: &Path, wake_word: &str) -> Result<()>;
-    pub fn process_audio(&mut self, samples: &[f32]) -> Option<f32>;
+    pub fn new(models_dir: &Path) -> Result<Self, VoiceError>;
+    pub fn load_wake_model(&mut self, model_path: &Path, wake_word: &str) -> Result<(), VoiceError>;
+    pub fn process_audio(&mut self, samples: &[f32]) -> KwsResult;
     pub fn reset(&mut self);
     pub fn wake_word(&self) -> &str;
     pub fn set_threshold(&mut self, threshold: f32);
@@ -109,10 +125,36 @@ impl KwsEngine {
 
 Key details:
 - `process_audio()` accepts raw f32 mono 16kHz samples of any length
-- Internally buffers to 80ms chunks, runs melspectrogram → embedding → wake model
-- Returns `Some(confidence)` when confidence > threshold, `None` otherwise
+- Internally buffers to 80ms chunks (openWakeWord-specific), runs melspectrogram → embedding → wake model
+- Always returns `KwsResult` with confidence + triggered flag (useful for debugging/tuning)
 - `reset()` clears internal buffers (called after wake detection or speech end)
 - Thread-safe via `Arc<Mutex<KwsEngine>>` in the voice listener
+- `ort::Session` is `Send` (ort v2.x), so the engine can be shared across threads via `Arc<Mutex>`
+- Holding the mutex during inference (~1-5ms per 80ms chunk) is acceptable; the settings dialog or `/wake` command will briefly stall inference when hot-swapping models
+
+### ONNX Runtime Initialization
+
+- `ort::init()` is called once inside `KwsEngine::new()` with CPU execution provider
+- The `ort` crate's `download-binaries` Cargo feature is used to bundle `libonnxruntime` at build time — no system package needed
+- For GPU-capable machines, the CUDA execution provider can be added later as an optimization
+
+### Error Handling
+
+`KwsEngine` errors use the existing `VoiceError` enum with a new variant:
+
+```rust
+// In aios-voice/src/error.rs
+pub enum VoiceError {
+    // ... existing variants ...
+    /// KWS model loading or inference failure.
+    Kws(String),
+}
+```
+
+Error scenarios:
+- Infrastructure models missing/corrupted → `VoiceError::Kws("Failed to load embedding model: ...")` → voice listener falls back to Whisper + keyword match
+- Wake model invalid → `VoiceError::Kws(...)` → logged, fallback used
+- ONNX Runtime init failure → `VoiceError::Kws(...)` → logged, KWS disabled, pure Whisper mode
 
 ### `KwsTrainer` Struct
 
@@ -214,14 +256,35 @@ If user picks a pre-trained wake word — no training, mic enabled immediately.
 
 ### Autoconfig Integration
 
-`autoconfig.json` field `system.wake_word` (existing). The system checks:
-- Is the value a pre-trained model name? → load `.onnx` directly, mic enabled
+A new `wake_word` field is added to `AssistantConfig` in `autoconfig.rs` (the existing struct only has `name` and `effort`):
+
+```rust
+pub struct AssistantConfig {
+    pub name: String,
+    pub effort: String,
+    pub wake_word: String,  // NEW — default: "hey assistant"
+}
+```
+
+The autoconfig system checks:
+- Is the `wake_word` value a pre-trained model name? → load `.onnx` directly, mic enabled
 - Otherwise → trigger background training, mic disabled until done
 
 ## Config Keys
 
+The default wake word changes from `"Assistant"` (current codebase) to `"hey assistant"` to match the pre-trained KWS model. The `WakeWordConfig::default()` in `detector.rs` (currently `"hey aios"`) is also updated for consistency.
+
+New keys `wake_word_source` and `wake_threshold` are added to `voice` in `defaults.rs`:
+
 ```json
 "voice": {
+    "stt_enabled": true,
+    "stt_model": "medium",
+    "stt_language": "",
+    "tts_enabled": true,
+    "tts_voice": "en_US-amy-medium",
+    "tts_gender": "female",
+    "tts_rate": 1.0,
     "wake_word": "hey assistant",
     "wake_enabled": true,
     "wake_word_source": "pretrained",
@@ -231,7 +294,7 @@ If user picks a pre-trained wake word — no training, mic enabled immediately.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `wake_word` | string | "hey assistant" | Active wake phrase |
+| `wake_word` | string | "hey assistant" | Active wake phrase (changed from "Assistant") |
 | `wake_enabled` | bool | true | Whether KWS filtering is active |
 | `wake_word_source` | string | "pretrained" | "pretrained", "custom", or "training" |
 | `wake_threshold` | f32 | 0.5 | KWS confidence threshold (0.0-1.0) |
@@ -273,37 +336,55 @@ Selecting a pre-trained wake word clears the custom field and hot-swaps the mode
 ## Dependencies
 
 ### Rust (aios-voice)
-- `ort` crate — ONNX Runtime Rust bindings (new dependency)
-- Links to `libonnxruntime` native library
+- `ort` crate with `download-binaries` feature — downloads and statically links `libonnxruntime` at build time (no system package required)
+- No `libonnxruntime-dev` needed in Dockerfile — the `ort` crate handles everything
 
 ### Python (training only)
 - `openwakeword`, `torch`, `piper-sample-generator`, `speechbrain`, `onnxruntime`
 - Bundled at `/opt/aios-app/kws-trainer/` with virtualenv
 - Not loaded at runtime — only invoked for custom model training
+- **ISO size impact**: PyTorch adds ~1.5GB to the ISO. This is acceptable — AiOS ISOs are already multi-GB and disk space is not a constraint. The training capability is a core feature, not optional.
 
 ### ISO Build
-- `libonnxruntime` / `libonnxruntime-dev` for Rust compilation and runtime
-- Download 3 infrastructure models from openWakeWord v0.5.1 release
-- Download 16 community models from `fwartner/home-assistant-wakewords-collection`
-- Download 1 official model (hey_jarvis) from openWakeWord v0.5.1 release
-- Train `hey_assistant.onnx` as part of the build process
-- Bundle Python training environment
+- Download 3 infrastructure models from openWakeWord v0.5.1 release:
+  - `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/embedding_model.onnx`
+  - `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/melspectrogram.onnx`
+  - `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/silero_vad.onnx`
+- Download 1 official model from openWakeWord v0.5.1:
+  - `https://github.com/dscripka/openWakeWord/releases/download/v0.5.1/hey_jarvis_v0.1.onnx`
+- Download 16 community models from `fwartner/home-assistant-wakewords-collection` (main branch, `en/` directory)
+- Train `hey_assistant.onnx` as part of the build process (or pre-train on dev machine)
+- Bundle Python training virtualenv
+- All model downloads should be pinned to specific commit SHAs for reproducible builds
 
 ## Existing Code Changes
 
 | File | Change |
 |------|--------|
-| `aios-voice/Cargo.toml` | Add `ort` dependency |
+| `aios-voice/Cargo.toml` | Add `ort` with `download-binaries` feature |
+| `aios-voice/src/error.rs` | Add `Kws(String)` variant to `VoiceError` |
 | `aios-voice/src/wake/mod.rs` | Add `pub mod kws; pub mod trainer;` exports |
-| `aios-voice/src/wake/detector.rs` | Keep as fallback for custom wake words during training |
-| `aios-voice/src/lib.rs` | Export new `KwsEngine`, `KwsTrainer` types |
-| `aios-gtk/src/app.rs` | Rewrite `start_voice_listener()` to use KwsEngine state machine |
+| `aios-voice/src/wake/detector.rs` | Keep as fallback; update `WakeWordConfig::default()` wake phrase to "hey assistant" |
+| `aios-voice/src/lib.rs` | Export new `KwsEngine`, `KwsTrainer`, `KwsResult` types |
+| `aios-gtk/src/app.rs` | Rewrite `start_voice_listener()` to use KwsEngine state machine with circular buffer |
 | `aios-gtk/src/app.rs` | Add `wake_training_in_progress` flag, mic button disable logic |
-| `aios-gtk/src/ui/settings_dialog.rs` | Add Wake Word group to Voice page |
-| `aios-core/src/config/defaults.rs` | Add `wake_word_source`, `wake_threshold` defaults |
-| `aios-core/src/config/commands.rs` | Extend `/wake` with `list`, `train`, `threshold` subcommands |
-| `distro/_inner_build.sh` | Download KWS models, bundle training env |
-| `distro/Dockerfile` | Add `libonnxruntime-dev` build dependency |
+| `aios-gtk/src/ui/settings_dialog.rs` | Add Wake Word group to Voice page; needs `Arc<Mutex<KwsEngine>>` for hot-swap |
+| `aios-core/src/config/defaults.rs` | Change `wake_word` default from "Assistant" to "hey assistant"; add `wake_word_source`, `wake_threshold` |
+| `aios-core/src/config/autoconfig.rs` | Add `wake_word` field to `AssistantConfig` |
+| `aios-core/src/config/commands.rs` | Extend `/wake` with `list`, `train`, `threshold` subcommands; `/wake train` returns a new `CommandResult::BackgroundTask` variant |
+| `aios-core/src/types/` | Add `CommandResult::BackgroundTask { description: String, task: BackgroundTaskKind }` variant for async commands |
+| `distro/_inner_build.sh` | Download KWS infrastructure + wake word models, bundle Python training env |
+
+### Boot Status Integration
+
+Add KWS status to the boot status message:
+```
+  ✅ KWS: active — hey_assistant (pretrained)
+```
+or during training:
+```
+  ⏳ KWS: training — "hey custom phrase" (mic disabled until ready)
+```
 
 ## Testing
 
