@@ -33,6 +33,8 @@ tempfile = "3"
 cpal = "0.15"
 hound = "3.5"
 rubato = "0.15"
+ort = { version = "2.0.0-rc.9", features = ["download-binaries"] }
+ndarray = "0.16"
 
 gtk4 = "0.9"
 libadwaita = { version = "0.7", features = ["v1_2"] }
