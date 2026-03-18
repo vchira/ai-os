@@ -82,12 +82,22 @@ impl KwsEngine {
     /// `models_dir` must contain an `infrastructure/` subdirectory with
     /// `melspectrogram.onnx` and `embedding_model.onnx`.
     ///
-    /// Calls `ort::init()` to ensure the ONNX Runtime environment is
-    /// configured with the CPU execution provider.
+    /// Calls `ort::init_from()` to load the ONNX Runtime shared library
+    /// dynamically, then configures the CPU execution provider.
+    ///
+    /// The library is searched in this order:
+    /// 1. `ORT_DYLIB_PATH` environment variable
+    /// 2. `/opt/aios-app/lib/libonnxruntime.so`
+    /// 3. System library path (LD_LIBRARY_PATH)
     pub fn new(models_dir: &Path) -> Result<Self, VoiceError> {
-        // Ensure ORT environment is initialised (idempotent — only the first
-        // call in the process has an effect).
-        ort::init()
+        // Load the ONNX Runtime shared library dynamically.
+        // With the `load-dynamic` feature, the library is NOT linked at
+        // compile time — it must be present at runtime.
+        let lib_path = std::env::var("ORT_DYLIB_PATH")
+            .unwrap_or_else(|_| "/opt/aios-app/lib/libonnxruntime.so".to_string());
+
+        ort::init_from(lib_path)
+            .map_err(|e| VoiceError::Kws(format!("ONNX Runtime library load failed: {e}")))?
             .with_execution_providers([ort::ep::CPU::default().build()])
             .commit();
 

@@ -878,6 +878,16 @@ if [ ! -f "${PIPER_VOICE_DIR}/en_US-amy-medium.onnx" ]; then
     curl -fsSL "${VOICE_URL}/en_US-amy-medium.onnx.json" -o "${PIPER_VOICE_DIR}/en_US-amy-medium.onnx.json" 2>/dev/null || true
 fi
 
+# ── ONNX Runtime shared library (for KWS) ──
+echo "[AiOS] Downloading ONNX Runtime shared library..."
+mkdir -p /opt/aios-app/lib
+ORT_VERSION="1.19.2"
+wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz" \
+    -O /tmp/ort.tgz
+tar -xzf /tmp/ort.tgz -C /tmp/
+cp /tmp/onnxruntime-linux-x64-${ORT_VERSION}/lib/libonnxruntime.so.${ORT_VERSION} /opt/aios-app/lib/libonnxruntime.so
+rm -rf /tmp/ort.tgz /tmp/onnxruntime-linux-x64-*
+
 # ── KWS (Keyword Spotting) models ──
 echo "[AiOS] Setting up KWS models..."
 mkdir -p /opt/aios-app/models/kws/infrastructure
