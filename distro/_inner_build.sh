@@ -1097,7 +1097,7 @@ cat > /home/aios/.config/labwc/rc.xml << RCEOF
   <keyboard>
     <default layout="${KB_LAYOUT}"/>
     <keybind key="A-F4"><action name="Close"/></keybind>
-    <keybind key="A-Return"><action name="Execute"><command>foot</command></action></keybind>
+    <keybind key="A-Return"><action name="Execute"><command>foot --title "System Prompt"</command></action></keybind>
     <keybind key="A-F11"><action name="ToggleFullscreen"/></keybind>
     <keybind key="Print"><action name="Execute"><command>grim</command></action></keybind>
     <!-- Super key or Ctrl+Space opens AiOS -->
@@ -1128,8 +1128,31 @@ cat > /home/aios/.config/labwc/rc.xml << RCEOF
     <!-- No desktop right-click menu — AiOS is the desktop -->
     <context name="Root"/>
   </mouse>
+  <windowRules>
+    <!-- AiOS main window: no minimize (it IS the desktop), no decoration -->
+    <windowRule identifier="dev.aios.app" serverDecoration="no">
+      <action name="DisableMinimize"/>
+    </windowRule>
+    <!-- System Prompt terminal: can move, resize, close — but not minimize -->
+    <windowRule title="System Prompt">
+      <action name="DisableMinimize"/>
+    </windowRule>
+  </windowRules>
 </labwc_config>
 RCEOF
+
+# Foot terminal configuration.
+mkdir -p /home/aios/.config/foot
+cat > /home/aios/.config/foot/foot.ini << 'FOOTEOF'
+[main]
+title=System Prompt
+font=monospace:size=11
+
+[colors]
+background=0d1117
+foreground=e6edf3
+FOOTEOF
+chown -R aios:aios /home/aios/.config/foot
 
 # ALSA config: use PipeWire for playback, direct ALSA for capture.
 # PipeWire 0.3.65 has a bug where it holds the HDA capture device

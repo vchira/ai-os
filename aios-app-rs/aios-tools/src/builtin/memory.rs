@@ -290,4 +290,232 @@ mod tests {
         }));
         assert!(!r.success);
     }
+
+    // -- New comprehensive tests --
+
+    #[test]
+    fn memorize_and_recall_roundtrip() {
+        let (tool, _dir) = temp_tool();
+        let r = tool.execute(serde_json::json!({
+            "action": "memorize",
+            "key": "color",
+            "value": "blue"
+        }));
+        assert!(r.success);
+        assert!(r.output.contains("color"));
+
+        let r = tool.execute(serde_json::json!({
+            "action": "recall",
+            "key": "color"
+        }));
+        assert!(r.success);
+        assert_eq!(r.output, "blue");
+        // Check structured data is present.
+        let data = r.data.unwrap();
+        assert_eq!(data["key"], "color");
+        assert_eq!(data["value"], "blue");
+    }
+
+    #[test]
+    fn recall_nonexistent_key() {
+        let (tool, _dir) = temp_tool();
+        let r = tool.execute(serde_json::json!({
+            "action": "recall",
+            "key": "does_not_exist"
+        }));
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("does_not_exist"));
+    }
+
+    #[test]
+    fn forget_nonexistent_key() {
+        let (tool, _dir) = temp_tool();
+        let r = tool.execute(serde_json::json!({
+            "action": "forget",
+            "key": "ghost"
+        }));
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("ghost"));
+    }
+
+    #[test]
+    fn list_keys_empty_store() {
+        let (tool, _dir) = temp_tool();
+        let r = tool.execute(serde_json::json!({ "action": "list_keys" }));
+        assert!(r.success);
+        assert_eq!(r.output, "(no memories stored)");
+        let data = r.data.unwrap();
+        assert!(data["keys"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_keys_with_data() {
+        let (tool, _dir) = temp_tool();
+        tool.execute(serde_json::json!({
+            "action": "memorize", "key": "z", "value": "last"
+        }));
+        tool.execute(serde_json::json!({
+            "action": "memorize", "key": "a", "value": "first"
+        }));
+        tool.execute(serde_json::json!({
+            "action": "memorize", "key": "m", "value": "middle"
+        }));
+
+        let r = tool.execute(serde_json::json!({ "action": "list_keys" }));
+        assert!(r.success);
+        // BTreeMap keeps keys sorted: a, m, z.
+        assert_eq!(r.output, "a\nm\nz");
+        let data = r.data.unwrap();
+        let keys: Vec<&str> = data["keys"].as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(keys, vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn overwrite_existing_key() {
+        let (tool, _dir) = temp_tool();
+        tool.execute(serde_json::json!({
+            "action": "memorize", "key": "k", "value": "old"
+        }));
+        tool.execute(serde_json::json!({
+            "action": "memorize", "key": "k", "value": "new"
+        }));
+
+        let r = tool.execute(serde_json::json!({
+            "action": "recall", "key": "k"
+        }));
+        assert!(r.success);
+        assert_eq!(r.output, "new");
+    }
+
+    #[test]
+    fn forget_then_recall_fails() {
+        let (tool, _dir) = temp_tool();
+        tool.execute(serde_json::json!({
+            "action": "memorize", "key": "temp", "value": "data"
+        }));
+        let r = tool.execute(serde_json::json!({
+            "action": "forget", "key": "temp"
+        }));
+        assert!(r.success);
+
+        let r = tool.execute(serde_json::json!({
+            "action": "recall", "key": "temp"
+        }));
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn memorize_empty_key_fails() {
+        let (tool, _dir) = temp_tool();
+        let r = tool.execute(serde_json::json!({
+            "action": "memorize",
+            "key": "",
+            "value": "val"
+        }));
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn recall_empty_key_fails() {
+        let (tool, _dir) = temp_tool();
+        let r = tool.execute(serde_json::json!({
+            "action": "recall",
+            "key": ""
+        }));
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn forget_empty_key_fails() {
+        let (tool, _dir) = temp_tool();
+        let r = tool.execute(serde_json::json!({
+            "action": "forget",
+            "key": ""
+        }));
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn tool_name_and_category() {
+        let (tool, _dir) = temp_tool();
+        assert_eq!(tool.name(), "memory");
+        assert_eq!(tool.category(), "memory");
+    }
+
+    #[test]
+    fn persistence_across_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("memory.json");
+
+        // First instance: write.
+        let tool1 = MemoryTool::new(Some(path.clone()));
+        tool1.execute(serde_json::json!({
+            "action": "memorize", "key": "persist", "value": "yes"
+        }));
+
+        // Second instance: read.
+        let tool2 = MemoryTool::new(Some(path));
+        let r = tool2.execute(serde_json::json!({
+            "action": "recall", "key": "persist"
+        }));
+        assert!(r.success);
+        assert_eq!(r.output, "yes");
+    }
+
+    #[test]
+    fn invalid_action_returns_error() {
+        let (tool, _dir) = temp_tool();
+        let r = tool.execute(serde_json::json!({ "action": "explode" }));
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("Unknown action"));
+        assert!(r.error.as_deref().unwrap().contains("explode"));
+    }
+
+    #[test]
+    fn memorize_overwrites_existing_key_value() {
+        let (tool, _dir) = temp_tool();
+        // Store initial value.
+        let r = tool.execute(serde_json::json!({
+            "action": "memorize", "key": "color", "value": "red"
+        }));
+        assert!(r.success);
+
+        // Overwrite with new value.
+        let r = tool.execute(serde_json::json!({
+            "action": "memorize", "key": "color", "value": "green"
+        }));
+        assert!(r.success);
+
+        // Recall should return the updated value.
+        let r = tool.execute(serde_json::json!({
+            "action": "recall", "key": "color"
+        }));
+        assert!(r.success);
+        assert_eq!(r.output, "green");
+
+        // list_keys should still show only one "color" entry.
+        let r = tool.execute(serde_json::json!({ "action": "list_keys" }));
+        assert!(r.success);
+        assert_eq!(r.output, "color");
+    }
+
+    #[test]
+    fn memorize_multiple_keys_and_list() {
+        let (tool, _dir) = temp_tool();
+        for i in 0..5 {
+            tool.execute(serde_json::json!({
+                "action": "memorize",
+                "key": format!("key_{i}"),
+                "value": format!("val_{i}")
+            }));
+        }
+        let r = tool.execute(serde_json::json!({ "action": "list_keys" }));
+        assert!(r.success);
+        let keys: Vec<&str> = r.output.split('\n').collect();
+        assert_eq!(keys.len(), 5);
+        // BTreeMap keeps sorted order.
+        assert_eq!(keys[0], "key_0");
+        assert_eq!(keys[4], "key_4");
+    }
 }

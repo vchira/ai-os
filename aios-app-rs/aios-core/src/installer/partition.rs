@@ -454,4 +454,254 @@ mod tests {
         assert_eq!(partition_device("/dev/nvme0n1", 1), "/dev/nvme0n1p1");
         assert_eq!(partition_device("/dev/nvme0n1", 2), "/dev/nvme0n1p2");
     }
+
+    // ========================================================================
+    // Additional comprehensive tests
+    // ========================================================================
+
+    // -- Small disk failures ------------------------------------------------
+
+    #[test]
+    fn test_plan_partitions_1gb_disk_fails() {
+        let result = plan_partitions_inner(
+            "/dev/sda",
+            1_000_000_000, // 1 GB -- far too small
+            true,
+            4_000_000_000,
+        );
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Not enough space"), "error message: {err}");
+    }
+
+    #[test]
+    fn test_plan_partitions_zero_bytes_fails() {
+        let result = plan_partitions_inner("/dev/sda", 0, true, 4_000_000_000);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_plan_partitions_just_under_minimum_uefi_fails() {
+        // UEFI: EFI (512 MiB) + swap (4 GiB) + root (min 8 GiB) = ~12.5 GiB
+        // 12 GiB should be too small
+        let result = plan_partitions_inner(
+            "/dev/sda",
+            12_000_000_000, // 12 GB
+            true,
+            4_000_000_000,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_plan_partitions_just_under_minimum_bios_fails() {
+        // BIOS: BiosBoot (1 MiB) + swap (4 GiB) + root (min 8 GiB) = ~12 GiB
+        // 11 GiB should be too small
+        let result = plan_partitions_inner(
+            "/dev/sda",
+            11_000_000_000, // 11 GB
+            false,
+            4_000_000_000,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_plan_partitions_disk_equals_overhead_fails() {
+        // Exactly overhead size with no room for root
+        let swap = 4_000_000_000u64;
+        let efi = EFI_SIZE;
+        let result = plan_partitions_inner("/dev/sda", swap + efi, true, swap);
+        assert!(result.is_err());
+    }
+
+    // -- Small RAM values ---------------------------------------------------
+
+    #[test]
+    fn test_plan_partitions_1gb_ram() {
+        let plan = plan_partitions_inner(
+            "/dev/sda",
+            100_000_000_000, // 100 GB
+            true,
+            1_000_000_000, // 1 GB RAM
+        )
+        .expect("should succeed with 1 GB RAM on 100 GB disk");
+
+        let swap = plan.partitions.iter().find(|p| p.role == PartitionRole::Swap).unwrap();
+        assert_eq!(swap.size_bytes, 1_000_000_000); // swap = RAM when RAM < MAX_SWAP
+    }
+
+    #[test]
+    fn test_plan_partitions_512mb_ram() {
+        let plan = plan_partitions_inner(
+            "/dev/sda",
+            100_000_000_000,
+            false,
+            512_000_000, // 512 MB RAM
+        )
+        .expect("should succeed with 512 MB RAM on 100 GB disk");
+
+        let swap = plan.partitions.iter().find(|p| p.role == PartitionRole::Swap).unwrap();
+        assert_eq!(swap.size_bytes, 512_000_000);
+    }
+
+    // -- PartitionRole display names ----------------------------------------
+
+    #[test]
+    fn partition_role_display_bios_boot() {
+        assert_eq!(PartitionRole::BiosBoot.to_string(), "BIOS Boot Partition");
+    }
+
+    #[test]
+    fn partition_role_display_efi() {
+        assert_eq!(PartitionRole::Efi.to_string(), "EFI System Partition");
+    }
+
+    #[test]
+    fn partition_role_display_swap() {
+        assert_eq!(PartitionRole::Swap.to_string(), "Swap");
+    }
+
+    #[test]
+    fn partition_role_display_root() {
+        assert_eq!(PartitionRole::Root.to_string(), "Root");
+    }
+
+    #[test]
+    fn partition_role_all_display_names_are_distinct() {
+        let roles = [
+            PartitionRole::BiosBoot,
+            PartitionRole::Efi,
+            PartitionRole::Swap,
+            PartitionRole::Root,
+        ];
+        let names: Vec<String> = roles.iter().map(|r| r.to_string()).collect();
+        let mut unique = names.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 4, "all 4 partition roles should have distinct display names");
+    }
+
+    // -- Partition device naming edge cases ----------------------------------
+
+    #[test]
+    fn test_partition_device_mmcblk() {
+        // eMMC devices end with a digit like /dev/mmcblk0
+        assert_eq!(partition_device("/dev/mmcblk0", 1), "/dev/mmcblk0p1");
+        assert_eq!(partition_device("/dev/mmcblk0", 3), "/dev/mmcblk0p3");
+    }
+
+    #[test]
+    fn test_partition_device_vda() {
+        // Virtio devices end with a letter
+        assert_eq!(partition_device("/dev/vda", 1), "/dev/vda1");
+        assert_eq!(partition_device("/dev/vda", 2), "/dev/vda2");
+    }
+
+    // -- Large disk ----------------------------------------------------------
+
+    #[test]
+    fn test_plan_partitions_2tb_disk() {
+        let plan = plan_partitions_inner(
+            "/dev/sda",
+            2_000_000_000_000, // 2 TB
+            true,
+            16_000_000_000, // 16 GB RAM
+        )
+        .expect("should succeed for 2TB disk");
+
+        // Swap capped at 8 GB
+        let swap = plan.partitions.iter().find(|p| p.role == PartitionRole::Swap).unwrap();
+        assert_eq!(swap.size_bytes, MAX_SWAP);
+
+        // Root should be huge
+        let root = plan.partitions.iter().find(|p| p.role == PartitionRole::Root).unwrap();
+        let expected_root = 2_000_000_000_000 - EFI_SIZE - MAX_SWAP;
+        assert_eq!(root.size_bytes, expected_root);
+    }
+
+    // -- Partition plan structure -------------------------------------------
+
+    #[test]
+    fn test_uefi_plan_has_efi_swap_root_in_order() {
+        let plan = plan_partitions_inner("/dev/sda", 500_000_000_000, true, 4_000_000_000).unwrap();
+        assert_eq!(plan.partitions.len(), 3);
+        assert_eq!(plan.partitions[0].role, PartitionRole::Efi);
+        assert_eq!(plan.partitions[1].role, PartitionRole::Swap);
+        assert_eq!(plan.partitions[2].role, PartitionRole::Root);
+    }
+
+    #[test]
+    fn test_bios_plan_has_biosboot_swap_root_in_order() {
+        let plan = plan_partitions_inner("/dev/sda", 500_000_000_000, false, 4_000_000_000).unwrap();
+        assert_eq!(plan.partitions.len(), 3);
+        assert_eq!(plan.partitions[0].role, PartitionRole::BiosBoot);
+        assert_eq!(plan.partitions[1].role, PartitionRole::Swap);
+        assert_eq!(plan.partitions[2].role, PartitionRole::Root);
+    }
+
+    #[test]
+    fn test_efi_partition_uses_vfat() {
+        let plan = plan_partitions_inner("/dev/sda", 500_000_000_000, true, 4_000_000_000).unwrap();
+        let efi = &plan.partitions[0];
+        assert_eq!(efi.filesystem, "vfat");
+    }
+
+    #[test]
+    fn test_bios_boot_partition_uses_none() {
+        let plan = plan_partitions_inner("/dev/sda", 500_000_000_000, false, 4_000_000_000).unwrap();
+        let bios_boot = &plan.partitions[0];
+        assert_eq!(bios_boot.filesystem, "none");
+    }
+
+    #[test]
+    fn test_root_partition_uses_ext4() {
+        let plan = plan_partitions_inner("/dev/sda", 500_000_000_000, true, 4_000_000_000).unwrap();
+        let root = plan.partitions.iter().find(|p| p.role == PartitionRole::Root).unwrap();
+        assert_eq!(root.filesystem, "ext4");
+    }
+
+    #[test]
+    fn test_swap_partition_uses_swap() {
+        let plan = plan_partitions_inner("/dev/sda", 500_000_000_000, true, 4_000_000_000).unwrap();
+        let swap = plan.partitions.iter().find(|p| p.role == PartitionRole::Swap).unwrap();
+        assert_eq!(swap.filesystem, "swap");
+    }
+
+    #[test]
+    fn test_partitions_have_human_readable_sizes() {
+        let plan = plan_partitions_inner("/dev/sda", 500_000_000_000, true, 4_000_000_000).unwrap();
+        for part in &plan.partitions {
+            assert!(!part.size_human.is_empty(), "partition {:?} has empty size_human", part.role);
+            // Should contain a unit like "MB", "GB", or "TB"
+            assert!(
+                part.size_human.contains("MB") || part.size_human.contains("GB") || part.size_human.contains("TB"),
+                "size_human '{}' should contain a unit for {:?}",
+                part.size_human,
+                part.role
+            );
+        }
+    }
+
+    #[test]
+    fn test_partition_role_equality() {
+        assert_eq!(PartitionRole::Efi, PartitionRole::Efi);
+        assert_ne!(PartitionRole::Efi, PartitionRole::Root);
+        assert_ne!(PartitionRole::Swap, PartitionRole::BiosBoot);
+    }
+
+    #[test]
+    fn test_partition_plan_device_stored() {
+        let plan = plan_partitions_inner("/dev/nvme0n1", 500_000_000_000, true, 4_000_000_000).unwrap();
+        assert_eq!(plan.device, "/dev/nvme0n1");
+    }
+
+    #[test]
+    fn test_partition_plan_clone() {
+        let plan = plan_partitions_inner("/dev/sda", 500_000_000_000, true, 4_000_000_000).unwrap();
+        let cloned = plan.clone();
+        assert_eq!(cloned.device, plan.device);
+        assert_eq!(cloned.is_uefi, plan.is_uefi);
+        assert_eq!(cloned.partitions.len(), plan.partitions.len());
+    }
 }

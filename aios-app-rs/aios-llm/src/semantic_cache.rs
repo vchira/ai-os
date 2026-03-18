@@ -651,4 +651,250 @@ mod tests {
         assert!(debug_str.contains("total_hits: 10"));
         assert!(debug_str.contains("total_misses: 3"));
     }
+
+    // -- Additional tests --
+
+    #[test]
+    fn cache_miss_returns_none() {
+        let mut cache = test_cache();
+        // Empty cache should always return None.
+        assert_eq!(cache.get("any query at all"), None);
+        assert_eq!(cache.get("disk usage"), None);
+        assert_eq!(cache.get("network speed"), None);
+
+        // After adding one entry, unrelated queries should still miss.
+        cache.put("disk usage check", "42%");
+        assert_eq!(cache.get("install python packages"), None);
+    }
+
+    #[test]
+    fn cache_hit_returns_stored() {
+        let mut cache = test_cache();
+
+        // Exact match hit.
+        cache.put("disk usage check", "42% full");
+        assert_eq!(cache.get("disk usage check"), Some("42% full".to_string()));
+
+        // Multiple entries, each should be retrievable.
+        cache.put("network speed test", "100 Mbps");
+        cache.put("memory usage check", "8 GB used");
+        assert_eq!(cache.get("network speed test"), Some("100 Mbps".to_string()));
+        assert_eq!(cache.get("memory usage check"), Some("8 GB used".to_string()));
+        // Original entry should still be there.
+        assert_eq!(cache.get("disk usage check"), Some("42% full".to_string()));
+    }
+
+    #[test]
+    fn cache_expires_after_ttl() {
+        // Create a cache with very short TTL.
+        let mut cache = SemanticCache::new(Duration::from_millis(50), 100);
+        cache.put("test query here", "cached result");
+
+        // Should hit immediately.
+        assert_eq!(cache.get("test query here"), Some("cached result".to_string()));
+
+        // Wait for TTL to expire.
+        std::thread::sleep(Duration::from_millis(100));
+
+        // Should miss after expiry.
+        assert_eq!(cache.get("test query here"), None);
+
+        // Verify the entry was actually evicted.
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn similar_queries_hit_cache() {
+        let mut cache = test_cache();
+
+        // Store a response.
+        cache.put("disk usage check", "42% used");
+
+        // Query with same keywords in different order should hit.
+        assert_eq!(cache.get("check disk usage"), Some("42% used".to_string()));
+
+        // Query with same keywords plus stop words should hit.
+        assert_eq!(
+            cache.get("what is the disk usage check"),
+            Some("42% used".to_string()),
+        );
+
+        // Query with slightly different but overlapping keywords.
+        // "disk" + "usage" overlap with "disk" + "usage" + "check" = Jaccard 2/3 ≈ 0.67
+        // This is below the 0.7 threshold, so it may miss depending on exact keywords.
+        // Let's test a clear hit case instead.
+        cache.put("system memory usage report", "8 GB free");
+        assert_eq!(
+            cache.get("memory usage system report"),
+            Some("8 GB free".to_string()),
+        );
+    }
+
+    #[test]
+    fn cache_respects_max_entries() {
+        let mut cache = SemanticCache::new(Duration::from_secs(300), 3);
+
+        cache.put("query alpha test", "response alpha");
+        std::thread::sleep(Duration::from_millis(5));
+        cache.put("query beta test", "response beta");
+        std::thread::sleep(Duration::from_millis(5));
+        cache.put("query gamma test", "response gamma");
+        assert_eq!(cache.len(), 3);
+
+        // Adding a 4th should evict the oldest (alpha).
+        cache.put("query delta test", "response delta");
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.get("query alpha test"), None);
+        assert_eq!(cache.get("query beta test"), Some("response beta".to_string()));
+        assert_eq!(cache.get("query gamma test"), Some("response gamma".to_string()));
+        assert_eq!(cache.get("query delta test"), Some("response delta".to_string()));
+
+        // Adding a 5th should evict beta (now the oldest).
+        cache.put("query epsilon test", "response epsilon");
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.get("query beta test"), None);
+    }
+
+    #[test]
+    fn slash_commands_skip_cache() {
+        let mut cache = test_cache();
+
+        // Slash commands should not be stored.
+        cache.put("/help", "Available commands...");
+        assert_eq!(cache.len(), 0);
+
+        cache.put("/provider claude", "Switched to Claude");
+        assert_eq!(cache.len(), 0);
+
+        cache.put("/model gpt-4", "Model set to gpt-4");
+        assert_eq!(cache.len(), 0);
+
+        // Non-slash commands should be stored.
+        cache.put("what time is it", "3pm");
+        assert_eq!(cache.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache hit for identical query — verify response text and hit counters
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_hit_identical_query_multiple_times() {
+        let mut cache = test_cache();
+        cache.put("What is the disk usage?", "Disk is 42% full.");
+
+        // Three identical lookups.
+        for _ in 0..3 {
+            assert_eq!(
+                cache.get("What is the disk usage?"),
+                Some("Disk is 42% full.".to_string()),
+            );
+        }
+        let stats = cache.stats();
+        assert_eq!(stats.total_hits, 3);
+        assert_eq!(stats.total_misses, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache hit for similar query via Jaccard similarity
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_hit_similar_query_keyword_reorder() {
+        let mut cache = test_cache();
+        cache.put("memory usage check", "Memory at 60%.");
+        // Same keywords in different order — Jaccard = 1.0.
+        let result = cache.get("check memory usage");
+        assert_eq!(result, Some("Memory at 60%.".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache miss for different query — no keyword overlap
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_miss_zero_overlap() {
+        let mut cache = test_cache();
+        cache.put("disk usage check", "42%");
+        // No shared keywords.
+        assert_eq!(cache.get("install python library packages"), None);
+        let stats = cache.stats();
+        assert_eq!(stats.total_misses, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Cache TTL: recently inserted entry is valid, expired is not
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_ttl_fresh_entry_returned() {
+        let mut cache = SemanticCache::new(Duration::from_secs(60), 100);
+        cache.put("quick query check", "fast response");
+        // Immediately available.
+        assert_eq!(
+            cache.get("quick query check"),
+            Some("fast response".to_string()),
+        );
+    }
+
+    #[test]
+    fn cache_ttl_expired_semantic_match_not_returned() {
+        let mut cache = SemanticCache::new(Duration::from_millis(1), 100);
+        cache.put("disk usage check", "42%");
+        std::thread::sleep(Duration::from_millis(10));
+        // Semantic match with identical keywords should still miss.
+        assert_eq!(cache.get("check disk usage"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Max-size eviction — single-entry cache
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_eviction_max_size_one() {
+        let mut cache = SemanticCache::new(Duration::from_secs(300), 1);
+        cache.put("first query here", "response 1");
+        assert_eq!(cache.len(), 1);
+        cache.put("second query here", "response 2");
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get("first query here").is_none());
+        assert_eq!(
+            cache.get("second query here"),
+            Some("response 2".to_string()),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Skip long responses — boundary test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_skip_long_response_exactly_at_limit_is_cached() {
+        let mut cache = test_cache();
+        let response = "x".repeat(MAX_CACHEABLE_LENGTH);
+        cache.put("boundary query here", &response);
+        // Exactly at limit — should be cached.
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn cache_skip_long_response_one_over_limit_is_not_cached() {
+        let mut cache = test_cache();
+        let response = "x".repeat(MAX_CACHEABLE_LENGTH + 1);
+        cache.put("boundary query here", &response);
+        assert_eq!(cache.len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Skip slash commands (tool-call triggers)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn cache_skip_all_slash_variants() {
+        let mut cache = test_cache();
+        cache.put("/key claude sk-ant-123", "Key set.");
+        cache.put("/effort high", "Effort set to high.");
+        cache.put("/clear", "Chat cleared.");
+        assert_eq!(cache.len(), 0);
+    }
 }

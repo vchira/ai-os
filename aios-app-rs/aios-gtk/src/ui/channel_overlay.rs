@@ -152,8 +152,8 @@ impl ChannelOverlay {
             ChannelKind::Signal => ("AI is talking on Signal", "phone-symbolic"),
             ChannelKind::Web => ("AI is talking on Web", "web-browser-symbolic"),
             ChannelKind::Voice => ("AI is in voice mode", "audio-speakers-symbolic"),
-            ChannelKind::Desktop => {
-                // Should not happen — Desktop means hide the overlay.
+            ChannelKind::Desktop | ChannelKind::System => {
+                // Should not happen — Desktop/System means hide the overlay.
                 self.hide();
                 return;
             }

@@ -79,6 +79,29 @@ impl MessageLevel {
     pub fn format(&self, content: &str) -> String {
         format!("{} [{}] {}", self.icon(), self.label(), content)
     }
+
+    /// Parse from a lowercase string (as stored in SQLite / serde).
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "info" => Some(Self::Info),
+            "success" => Some(Self::Success),
+            "warning" => Some(Self::Warning),
+            "important" => Some(Self::Important),
+            "error" => Some(Self::Error),
+            _ => None,
+        }
+    }
+
+    /// Return the serde/SQLite lowercase representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Success => "success",
+            Self::Warning => "warning",
+            Self::Important => "important",
+            Self::Error => "error",
+        }
+    }
 }
 
 impl fmt::Display for MessageLevel {
@@ -442,5 +465,383 @@ mod tests {
             let back: MessageLevel = serde_json::from_str(&json).unwrap();
             assert_eq!(*level, back);
         }
+    }
+
+    // ========================================================================
+    // Additional comprehensive tests
+    // ========================================================================
+
+    // -- MessageLevel::from_str_opt all variants ----------------------------
+
+    #[test]
+    fn from_str_opt_info() {
+        assert_eq!(MessageLevel::from_str_opt("info"), Some(MessageLevel::Info));
+    }
+
+    #[test]
+    fn from_str_opt_success() {
+        assert_eq!(MessageLevel::from_str_opt("success"), Some(MessageLevel::Success));
+    }
+
+    #[test]
+    fn from_str_opt_warning() {
+        assert_eq!(MessageLevel::from_str_opt("warning"), Some(MessageLevel::Warning));
+    }
+
+    #[test]
+    fn from_str_opt_important() {
+        assert_eq!(MessageLevel::from_str_opt("important"), Some(MessageLevel::Important));
+    }
+
+    #[test]
+    fn from_str_opt_error() {
+        assert_eq!(MessageLevel::from_str_opt("error"), Some(MessageLevel::Error));
+    }
+
+    #[test]
+    fn from_str_opt_case_insensitive() {
+        assert_eq!(MessageLevel::from_str_opt("INFO"), Some(MessageLevel::Info));
+        assert_eq!(MessageLevel::from_str_opt("Success"), Some(MessageLevel::Success));
+        assert_eq!(MessageLevel::from_str_opt("WARNING"), Some(MessageLevel::Warning));
+        assert_eq!(MessageLevel::from_str_opt("IMPORTANT"), Some(MessageLevel::Important));
+        assert_eq!(MessageLevel::from_str_opt("Error"), Some(MessageLevel::Error));
+    }
+
+    #[test]
+    fn from_str_opt_mixed_case() {
+        assert_eq!(MessageLevel::from_str_opt("InFo"), Some(MessageLevel::Info));
+        assert_eq!(MessageLevel::from_str_opt("sUcCeSs"), Some(MessageLevel::Success));
+    }
+
+    // -- MessageLevel::from_str_opt invalid strings -------------------------
+
+    #[test]
+    fn from_str_opt_empty_returns_none() {
+        assert!(MessageLevel::from_str_opt("").is_none());
+    }
+
+    #[test]
+    fn from_str_opt_unknown_returns_none() {
+        assert!(MessageLevel::from_str_opt("debug").is_none());
+        assert!(MessageLevel::from_str_opt("critical").is_none());
+        assert!(MessageLevel::from_str_opt("fatal").is_none());
+        assert!(MessageLevel::from_str_opt("notice").is_none());
+    }
+
+    #[test]
+    fn from_str_opt_whitespace_returns_none() {
+        assert!(MessageLevel::from_str_opt(" info").is_none());
+        assert!(MessageLevel::from_str_opt("info ").is_none());
+        assert!(MessageLevel::from_str_opt(" ").is_none());
+    }
+
+    // -- MessageLevel::as_str roundtrips with from_str_opt ------------------
+
+    #[test]
+    fn as_str_roundtrip_all_variants() {
+        let levels = [
+            MessageLevel::Info,
+            MessageLevel::Success,
+            MessageLevel::Warning,
+            MessageLevel::Important,
+            MessageLevel::Error,
+        ];
+        for level in &levels {
+            let s = level.as_str();
+            let parsed = MessageLevel::from_str_opt(s);
+            assert_eq!(
+                parsed,
+                Some(*level),
+                "roundtrip failed for {:?}: as_str='{}', from_str_opt={:?}",
+                level,
+                s,
+                parsed
+            );
+        }
+    }
+
+    // -- MessageLevel::as_str values ----------------------------------------
+
+    #[test]
+    fn as_str_returns_lowercase() {
+        assert_eq!(MessageLevel::Info.as_str(), "info");
+        assert_eq!(MessageLevel::Success.as_str(), "success");
+        assert_eq!(MessageLevel::Warning.as_str(), "warning");
+        assert_eq!(MessageLevel::Important.as_str(), "important");
+        assert_eq!(MessageLevel::Error.as_str(), "error");
+    }
+
+    // -- MessageLevel icon/label/color consistency --------------------------
+
+    #[test]
+    fn all_labels_are_uppercase() {
+        let levels = [
+            MessageLevel::Info,
+            MessageLevel::Success,
+            MessageLevel::Warning,
+            MessageLevel::Important,
+            MessageLevel::Error,
+        ];
+        for level in &levels {
+            let label = level.label();
+            assert_eq!(
+                label,
+                label.to_uppercase(),
+                "label for {:?} should be all uppercase",
+                level
+            );
+        }
+    }
+
+    #[test]
+    fn all_colors_are_hex() {
+        let levels = [
+            MessageLevel::Info,
+            MessageLevel::Success,
+            MessageLevel::Warning,
+            MessageLevel::Important,
+            MessageLevel::Error,
+        ];
+        for level in &levels {
+            let color = level.color();
+            assert!(
+                color.starts_with('#') && color.len() == 7,
+                "color for {:?} should be a 7-char hex string, got '{}'",
+                level,
+                color
+            );
+        }
+    }
+
+    #[test]
+    fn all_css_classes_start_with_msg() {
+        let levels = [
+            MessageLevel::Info,
+            MessageLevel::Success,
+            MessageLevel::Warning,
+            MessageLevel::Important,
+            MessageLevel::Error,
+        ];
+        for level in &levels {
+            assert!(
+                level.css_class().starts_with("msg-"),
+                "css_class for {:?} should start with 'msg-'",
+                level
+            );
+        }
+    }
+
+    // -- BootStatus formatting with multiple lines --------------------------
+
+    #[test]
+    fn boot_status_multiple_lines_all_present() {
+        let mut status = BootStatus::new();
+        status.add(StatusLine::new("Desktop", true, "GTK4/libadwaita"));
+        status.add(StatusLine::new("Web Channel", true, "http://aios.local:80"));
+        status.add(StatusLine::new("Signal", false, "disabled (/channel signal on)"));
+        status.add(StatusLine::new("LLM Provider", true, "claude"));
+        status.add(StatusLine::new("Voice", true, "STT: on | TTS: on"));
+
+        let report = status.format();
+        assert!(report.contains("AiOS System Status"));
+        assert!(report.contains("Boot time:"));
+        assert!(report.contains("Desktop"));
+        assert!(report.contains("GTK4/libadwaita"));
+        assert!(report.contains("Web Channel"));
+        assert!(report.contains("http://aios.local:80"));
+        assert!(report.contains("Signal"));
+        assert!(report.contains("LLM Provider"));
+        assert!(report.contains("claude"));
+        assert!(report.contains("Voice"));
+        assert!(report.contains("STT: on | TTS: on"));
+    }
+
+    #[test]
+    fn boot_status_html_multiple_lines() {
+        let mut status = BootStatus::new();
+        status.add(StatusLine::new("Desktop", true, "GTK4"));
+        status.add(StatusLine::new("Signal", false, "not configured"));
+        status.add(StatusLine::new("LLM Provider", true, "openai"));
+
+        let html = status.format_html();
+        assert!(html.contains("[INFO]"));
+        assert!(html.contains("AiOS System Status"));
+        assert!(html.contains("Desktop"));
+        assert!(html.contains("available"));
+        assert!(html.contains("Signal"));
+        assert!(html.contains("unavailable"));
+        assert!(html.contains("not configured"));
+        assert!(html.contains("LLM Provider"));
+        assert!(html.contains("openai"));
+    }
+
+    #[test]
+    fn boot_status_default_trait() {
+        let status = BootStatus::default();
+        let report = status.format();
+        assert!(report.contains("AiOS System Status"));
+    }
+
+    // -- StatusLine escaping -------------------------------------------------
+
+    #[test]
+    fn status_line_escapes_html_entities() {
+        let line = StatusLine::new("Test", true, "<script>alert('xss')</script>");
+        let formatted = line.format();
+        // Pango format should escape < and >
+        assert!(formatted.contains("&lt;"));
+        assert!(formatted.contains("&gt;"));
+        assert!(!formatted.contains("<script>"));
+    }
+
+    #[test]
+    fn status_line_escapes_ampersand() {
+        let line = StatusLine::new("Test", true, "foo & bar");
+        let formatted = line.format();
+        assert!(formatted.contains("&amp;"));
+    }
+
+    // -- MessageLevel format with empty content -----------------------------
+
+    #[test]
+    fn message_level_format_empty_content() {
+        let msg = MessageLevel::Info.format("");
+        assert!(msg.contains("[INFO]"));
+        assert!(msg.contains(MessageLevel::Info.icon()));
+    }
+
+    // -- MessageLevel serde edge cases --------------------------------------
+
+    #[test]
+    fn message_level_deserialize_invalid_returns_error() {
+        let result: Result<MessageLevel, _> = serde_json::from_str("\"debug\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn message_level_deserialize_number_returns_error() {
+        let result: Result<MessageLevel, _> = serde_json::from_str("42");
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Further comprehensive tests
+    // ========================================================================
+
+    #[test]
+    fn from_str_opt_warn_is_not_warning() {
+        // "warn" is not a valid level — only "warning" is
+        assert!(MessageLevel::from_str_opt("warn").is_none());
+    }
+
+    #[test]
+    fn from_str_opt_err_is_not_error() {
+        // "err" is not a valid level — only "error" is
+        assert!(MessageLevel::from_str_opt("err").is_none());
+    }
+
+    #[test]
+    fn message_level_deserialize_empty_string_returns_error() {
+        let result: Result<MessageLevel, _> = serde_json::from_str("\"\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn message_level_deserialize_null_returns_error() {
+        let result: Result<MessageLevel, _> = serde_json::from_str("null");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn boot_status_with_20_lines() {
+        let mut status = BootStatus::new();
+        for i in 0..20 {
+            status.add(StatusLine::new(
+                format!("Service-{i}"),
+                i % 3 != 0,
+                format!("detail-{i}"),
+            ));
+        }
+        let report = status.format();
+        for i in 0..20 {
+            assert!(report.contains(&format!("Service-{i}")), "missing Service-{i}");
+            assert!(report.contains(&format!("detail-{i}")), "missing detail-{i}");
+        }
+    }
+
+    #[test]
+    fn boot_status_html_with_20_lines() {
+        let mut status = BootStatus::new();
+        for i in 0..20 {
+            status.add(StatusLine::new(
+                format!("Component-{i}"),
+                i % 2 == 0,
+                format!("html-detail-{i}"),
+            ));
+        }
+        let html = status.format_html();
+        for i in 0..20 {
+            assert!(html.contains(&format!("Component-{i}")), "missing Component-{i} in HTML");
+            assert!(html.contains(&format!("html-detail-{i}")), "missing html-detail-{i} in HTML");
+        }
+    }
+
+    #[test]
+    fn status_line_new_with_string_types() {
+        // Verify that Into<String> works with both &str and String
+        let line1 = StatusLine::new("from_str", true, "detail_str");
+        assert_eq!(line1.component, "from_str");
+        assert_eq!(line1.detail, "detail_str");
+
+        let line2 = StatusLine::new(String::from("from_string"), false, String::from("detail_string"));
+        assert_eq!(line2.component, "from_string");
+        assert_eq!(line2.detail, "detail_string");
+    }
+
+    #[test]
+    fn status_line_available_uses_green_color() {
+        let line = StatusLine::new("Test", true, "");
+        let html = line.format_html();
+        assert!(html.contains("#2ed573"), "available should use green color");
+    }
+
+    #[test]
+    fn status_line_unavailable_uses_red_color() {
+        let line = StatusLine::new("Test", false, "");
+        let html = line.format_html();
+        assert!(html.contains("#ff4757"), "unavailable should use red color");
+    }
+
+    #[test]
+    fn message_level_format_with_special_characters() {
+        let msg = MessageLevel::Warning.format("Watch out for <html> & 'quotes'");
+        assert!(msg.contains("[WARNING]"));
+        assert!(msg.contains("Watch out for <html> & 'quotes'"));
+    }
+
+    #[test]
+    fn status_line_clone_is_independent() {
+        let original = StatusLine::new("Original", true, "detail");
+        let mut cloned = original.clone();
+        cloned.component = "Cloned".to_string();
+        cloned.available = false;
+        assert_eq!(original.component, "Original");
+        assert!(original.available);
+        assert_eq!(cloned.component, "Cloned");
+        assert!(!cloned.available);
+    }
+
+    #[test]
+    fn boot_status_format_contains_utc_timestamp() {
+        let status = BootStatus::new();
+        let report = status.format();
+        assert!(report.contains("UTC"), "boot status should contain UTC timestamp");
+    }
+
+    #[test]
+    fn boot_status_html_format_contains_utc_timestamp() {
+        let status = BootStatus::new();
+        let html = status.format_html();
+        assert!(html.contains("UTC"), "boot status HTML should contain UTC timestamp");
     }
 }

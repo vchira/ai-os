@@ -385,4 +385,142 @@ mod tests {
         // uname should work on Linux.
         assert!(result.is_some(), "expected system info to be cached");
     }
+
+    // -----------------------------------------------------------------------
+    // detect_prefetch_hints for file paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn detect_file_hint_in_read_log_message() {
+        // "read my log file /var/log/syslog" should detect a file path.
+        let path = extract_file_path("read my log file /var/log/syslog");
+        assert_eq!(path, Some("/var/log/syslog".to_string()));
+    }
+
+    #[test]
+    fn detect_file_hint_absolute_path() {
+        let path = extract_file_path("check /etc/passwd for users");
+        assert_eq!(path, Some("/etc/passwd".to_string()));
+    }
+
+    #[test]
+    fn detect_file_hint_home_relative() {
+        let path = extract_file_path("edit ~/notes.txt");
+        assert!(path.is_some());
+        assert!(path.unwrap().ends_with("/notes.txt"));
+    }
+
+    // -----------------------------------------------------------------------
+    // detect_prefetch_hints for URLs
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn detect_url_hint_in_search_message() {
+        let url = extract_url("fetch https://api.example.com/data");
+        assert_eq!(url, Some("https://api.example.com/data".to_string()));
+    }
+
+    #[test]
+    fn detect_url_hint_http() {
+        let url = extract_url("open http://localhost:3000");
+        assert_eq!(url, Some("http://localhost:3000".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // detect_prefetch_hints for plain question — no hints
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn no_file_hint_in_plain_question() {
+        assert_eq!(extract_file_path("What is the weather today?"), None);
+    }
+
+    #[test]
+    fn no_url_hint_in_plain_question() {
+        assert_eq!(extract_url("What is the capital of France?"), None);
+    }
+
+    #[test]
+    fn no_file_hint_in_empty_string() {
+        assert_eq!(extract_file_path(""), None);
+    }
+
+    #[test]
+    fn no_url_hint_in_empty_string() {
+        assert_eq!(extract_url(""), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Prefetcher caches values and returns them
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prefetcher_get_cached_returns_inserted_value() {
+        let pf = Prefetcher::new();
+        pf.cache.lock().unwrap().insert(
+            "file:/etc/hostname".to_string(),
+            "my-machine".to_string(),
+        );
+        assert_eq!(
+            pf.get_cached("file:/etc/hostname"),
+            Some("my-machine".to_string()),
+        );
+    }
+
+    #[test]
+    fn prefetcher_get_cached_returns_none_for_missing_key() {
+        let pf = Prefetcher::new();
+        assert_eq!(pf.get_cached("file:/nonexistent"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Prefetcher clear and cache_size
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prefetcher_clear_removes_all_entries() {
+        let pf = Prefetcher::new();
+        pf.cache.lock().unwrap().insert("a".to_string(), "1".to_string());
+        pf.cache.lock().unwrap().insert("b".to_string(), "2".to_string());
+        assert_eq!(pf.cache_size(), 2);
+        pf.clear();
+        assert_eq!(pf.cache_size(), 0);
+    }
+
+    #[test]
+    fn prefetcher_default_creates_empty() {
+        let pf = Prefetcher::default();
+        assert_eq!(pf.cache_size(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Prefetch triggers for system info keywords
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn prefetch_cpu_keyword_triggers_system_info() {
+        let pf = Prefetcher::new();
+        pf.prefetch("How is my cpu doing?").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let result = pf.get_cached("system:uname");
+        assert!(result.is_some(), "cpu keyword should trigger system info prefetch");
+    }
+
+    #[tokio::test]
+    async fn prefetch_memory_usage_keyword_triggers_system_info() {
+        let pf = Prefetcher::new();
+        pf.prefetch("Show memory usage").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let result = pf.get_cached("system:uname");
+        assert!(result.is_some(), "memory usage keyword should trigger system info prefetch");
+    }
+
+    #[tokio::test]
+    async fn prefetch_plain_question_no_system_info() {
+        let pf = Prefetcher::new();
+        pf.prefetch("What is the capital of France?").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        // No system info keywords — cache should be empty.
+        assert!(pf.get_cached("system:uname").is_none());
+    }
 }

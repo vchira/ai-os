@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 800" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#555"/>
+    </marker>
+  </defs>
+
+  <rect width="1100" height="800" fill="#0d1117" rx="12"/>
+  <text x="550" y="35" text-anchor="middle" fill="#e6edf3" font-size="22" font-weight="bold">AiOS Component Architecture</text>
+
+  <!-- ═══ HUMAN LAYER ═══ -->
+  <rect x="30" y="55" width="1040" height="60" rx="10" fill="#1a3a5c" stroke="#4a9eff" stroke-width="1.5"/>
+  <text x="550" y="80" text-anchor="middle" fill="#4a9eff" font-size="14" font-weight="bold">HUMAN</text>
+  <text x="200" y="100" text-anchor="middle" fill="#8b949e" font-size="11">🎤 Voice</text>
+  <text x="400" y="100" text-anchor="middle" fill="#8b949e" font-size="11">⌨️ Text Prompt</text>
+  <text x="600" y="100" text-anchor="middle" fill="#8b949e" font-size="11">🌐 Web Browser</text>
+  <text x="800" y="100" text-anchor="middle" fill="#8b949e" font-size="11">📱 Signal</text>
+
+  <!-- ═══ CHANNEL LAYER ═══ -->
+  <rect x="30" y="130" width="1040" height="90" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="70" y="150" fill="#e6edf3" font-size="13" font-weight="bold">Channels</text>
+
+  <rect x="50" y="160" width="180" height="45" rx="6" fill="#1a2d1a" stroke="#2ed573" stroke-width="1"/>
+  <text x="140" y="180" text-anchor="middle" fill="#2ed573" font-size="12" font-weight="bold">Desktop (GTK4)</text>
+  <text x="140" y="195" text-anchor="middle" fill="#6e7681" font-size="9">Full: panels, images, md</text>
+
+  <rect x="250" y="160" width="180" height="45" rx="6" fill="#1a2d1a" stroke="#2ed573" stroke-width="1"/>
+  <text x="340" y="180" text-anchor="middle" fill="#2ed573" font-size="12" font-weight="bold">Voice</text>
+  <text x="340" y="195" text-anchor="middle" fill="#6e7681" font-size="9">Wake → STT → TTS</text>
+
+  <rect x="450" y="160" width="180" height="45" rx="6" fill="#1a1a2d" stroke="#a29bfe" stroke-width="1"/>
+  <text x="540" y="180" text-anchor="middle" fill="#a29bfe" font-size="12" font-weight="bold">Web (axum)</text>
+  <text x="540" y="195" text-anchor="middle" fill="#6e7681" font-size="9">WebSocket, aios.local</text>
+
+  <rect x="650" y="160" width="180" height="45" rx="6" fill="#2d1a2d" stroke="#fd79a8" stroke-width="1"/>
+  <text x="740" y="180" text-anchor="middle" fill="#fd79a8" font-size="12" font-weight="bold">Signal (signal-cli)</text>
+  <text x="740" y="195" text-anchor="middle" fill="#6e7681" font-size="9">Text only, 4096 chars</text>
+
+  <rect x="850" y="160" width="200" height="45" rx="6" fill="#1a1a1a" stroke="#6e7681" stroke-width="1"/>
+  <text x="950" y="180" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="bold">Channel Switcher</text>
+  <text x="950" y="195" text-anchor="middle" fill="#6e7681" font-size="9">Last sender owns channel</text>
+
+  <!-- ═══ AI BRAIN ═══ -->
+  <rect x="30" y="240" width="1040" height="170" rx="10" fill="#161b22" stroke="#4a9eff" stroke-width="1.5"/>
+  <text x="70" y="262" fill="#4a9eff" font-size="14" font-weight="bold">AI Brain (aios-llm)</text>
+
+  <rect x="50" y="275" width="220" height="60" rx="6" fill="#1a2d1a" stroke="#2ed573" stroke-width="1"/>
+  <text x="160" y="298" text-anchor="middle" fill="#2ed573" font-size="12" font-weight="bold">LLM Manager</text>
+  <text x="160" y="315" text-anchor="middle" fill="#6e7681" font-size="9">Tool-call loop, context, system prompt</text>
+
+  <rect x="290" y="275" width="150" height="45" rx="6" fill="#0d2818" stroke="#2ed573" stroke-width="1"/>
+  <text x="365" y="303" text-anchor="middle" fill="#8b949e" font-size="11">Claude API</text>
+
+  <rect x="450" y="275" width="150" height="45" rx="6" fill="#0d2818" stroke="#2ed573" stroke-width="1"/>
+  <text x="525" y="303" text-anchor="middle" fill="#8b949e" font-size="11">OpenAI API</text>
+
+  <rect x="50" y="345" width="130" height="45" rx="6" fill="#1a1a2d" stroke="#a29bfe" stroke-width="1"/>
+  <text x="115" y="373" text-anchor="middle" fill="#a29bfe" font-size="11">Cascade Router</text>
+
+  <rect x="200" y="345" width="130" height="45" rx="6" fill="#1a1a2d" stroke="#a29bfe" stroke-width="1"/>
+  <text x="265" y="373" text-anchor="middle" fill="#a29bfe" font-size="11">Semantic Cache</text>
+
+  <rect x="350" y="345" width="130" height="45" rx="6" fill="#1a1a2d" stroke="#a29bfe" stroke-width="1"/>
+  <text x="415" y="373" text-anchor="middle" fill="#a29bfe" font-size="11">Context Pruner</text>
+
+  <rect x="500" y="345" width="130" height="45" rx="6" fill="#1a1a2d" stroke="#a29bfe" stroke-width="1"/>
+  <text x="565" y="373" text-anchor="middle" fill="#a29bfe" font-size="11">Pre-fetcher</text>
+
+  <rect x="650" y="345" width="130" height="45" rx="6" fill="#1a1a2d" stroke="#a29bfe" stroke-width="1"/>
+  <text x="715" y="373" text-anchor="middle" fill="#a29bfe" font-size="11">Multi-Agent</text>
+
+  <rect x="800" y="275" width="250" height="115" rx="6" fill="#1a1a1a" stroke="#8b949e" stroke-width="1"/>
+  <text x="925" y="298" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="bold">Cost Optimization</text>
+  <text x="925" y="318" text-anchor="middle" fill="#6e7681" font-size="10">Effort auto-detect</text>
+  <text x="925" y="335" text-anchor="middle" fill="#6e7681" font-size="10">Tool bundling (80% fewer tokens)</text>
+  <text x="925" y="352" text-anchor="middle" fill="#6e7681" font-size="10">Prompt caching (90% on hit)</text>
+  <text x="925" y="369" text-anchor="middle" fill="#6e7681" font-size="10">Quality modes: saver/balanced/thorough</text>
+
+  <!-- ═══ TOOLS LAYER ═══ -->
+  <rect x="30" y="425" width="500" height="130" rx="10" fill="#161b22" stroke="#ff6348" stroke-width="1.5"/>
+  <text x="70" y="447" fill="#ff6348" font-size="14" font-weight="bold">Tools (aios-tools)</text>
+
+  <rect x="50" y="460" width="95" height="35" rx="4" fill="#2d1a1a" stroke="#ff6348" stroke-width="1"/>
+  <text x="98" y="482" text-anchor="middle" fill="#ff6348" font-size="10">memory</text>
+
+  <rect x="155" y="460" width="95" height="35" rx="4" fill="#2d1a1a" stroke="#ff6348" stroke-width="1"/>
+  <text x="203" y="482" text-anchor="middle" fill="#ff6348" font-size="10">system</text>
+
+  <rect x="260" y="460" width="95" height="35" rx="4" fill="#2d1a1a" stroke="#ff6348" stroke-width="1"/>
+  <text x="308" y="482" text-anchor="middle" fill="#ff6348" font-size="10">filesystem</text>
+
+  <rect x="365" y="460" width="70" height="35" rx="4" fill="#2d1a1a" stroke="#ff6348" stroke-width="1"/>
+  <text x="400" y="482" text-anchor="middle" fill="#ff6348" font-size="10">network</text>
+
+  <rect x="445" y="460" width="70" height="35" rx="4" fill="#2d1a1a" stroke="#ff6348" stroke-width="1"/>
+  <text x="480" y="482" text-anchor="middle" fill="#ff6348" font-size="10">ui</text>
+
+  <rect x="50" y="505" width="200" height="35" rx="4" fill="#1a1a1a" stroke="#6e7681" stroke-width="1"/>
+  <text x="150" y="527" text-anchor="middle" fill="#8b949e" font-size="10">Sandbox: None / Process / Docker</text>
+
+  <rect x="270" y="505" width="200" height="35" rx="4" fill="#1a1a1a" stroke="#6e7681" stroke-width="1"/>
+  <text x="370" y="527" text-anchor="middle" fill="#8b949e" font-size="10">Plugin Registry (extensible)</text>
+
+  <!-- ═══ VOICE LAYER ═══ -->
+  <rect x="550" y="425" width="520" height="130" rx="10" fill="#161b22" stroke="#ffa502" stroke-width="1.5"/>
+  <text x="590" y="447" fill="#ffa502" font-size="14" font-weight="bold">Voice (aios-voice)</text>
+
+  <rect x="570" y="460" width="110" height="35" rx="4" fill="#2d2d1a" stroke="#ffa502" stroke-width="1"/>
+  <text x="625" y="482" text-anchor="middle" fill="#ffa502" font-size="10">AudioCapture</text>
+
+  <rect x="690" y="460" width="60" height="35" rx="4" fill="#2d2d1a" stroke="#ffa502" stroke-width="1"/>
+  <text x="720" y="482" text-anchor="middle" fill="#ffa502" font-size="10">VAD</text>
+
+  <rect x="760" y="460" width="110" height="35" rx="4" fill="#2d2d1a" stroke="#ffa502" stroke-width="1"/>
+  <text x="815" y="482" text-anchor="middle" fill="#ffa502" font-size="10">KWS (ONNX)</text>
+
+  <rect x="880" y="460" width="110" height="35" rx="4" fill="#2d2d1a" stroke="#ffa502" stroke-width="1"/>
+  <text x="935" y="482" text-anchor="middle" fill="#ffa502" font-size="10">Whisper STT</text>
+
+  <rect x="570" y="505" width="110" height="35" rx="4" fill="#2d2d1a" stroke="#ffa502" stroke-width="1"/>
+  <text x="625" y="527" text-anchor="middle" fill="#ffa502" font-size="10">Piper TTS</text>
+
+  <rect x="690" y="505" width="110" height="35" rx="4" fill="#2d2d1a" stroke="#ffa502" stroke-width="1"/>
+  <text x="745" y="527" text-anchor="middle" fill="#ffa502" font-size="10">eSpeak TTS</text>
+
+  <rect x="810" y="505" width="170" height="35" rx="4" fill="#1a1a1a" stroke="#6e7681" stroke-width="1"/>
+  <text x="895" y="527" text-anchor="middle" fill="#8b949e" font-size="10">17 pretrained wake words</text>
+
+  <!-- ═══ CORE LAYER ═══ -->
+  <rect x="30" y="575" width="1040" height="100" rx="10" fill="#161b22" stroke="#e6edf3" stroke-width="1.5"/>
+  <text x="70" y="597" fill="#e6edf3" font-size="14" font-weight="bold">Core (aios-core)</text>
+
+  <rect x="50" y="610" width="90" height="35" rx="4" fill="#1a1a1a" stroke="#e6edf3" stroke-width="1"/>
+  <text x="95" y="632" text-anchor="middle" fill="#e6edf3" font-size="10">Types</text>
+
+  <rect x="150" y="610" width="90" height="35" rx="4" fill="#1a1a1a" stroke="#e6edf3" stroke-width="1"/>
+  <text x="195" y="632" text-anchor="middle" fill="#e6edf3" font-size="10">Config</text>
+
+  <rect x="250" y="610" width="90" height="35" rx="4" fill="#1a1a1a" stroke="#e6edf3" stroke-width="1"/>
+  <text x="295" y="632" text-anchor="middle" fill="#e6edf3" font-size="10">Channels</text>
+
+  <rect x="350" y="610" width="120" height="35" rx="4" fill="#1a1a1a" stroke="#e6edf3" stroke-width="1"/>
+  <text x="410" y="632" text-anchor="middle" fill="#e6edf3" font-size="10">Vault (AES-256)</text>
+
+  <rect x="480" y="610" width="90" height="35" rx="4" fill="#1a1a1a" stroke="#e6edf3" stroke-width="1"/>
+  <text x="525" y="632" text-anchor="middle" fill="#e6edf3" font-size="10">Memory</text>
+
+  <rect x="580" y="610" width="90" height="35" rx="4" fill="#1a1a1a" stroke="#e6edf3" stroke-width="1"/>
+  <text x="625" y="632" text-anchor="middle" fill="#e6edf3" font-size="10">i18n</text>
+
+  <rect x="680" y="610" width="90" height="35" rx="4" fill="#1a1a1a" stroke="#e6edf3" stroke-width="1"/>
+  <text x="725" y="632" text-anchor="middle" fill="#e6edf3" font-size="10">Self-test</text>
+
+  <rect x="780" y="610" width="90" height="35" rx="4" fill="#1a1a1a" stroke="#e6edf3" stroke-width="1"/>
+  <text x="825" y="632" text-anchor="middle" fill="#e6edf3" font-size="10">Installer</text>
+
+  <rect x="880" y="610" width="90" height="35" rx="4" fill="#1a1a1a" stroke="#e6edf3" stroke-width="1"/>
+  <text x="925" y="632" text-anchor="middle" fill="#e6edf3" font-size="10">Upgrade</text>
+
+  <!-- ═══ OS LAYER ═══ -->
+  <rect x="30" y="695" width="1040" height="85" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="70" y="717" fill="#6e7681" font-size="14" font-weight="bold">OS Substrate (Debian Bookworm)</text>
+
+  <rect x="50" y="730" width="100" height="35" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="100" y="752" text-anchor="middle" fill="#6e7681" font-size="10">Wayland</text>
+
+  <rect x="160" y="730" width="90" height="35" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="205" y="752" text-anchor="middle" fill="#6e7681" font-size="10">labwc</text>
+
+  <rect x="260" y="730" width="100" height="35" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="310" y="752" text-anchor="middle" fill="#6e7681" font-size="10">PipeWire</text>
+
+  <rect x="370" y="730" width="90" height="35" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="415" y="752" text-anchor="middle" fill="#6e7681" font-size="10">GTK4</text>
+
+  <rect x="470" y="730" width="120" height="35" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="530" y="752" text-anchor="middle" fill="#6e7681" font-size="10">libadwaita</text>
+
+  <rect x="600" y="730" width="90" height="35" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="645" y="752" text-anchor="middle" fill="#6e7681" font-size="10">ALSA</text>
+
+  <rect x="700" y="730" width="90" height="35" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="745" y="752" text-anchor="middle" fill="#6e7681" font-size="10">Avahi</text>
+
+  <rect x="800" y="730" width="90" height="35" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="845" y="752" text-anchor="middle" fill="#6e7681" font-size="10">Docker</text>
+
+  <rect x="900" y="730" width="150" height="35" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="975" y="752" text-anchor="middle" fill="#6e7681" font-size="10">Linux Kernel</text>
+</svg>

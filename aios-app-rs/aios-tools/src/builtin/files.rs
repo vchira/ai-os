@@ -621,4 +621,289 @@ mod tests {
         let r = tool.execute(serde_json::json!({ "action": "delete_all" }));
         assert!(!r.success);
     }
+
+    // -- New comprehensive tests --
+
+    #[test]
+    fn read_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file_path = root.join("readable.txt");
+        fs::write(&file_path, "content here").unwrap();
+
+        let r = read_file(file_path.to_str().unwrap(), &root);
+        assert!(r.success);
+        assert_eq!(r.output, "content here");
+        // Structured data should include path and size.
+        let data = r.data.unwrap();
+        assert_eq!(data["size"], 12);
+    }
+
+    #[test]
+    fn read_nonexistent_file_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let r = read_file(root.join("nope.txt").to_str().unwrap(), &root);
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("Not a file") || r.error.as_deref().unwrap().contains("does not exist"));
+    }
+
+    #[test]
+    fn write_and_read_roundtrip_via_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file_path = root.join("roundtrip.txt");
+
+        let w = write_file(file_path.to_str().unwrap(), "round trip data", &root);
+        assert!(w.success, "write failed: {:?}", w.error);
+        let data = w.data.unwrap();
+        assert_eq!(data["bytes_written"], 15);
+
+        let r = read_file(file_path.to_str().unwrap(), &root);
+        assert!(r.success);
+        assert_eq!(r.output, "round trip data");
+    }
+
+    #[test]
+    fn search_finds_matching_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("report.csv"), "").unwrap();
+        fs::write(root.join("data.csv"), "").unwrap();
+        fs::write(root.join("readme.md"), "").unwrap();
+
+        let r = search_files(root.to_str().unwrap(), "*.csv", &root);
+        assert!(r.success);
+        assert!(r.output.contains("report.csv"));
+        assert!(r.output.contains("data.csv"));
+        assert!(!r.output.contains("readme.md"));
+    }
+
+    #[test]
+    fn list_directory_shows_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("file1.txt"), "aaa").unwrap();
+        fs::write(root.join("file2.txt"), "bbb").unwrap();
+        fs::create_dir(root.join("mydir")).unwrap();
+
+        let r = list_directory(root.to_str().unwrap(), &root);
+        assert!(r.success);
+        assert!(r.output.contains("file1.txt"));
+        assert!(r.output.contains("file2.txt"));
+        assert!(r.output.contains("[DIR] mydir"));
+    }
+
+    #[test]
+    fn list_empty_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let r = list_directory(root.to_str().unwrap(), &root);
+        assert!(r.success);
+        assert_eq!(r.output, "(empty directory)");
+    }
+
+    #[test]
+    fn search_no_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("file.txt"), "").unwrap();
+
+        let r = search_files(root.to_str().unwrap(), "*.py", &root);
+        assert!(r.success);
+        assert_eq!(r.output, "(no matches)");
+    }
+
+    #[test]
+    fn write_creates_parent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        // Create just the first parent so resolve_safe can canonicalize it.
+        let sub = root.join("sub");
+        fs::create_dir(&sub).unwrap();
+        let nested = sub.join("deep.txt");
+
+        let r = write_file(nested.to_str().unwrap(), "deep content", &root);
+        assert!(r.success, "write failed: {:?}", r.error);
+        assert!(nested.exists());
+        assert_eq!(fs::read_to_string(&nested).unwrap(), "deep content");
+    }
+
+    #[test]
+    fn write_file_empty_path_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let r = write_file("", "content", &root);
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn file_info_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let sub = root.join("subdir");
+        fs::create_dir(&sub).unwrap();
+
+        let r = file_info(sub.to_str().unwrap(), &root);
+        assert!(r.success);
+        assert!(r.output.contains("type: directory"));
+    }
+
+    #[test]
+    fn file_info_nonexistent_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+
+        let r = file_info(root.join("ghost.txt").to_str().unwrap(), &root);
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("does not exist"));
+    }
+
+    #[test]
+    fn search_in_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let sub = root.join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("nested.rs"), "fn main() {}").unwrap();
+        fs::write(root.join("top.rs"), "fn main() {}").unwrap();
+
+        let r = search_files(root.to_str().unwrap(), "*.rs", &root);
+        assert!(r.success);
+        assert!(r.output.contains("nested.rs"));
+        assert!(r.output.contains("top.rs"));
+    }
+
+    #[test]
+    fn glob_to_regex_escapes_special_chars() {
+        // Dot should be escaped.
+        let re = glob_to_regex("*.txt");
+        assert_eq!(re, "^.*\\.txt$");
+    }
+
+    #[test]
+    fn guess_mime_rust_file() {
+        assert_eq!(guess_mime_type(Path::new("main.rs")), "text/x-rust");
+    }
+
+    #[test]
+    fn guess_mime_python_file() {
+        assert_eq!(guess_mime_type(Path::new("script.py")), "text/x-python");
+    }
+
+    #[test]
+    fn guess_mime_yaml_file() {
+        assert_eq!(guess_mime_type(Path::new("config.yaml")), "application/x-yaml");
+        assert_eq!(guess_mime_type(Path::new("config.yml")), "application/x-yaml");
+    }
+
+    #[test]
+    fn resolve_safe_allows_path_under_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file = root.join("allowed.txt");
+        fs::write(&file, "ok").unwrap();
+
+        let resolved = resolve_safe(file.to_str().unwrap(), &root);
+        assert!(resolved.is_ok());
+    }
+
+    #[test]
+    fn resolve_safe_rejects_empty_path() {
+        let root = PathBuf::from("/tmp");
+        let result = resolve_safe("", &root);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn tool_name_and_category() {
+        let tool = FilesTool;
+        assert_eq!(tool.name(), "files");
+        assert_eq!(tool.category(), "filesystem");
+    }
+
+    #[test]
+    fn list_directory_sorted_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("z.txt"), "").unwrap();
+        fs::write(root.join("a.txt"), "").unwrap();
+        fs::write(root.join("m.txt"), "").unwrap();
+
+        let r = list_directory(root.to_str().unwrap(), &root);
+        assert!(r.success);
+        let data = r.data.unwrap();
+        let entries = data["entries"].as_array().unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["a.txt", "m.txt", "z.txt"]);
+    }
+
+    #[test]
+    fn read_valid_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file_path = root.join("temp_test.txt");
+        fs::write(&file_path, "temp file content").unwrap();
+
+        let r = read_file(file_path.to_str().unwrap(), &root);
+        assert!(r.success, "read failed: {:?}", r.error);
+        assert_eq!(r.output, "temp file content");
+        let data = r.data.unwrap();
+        assert_eq!(data["size"], 17);
+    }
+
+    #[test]
+    fn read_nonexistent_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file_path = root.join("does_not_exist.txt");
+
+        let r = read_file(file_path.to_str().unwrap(), &root);
+        assert!(!r.success);
+        assert!(
+            r.error.as_deref().unwrap().contains("Not a file")
+                || r.error.as_deref().unwrap().contains("does not exist")
+        );
+    }
+
+    #[test]
+    fn write_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let file_path = root.join("new_file.txt");
+
+        let w = write_file(file_path.to_str().unwrap(), "created by test", &root);
+        assert!(w.success, "write failed: {:?}", w.error);
+        assert!(file_path.exists());
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "created by test");
+    }
+
+    #[test]
+    fn search_finds_files_by_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("notes.txt"), "").unwrap();
+        fs::write(root.join("photo.png"), "").unwrap();
+
+        let r = search_files(root.to_str().unwrap(), "*.txt", &root);
+        assert!(r.success);
+        assert!(r.output.contains("notes.txt"));
+        assert!(!r.output.contains("photo.png"));
+    }
+
+    #[test]
+    fn list_returns_directory_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("entry.txt"), "data").unwrap();
+        fs::create_dir(root.join("folder")).unwrap();
+
+        let r = list_directory(root.to_str().unwrap(), &root);
+        assert!(r.success);
+        assert!(r.output.contains("entry.txt"));
+        assert!(r.output.contains("[DIR] folder"));
+    }
 }

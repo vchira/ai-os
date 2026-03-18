@@ -11,9 +11,11 @@
 pub mod channel;
 pub mod config;
 pub mod error;
+pub mod hostname;
 pub mod i18n;
 pub mod installer;
 pub mod memory;
+pub mod queue;
 pub mod secure;
 pub mod selftest;
 pub mod system_monitor;

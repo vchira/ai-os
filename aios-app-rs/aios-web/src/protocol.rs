@@ -270,4 +270,222 @@ mod tests {
             _ => panic!("wrong variant"),
         }
     }
+
+    // -----------------------------------------------------------------------
+    // ServerMessage::Chat (Message variant) serializes correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn server_message_chat_serializes_with_type_field() {
+        let msg = ServerMessage::Message {
+            role: "assistant".to_string(),
+            content: "Hello, I am AiOS.".to_string(),
+            level: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // Must contain the tagged type.
+        assert!(json.contains("\"type\":\"message\""));
+        // Must contain the role and content.
+        assert!(json.contains("\"role\":\"assistant\""));
+        assert!(json.contains("\"content\":\"Hello, I am AiOS.\""));
+        // level should be absent when None.
+        assert!(!json.contains("\"level\""));
+    }
+
+    #[test]
+    fn server_message_chat_with_level_serializes_correctly() {
+        let msg = ServerMessage::Message {
+            role: "system".to_string(),
+            content: "Boot complete.".to_string(),
+            level: Some("info".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"message\""));
+        assert!(json.contains("\"role\":\"system\""));
+        assert!(json.contains("\"level\":\"info\""));
+    }
+
+    // -----------------------------------------------------------------------
+    // ServerMessage::System serializes correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn server_system_serializes_with_type_and_content() {
+        let msg = ServerMessage::System {
+            content: "Server restarting...".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"system\""));
+        assert!(json.contains("\"content\":\"Server restarting...\""));
+    }
+
+    #[test]
+    fn server_system_deserializes_back() {
+        let json = r#"{"type":"system","content":"All systems operational"}"#;
+        let msg: ServerMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ServerMessage::System { content } => {
+                assert_eq!(content, "All systems operational");
+            }
+            _ => panic!("expected System variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ClientMessage::Chat (Message variant) deserializes correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn client_message_chat_deserializes_from_json() {
+        let json = r#"{"type":"message","text":"What time is it?"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::Message { text } => {
+                assert_eq!(text, "What time is it?");
+            }
+            _ => panic!("expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_chat_deserializes_empty_text() {
+        let json = r#"{"type":"message","text":""}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::Message { text } => {
+                assert_eq!(text, "");
+            }
+            _ => panic!("expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn client_message_chat_deserializes_unicode() {
+        let json = r#"{"type":"message","text":"Salut, cum ești?"}"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::Message { text } => {
+                assert_eq!(text, "Salut, cum ești?");
+            }
+            _ => panic!("expected Message variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ClientMessage::PanelResponse deserializes correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn client_panel_response_deserializes_from_json() {
+        let json = r#"{
+            "type": "panel_response",
+            "id": "panel-42",
+            "values": {"api_key": "sk-test-123", "provider": "claude"},
+            "cancelled": false
+        }"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::PanelResponse { id, values, cancelled } => {
+                assert_eq!(id, "panel-42");
+                assert!(!cancelled);
+                assert_eq!(values.get("api_key").unwrap(), "sk-test-123");
+                assert_eq!(values.get("provider").unwrap(), "claude");
+            }
+            _ => panic!("expected PanelResponse variant"),
+        }
+    }
+
+    #[test]
+    fn client_panel_response_cancelled_deserializes() {
+        let json = r#"{
+            "type": "panel_response",
+            "id": "panel-99",
+            "values": {},
+            "cancelled": true
+        }"#;
+        let msg: ClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            ClientMessage::PanelResponse { id, cancelled, values } => {
+                assert_eq!(id, "panel-99");
+                assert!(cancelled);
+                assert!(values.is_empty());
+            }
+            _ => panic!("expected PanelResponse variant"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Invalid JSON returns error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn invalid_json_returns_error_for_client_message() {
+        let result = serde_json::from_str::<ClientMessage>("not valid json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_json_returns_error_for_server_message() {
+        let result = serde_json::from_str::<ServerMessage>("{{{bad");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_string_returns_error() {
+        let result = serde_json::from_str::<ClientMessage>("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invalid_json_number_returns_error() {
+        let result = serde_json::from_str::<ClientMessage>("42");
+        assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Missing fields return error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn missing_type_field_returns_error() {
+        // JSON object without the "type" tag.
+        let json = r#"{"text":"hello"}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_text_field_on_message_returns_error() {
+        let json = r#"{"type":"message"}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_id_field_on_panel_response_returns_error() {
+        let json = r#"{"type":"panel_response","values":{},"cancelled":false}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_values_field_on_panel_response_returns_error() {
+        let json = r#"{"type":"panel_response","id":"p1","cancelled":false}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn missing_content_field_on_server_system_returns_error() {
+        let json = r#"{"type":"system"}"#;
+        let result = serde_json::from_str::<ServerMessage>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_type_tag_returns_error() {
+        let json = r#"{"type":"unknown_variant","foo":"bar"}"#;
+        let result = serde_json::from_str::<ClientMessage>(json);
+        assert!(result.is_err());
+    }
 }

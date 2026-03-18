@@ -828,6 +828,8 @@ impl LlmManager {
                             "Full web interface. Markdown, code blocks, and images are supported.",
                         aios_core::channel::ChannelKind::Desktop =>
                             "Full desktop interface. Markdown, code blocks, and images are supported.",
+                        aios_core::channel::ChannelKind::System =>
+                            "Internal system channel.",
                     }
                 ));
                 sys_prompt = base;
@@ -1452,5 +1454,285 @@ mod tests {
         let mut mgr = LlmManager::new();
         mgr.semantic_cache_mut().put("/help", "Available commands...");
         assert_eq!(mgr.semantic_cache().len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional tool routing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn route_tools_filesystem_keywords() {
+        let mgr = LlmManager::new();
+
+        // Each filesystem keyword should trigger the filesystem category.
+        for keyword in &["file", "read", "write", "directory", "folder", "path", "save"] {
+            let msg = format!("Please {} something", keyword);
+            let cats = mgr.route_tools(&msg);
+            assert!(
+                cats.contains(&"filesystem".to_string()),
+                "Keyword '{}' should route to filesystem, got {:?}",
+                keyword,
+                cats,
+            );
+        }
+    }
+
+    #[test]
+    fn route_tools_network_keywords() {
+        let mgr = LlmManager::new();
+
+        // Each network keyword should trigger the network category.
+        for keyword in &["url", "web", "search", "download", "fetch", "http", "website"] {
+            let msg = format!("Please {} something", keyword);
+            let cats = mgr.route_tools(&msg);
+            assert!(
+                cats.contains(&"network".to_string()),
+                "Keyword '{}' should route to network, got {:?}",
+                keyword,
+                cats,
+            );
+        }
+    }
+
+    #[test]
+    fn route_tools_memory_keywords() {
+        let mgr = LlmManager::new();
+
+        // Each memory keyword should trigger the memory category.
+        for keyword in &["remember", "recall", "forget", "memory", "memorize"] {
+            let msg = format!("Please {} my name", keyword);
+            let cats = mgr.route_tools(&msg);
+            assert!(
+                cats.contains(&"memory".to_string()),
+                "Keyword '{}' should route to memory, got {:?}",
+                keyword,
+                cats,
+            );
+        }
+    }
+
+    #[test]
+    fn route_tools_unknown_returns_empty() {
+        let mgr = LlmManager::new();
+
+        // Messages with no recognized keywords should return empty.
+        assert!(mgr.route_tools("Hello, how are you?").is_empty());
+        assert!(mgr.route_tools("What is the meaning of life?").is_empty());
+        assert!(mgr.route_tools("Tell me a joke").is_empty());
+        assert!(mgr.route_tools("").is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Additional effort detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn effort_detection_simple_greeting() {
+        let mgr = LlmManager::new();
+
+        // Short greetings should be Low effort.
+        assert_eq!(mgr.auto_effort("hello"), EffortLevel::Low);
+        assert_eq!(mgr.auto_effort("hi"), EffortLevel::Low);
+        assert_eq!(mgr.auto_effort("thanks"), EffortLevel::Low);
+        assert_eq!(mgr.auto_effort("bye"), EffortLevel::Low);
+        assert_eq!(mgr.auto_effort("ok"), EffortLevel::Low);
+        assert_eq!(mgr.auto_effort("good morning"), EffortLevel::Low);
+
+        // Single short words (no space, <15 chars) should also be Low.
+        assert_eq!(mgr.auto_effort("test"), EffortLevel::Low);
+        assert_eq!(mgr.auto_effort("yes"), EffortLevel::Low);
+    }
+
+    #[test]
+    fn effort_detection_complex_task() {
+        let mgr = LlmManager::new();
+
+        // Keywords that signal complex tasks should be High.
+        assert_eq!(
+            mgr.auto_effort("Refactor the authentication module"),
+            EffortLevel::High,
+        );
+        assert_eq!(
+            mgr.auto_effort("Analyze the security vulnerabilities"),
+            EffortLevel::High,
+        );
+        assert_eq!(
+            mgr.auto_effort("Audit the entire codebase for issues"),
+            EffortLevel::High,
+        );
+        assert_eq!(
+            mgr.auto_effort("Review all configuration files"),
+            EffortLevel::High,
+        );
+        assert_eq!(
+            mgr.auto_effort("Migrate the database to PostgreSQL"),
+            EffortLevel::High,
+        );
+        assert_eq!(
+            mgr.auto_effort("Rewrite the networking layer"),
+            EffortLevel::High,
+        );
+
+        // Very long messages should also be High regardless of content.
+        let long_msg = "Please help me with this task. ".repeat(20);
+        assert_eq!(mgr.auto_effort(&long_msg), EffortLevel::High);
+    }
+
+    // -----------------------------------------------------------------------
+    // route_tools: filesystem keywords return "filesystem"
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn route_tools_for_file_read_returns_filesystem() {
+        let mgr = LlmManager::new();
+        let cats = mgr.route_tools("read my config file");
+        assert!(cats.contains(&"filesystem".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // route_tools: network keywords return "network"
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn route_tools_for_web_search_returns_network() {
+        let mgr = LlmManager::new();
+        let cats = mgr.route_tools("search the web for Rust tutorials");
+        assert!(cats.contains(&"network".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // route_tools: unknown input returns empty (all tools)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn route_tools_for_plain_question_returns_empty() {
+        let mgr = LlmManager::new();
+        let cats = mgr.route_tools("What is the meaning of life?");
+        assert!(cats.is_empty(), "expected empty for general question, got {:?}", cats);
+    }
+
+    #[test]
+    fn route_tools_for_empty_input_returns_empty() {
+        let mgr = LlmManager::new();
+        let cats = mgr.route_tools("");
+        assert!(cats.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // new() creates manager with no providers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn new_manager_has_no_providers() {
+        let mgr = LlmManager::new();
+        assert!(mgr.active_name().is_none());
+        assert!(mgr.provider_names().is_empty());
+        assert!(mgr.active_provider().is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // set_active works for claude and openai
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn set_active_works_for_claude() {
+        use crate::claude::ClaudeProvider;
+
+        let mut mgr = LlmManager::new();
+        mgr.register_provider(Box::new(ClaudeProvider::new("", None, None)));
+        assert!(mgr.set_active("claude").is_ok());
+        assert_eq!(mgr.active_name(), Some("claude"));
+    }
+
+    #[test]
+    fn set_active_works_for_openai() {
+        use crate::openai::OpenAIProvider;
+
+        let mut mgr = LlmManager::new();
+        mgr.register_provider(Box::new(OpenAIProvider::new("", None, None)));
+        assert!(mgr.set_active("openai").is_ok());
+        assert_eq!(mgr.active_name(), Some("openai"));
+    }
+
+    #[test]
+    fn set_active_fails_for_unregistered_provider() {
+        let mut mgr = LlmManager::new();
+        assert!(mgr.set_active("nonexistent").is_err());
+    }
+
+    #[test]
+    fn set_active_switches_between_providers() {
+        use crate::claude::ClaudeProvider;
+        use crate::openai::OpenAIProvider;
+
+        let mut mgr = LlmManager::new();
+        mgr.register_provider(Box::new(ClaudeProvider::new("", None, None)));
+        mgr.register_provider(Box::new(OpenAIProvider::new("", None, None)));
+
+        mgr.set_active("openai").unwrap();
+        assert_eq!(mgr.active_name(), Some("openai"));
+
+        mgr.set_active("claude").unwrap();
+        assert_eq!(mgr.active_name(), Some("claude"));
+    }
+
+    // -----------------------------------------------------------------------
+    // auto_effort: detect_effort for "security audit" -> High
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_effort_high_for_security_audit() {
+        let mgr = LlmManager::new();
+        assert_eq!(
+            mgr.auto_effort("security audit of the server"),
+            EffortLevel::High,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // auto_effort: detect_effort for "analyze all" -> High
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_effort_high_for_analyze_all() {
+        let mgr = LlmManager::new();
+        assert_eq!(
+            mgr.auto_effort("analyze all log files for errors"),
+            EffortLevel::High,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // auto_effort: detect_effort for normal question -> Medium
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_effort_medium_for_factual_question() {
+        let mgr = LlmManager::new();
+        assert_eq!(
+            mgr.auto_effort("What is the capital of France?"),
+            EffortLevel::Medium,
+        );
+    }
+
+    #[test]
+    fn auto_effort_medium_for_how_to_question() {
+        let mgr = LlmManager::new();
+        assert_eq!(
+            mgr.auto_effort("How do I create a new user account on Linux?"),
+            EffortLevel::Medium,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // auto_effort: detect_effort for short input -> Low
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auto_effort_low_for_short_input() {
+        let mgr = LlmManager::new();
+        assert_eq!(mgr.auto_effort("hey"), EffortLevel::Low);
+        assert_eq!(mgr.auto_effort("ok"), EffortLevel::Low);
+        assert_eq!(mgr.auto_effort("what time"), EffortLevel::Low);
     }
 }

@@ -13,7 +13,7 @@ use gtk4::{self as gtk, Align, Orientation};
 use tracing::info;
 
 use aios_core::config::ConfigManager;
-use aios_core::i18n::{t, t_fmt};
+use aios_core::i18n::{set_language, t, t_fmt};
 
 use super::chat_view::ChatView;
 
@@ -412,18 +412,88 @@ impl SetupConversation {
     // -- Step 1: Welcome ----------------------------------------------------
 
     fn show_welcome(&self) {
+        let input_box = gtk::Box::new(Orientation::Vertical, 8);
+        input_box.set_margin_top(8);
+
+        // Language selector row.
+        let lang_row = gtk::Box::new(Orientation::Horizontal, 8);
+        lang_row.set_valign(Align::Center);
+
+        let lang_label = gtk::Label::new(Some(&t("setup.welcome.language")));
+        lang_label.set_halign(Align::Start);
+        lang_row.append(&lang_label);
+
+        // Language entries: (code, native display name).
+        // Only en and de are currently available.
+        let lang_entries: &[(&str, &str)] = &[
+            ("en", "English"),
+            ("de", "Deutsch"),
+        ];
+        let display_names: Vec<&str> = lang_entries.iter().map(|(_, name)| *name).collect();
+        let lang_model = gtk::StringList::new(&display_names);
+        let lang_dropdown = gtk::DropDown::new(Some(lang_model), gtk::Expression::NONE);
+        lang_dropdown.set_hexpand(true);
+
+        // Pre-select the current language.
+        let current = aios_core::i18n::current_language();
+        for (i, (code, _)) in lang_entries.iter().enumerate() {
+            if *code == current {
+                lang_dropdown.set_selected(i as u32);
+                break;
+            }
+        }
+        lang_row.append(&lang_dropdown);
+        input_box.append(&lang_row);
+
+        // Hint that more languages are coming.
+        let hint_label = gtk::Label::new(Some(&t("setup.welcome.language_hint")));
+        hint_label.add_css_class("dim-label");
+        hint_label.set_halign(Align::Start);
+        input_box.append(&hint_label);
+
+        // "Get Started" button.
         let btn = gtk::Button::with_label(&t("setup.welcome.button"));
         btn.add_css_class("suggested-action");
         btn.add_css_class("pill");
         btn.set_halign(Align::Start);
-        btn.set_margin_top(8);
+        btn.set_margin_top(4);
+        input_box.append(&btn);
 
+        // Build the card with title and description labels that we can refresh.
+        let title_text = t("setup.welcome.title");
+        let desc_text = t("setup.welcome.description");
         let handle = self.chat_view.add_setup_card(
             "starred-symbolic",
-            &t("setup.welcome.title"),
-            &t("setup.welcome.description"),
-            Some(btn.upcast_ref()),
+            &title_text,
+            &desc_text,
+            Some(input_box.upcast_ref()),
         );
+
+        // When the language dropdown changes, update the i18n system,
+        // persist the selection, and refresh all translatable labels on this card.
+        {
+            let lang_label_ref = lang_label.clone();
+            let hint_label_ref = hint_label.clone();
+            let btn_ref = btn.clone();
+            let config_ref = self.config.clone();
+            lang_dropdown.connect_selected_notify(move |dd| {
+                let idx = dd.selected() as usize;
+                if idx < lang_entries.len() {
+                    let (code, _) = lang_entries[idx];
+                    set_language(code);
+
+                    // Persist the language selection to config.
+                    if let Some(ref mut cfg) = *config_ref.borrow_mut() {
+                        let _ = cfg.set("assistant.language", serde_json::json!(code));
+                    }
+
+                    // Refresh translatable text on this card.
+                    lang_label_ref.set_label(&t("setup.welcome.language"));
+                    hint_label_ref.set_label(&t("setup.welcome.language_hint"));
+                    btn_ref.set_label(&t("setup.welcome.button"));
+                }
+            });
+        }
 
         let this = self.clone();
         btn.connect_clicked(move |_| {
@@ -1436,13 +1506,7 @@ impl SetupConversation {
             };
 
             // Validate machine name
-            let machine_valid = !machine.is_empty()
-                && machine.len() <= 63
-                && machine.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                && !machine.starts_with('-')
-                && !machine.ends_with('-');
-
-            if !machine_valid {
+            if !aios_core::hostname::is_valid_hostname(&machine) {
                 error_ref.set_text(&t("setup.name.error_hostname"));
                 error_ref.set_visible(true);
                 return;

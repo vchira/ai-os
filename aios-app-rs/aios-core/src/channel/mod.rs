@@ -14,8 +14,10 @@
 
 pub mod runtime;
 pub mod switcher;
+pub mod traits;
 pub mod types;
 
 pub use runtime::AppRuntime;
 pub use switcher::{ChannelSwitcher, OnSwitchCallback};
+pub use traits::{Channel, ChannelBase};
 pub use types::{ChannelCapabilities, ChannelContext, ChannelKind, IncomingMessage};

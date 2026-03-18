@@ -80,6 +80,12 @@ pub struct ChatView {
     scroll_window: std::cell::RefCell<Option<gtk::ScrolledWindow>>,
     /// The input area of the last setup card (so we can remove it once answered).
     last_card_input: std::cell::RefCell<Option<gtk::Box>>,
+    /// ID of the oldest rendered message (for scroll-back loading).
+    oldest_rendered_id: std::cell::Cell<Option<i64>>,
+    /// ID of the newest rendered message.
+    newest_rendered_id: std::cell::Cell<Option<i64>>,
+    /// Maximum number of message widgets to keep rendered.
+    max_rendered_widgets: std::cell::Cell<usize>,
 }
 
 impl ChatView {
@@ -95,6 +101,9 @@ impl ChatView {
             container,
             scroll_window: std::cell::RefCell::new(None),
             last_card_input: std::cell::RefCell::new(None),
+            oldest_rendered_id: std::cell::Cell::new(None),
+            newest_rendered_id: std::cell::Cell::new(None),
+            max_rendered_widgets: std::cell::Cell::new(50),
         }
     }
 
@@ -106,6 +115,26 @@ impl ChatView {
     /// Set the parent `ScrolledWindow` for auto-scrolling.
     pub fn set_scroll_window(&self, sw: &gtk::ScrolledWindow) {
         *self.scroll_window.borrow_mut() = Some(sw.clone());
+    }
+
+    /// Connect a callback that fires when the user scrolls near the top.
+    ///
+    /// When the vertical adjustment value drops below `100.0` (i.e. the
+    /// user is near the top of the chat), `on_scroll_back` is called with
+    /// the [`oldest_rendered_id`] so the caller can load older messages
+    /// from the message queue.
+    pub fn connect_scroll_back<F: Fn(i64) + 'static>(&self, on_scroll_back: F) {
+        if let Some(sw) = self.scroll_window.borrow().as_ref() {
+            let oldest_id = self.oldest_rendered_id.clone();
+            let adj = sw.vadjustment();
+            adj.connect_value_changed(move |adj| {
+                if adj.value() < 100.0 {
+                    if let Some(id) = oldest_id.get() {
+                        on_scroll_back(id);
+                    }
+                }
+            });
+        }
     }
 
     /// Append a message to the chat view.
@@ -149,23 +178,26 @@ impl ChatView {
                 stop_btn.add_css_class("flat");
                 stop_btn.add_css_class("circular");
                 stop_btn.set_tooltip_text(Some("Stop reading"));
-                stop_btn.connect_clicked(|btn| {
-                    let _ = std::process::Command::new("pkill")
-                        .args(["-f", "piper"])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    let _ = std::process::Command::new("pkill")
-                        .args(["-f", "espeak-ng"])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    let _ = std::process::Command::new("pkill")
-                        .args(["-f", "aplay"])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    btn.set_visible(false);
+                stop_btn.connect_clicked(|_btn| {
+                    // Kill TTS processes in a background thread to avoid
+                    // blocking the GTK main loop (same as stop_tts() in tts.rs).
+                    std::thread::spawn(|| {
+                        let _ = std::process::Command::new("pkill")
+                            .args(["-f", "piper"])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                        let _ = std::process::Command::new("pkill")
+                            .args(["-f", "espeak-ng"])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                        let _ = std::process::Command::new("pkill")
+                            .args(["-f", "aplay.*raw"])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                    });
                 });
                 role_row.append(&stop_btn);
             }
@@ -476,6 +508,144 @@ impl ChatView {
                     adj3.set_value(adj3.upper() - adj3.page_size());
                 },
             );
+        }
+    }
+
+    // --- Queue-based rendering methods (Phase 3) ---
+
+    /// Render a batch of QueuedMessages (initial load or scroll-back).
+    pub fn render_messages(&self, msgs: &[aios_core::queue::QueuedMessage]) {
+        for msg in msgs {
+            self.render_queued_message(msg);
+            // Track ID range.
+            if self.oldest_rendered_id.get().is_none() || msg.id < self.oldest_rendered_id.get().unwrap_or(i64::MAX) {
+                self.oldest_rendered_id.set(Some(msg.id));
+            }
+            if msg.id > self.newest_rendered_id.get().unwrap_or(0) {
+                self.newest_rendered_id.set(Some(msg.id));
+            }
+        }
+    }
+
+    /// Append a single new QueuedMessage. Manages the widget window.
+    pub fn append_message_from_queue(&self, msg: &aios_core::queue::QueuedMessage) {
+        self.render_queued_message(msg);
+        self.newest_rendered_id.set(Some(msg.id));
+        if self.oldest_rendered_id.get().is_none() {
+            self.oldest_rendered_id.set(Some(msg.id));
+        }
+
+        // Trim oldest widgets if we exceed the max.
+        self.trim_oldest_widgets();
+    }
+
+    /// Prepend older messages at the top for scroll-back.
+    pub fn prepend_messages(&self, msgs: &[aios_core::queue::QueuedMessage]) {
+        // Iterate in reverse so the oldest message ends up at the top.
+        for msg in msgs.iter().rev() {
+            self.prepend_queued_message(msg);
+            if msg.id < self.oldest_rendered_id.get().unwrap_or(i64::MAX) {
+                self.oldest_rendered_id.set(Some(msg.id));
+            }
+        }
+    }
+
+    /// Clear all message widgets from the display.
+    pub fn clear_display(&self) {
+        while let Some(child) = self.container.first_child() {
+            self.container.remove(&child);
+        }
+        self.oldest_rendered_id.set(None);
+        self.newest_rendered_id.set(None);
+    }
+
+    /// Get the oldest rendered message ID (for scroll-back queries).
+    pub fn oldest_rendered_id(&self) -> Option<i64> {
+        self.oldest_rendered_id.get()
+    }
+
+    /// Remove the oldest widgets from the top to stay within the max limit.
+    fn trim_oldest_widgets(&self) {
+        let max = self.max_rendered_widgets.get();
+        let mut count = 0;
+        let mut child = self.container.first_child();
+        while child.is_some() {
+            count += 1;
+            child = child.and_then(|c| c.next_sibling());
+        }
+
+        while count > max {
+            if let Some(first) = self.container.first_child() {
+                self.container.remove(&first);
+                count -= 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Prepend a single QueuedMessage at the top of the container.
+    fn prepend_queued_message(&self, msg: &aios_core::queue::QueuedMessage) {
+        // Build the role string.
+        let role_str = match msg.role {
+            aios_core::types::Role::User => "user",
+            aios_core::types::Role::Assistant => "assistant",
+            aios_core::types::Role::System => "system",
+            aios_core::types::Role::Tool => "tool",
+        };
+
+        if let Some(ref content) = msg.content {
+            // Create a message widget the same way add_message does,
+            // but prepend it instead of appending. For now, use add_message
+            // then move the last child to the front.
+            let count_before = {
+                let mut n = 0;
+                let mut child = self.container.first_child();
+                while child.is_some() {
+                    n += 1;
+                    child = child.and_then(|c| c.next_sibling());
+                }
+                n
+            };
+
+            self.add_message(role_str, content);
+
+            // If a new widget was added, move it from end to beginning.
+            if let Some(last) = self.container.last_child() {
+                let mut current_count = 0;
+                let mut child = self.container.first_child();
+                while child.is_some() {
+                    current_count += 1;
+                    child = child.and_then(|c| c.next_sibling());
+                }
+                if current_count > count_before {
+                    self.container.reorder_child_after(&last, Option::<&gtk::Widget>::None);
+                }
+            }
+        }
+    }
+
+    /// Render a single QueuedMessage using the appropriate method (appends).
+    fn render_queued_message(&self, msg: &aios_core::queue::QueuedMessage) {
+        // System messages with a level get special formatting.
+        if msg.role == aios_core::types::Role::System {
+            if let Some(level) = msg.level {
+                if let Some(ref content) = msg.content {
+                    self.add_level_message(level, content);
+                    return;
+                }
+            }
+        }
+
+        let role_str = match msg.role {
+            aios_core::types::Role::User => "user",
+            aios_core::types::Role::Assistant => "assistant",
+            aios_core::types::Role::System => "system",
+            aios_core::types::Role::Tool => "tool",
+        };
+
+        if let Some(ref content) = msg.content {
+            self.add_message(role_str, content);
         }
     }
 }

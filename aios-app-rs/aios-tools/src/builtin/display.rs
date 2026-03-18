@@ -130,6 +130,10 @@ impl Tool for DisplayTool {
             }
             // Desktop and Web use the registered callbacks.
             ChannelKind::Desktop | ChannelKind::Web => {}
+            // System channel has no rendering surface.
+            ChannelKind::System => {
+                return self.execute_text_fallback(action, &args);
+            }
         }
 
         match action {

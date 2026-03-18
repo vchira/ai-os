@@ -345,4 +345,185 @@ mod tests {
         assert_eq!(cm.prune_threshold(), 5_000);
         assert_eq!(cm.prune_window(), 3_000);
     }
+
+    // -- Additional tests --
+
+    #[test]
+    fn empty_history_returns_empty() {
+        let cm = ContextManager::with_config(100_000, 10, 5);
+        // Pruning empty messages should return empty.
+        let pruned = cm.prune(&[], "some summary");
+        assert!(pruned.is_empty());
+    }
+
+    #[test]
+    fn short_history_not_pruned() {
+        let cm = ContextManager::default();
+        let messages = vec![
+            Message::user("Hello"),
+            Message::assistant("Hi there!"),
+            Message::user("How are you?"),
+            Message::assistant("I'm doing well."),
+        ];
+
+        // Short history should be well under the default prune threshold (10K tokens).
+        assert!(!cm.needs_pruning(&messages));
+
+        // Pruning should preserve all messages (prune_window is large).
+        let pruned = cm.prune(&messages, "This summary should not appear");
+        assert_eq!(pruned.len(), messages.len());
+        assert_eq!(
+            pruned[0].content.as_deref(),
+            messages[0].content.as_deref(),
+        );
+    }
+
+    #[test]
+    fn long_history_gets_summarized() {
+        // Use large messages (400 chars = 100 tokens each) and a small prune_window (150).
+        // The prune loop will accumulate: msg0=100, msg1=200 >= 150 → split at index 2.
+        // Remaining: 5 - 2 = 3 messages + 1 summary = 4 < 5.
+        let cm = ContextManager::with_config(100_000, 5, 150);
+
+        let messages = vec![
+            Message::user("a".repeat(400)),         // ~100 tokens
+            Message::assistant("b".repeat(400)),     // ~100 tokens
+            Message::user("c".repeat(400)),          // kept
+            Message::assistant("d".repeat(400)),     // kept
+            Message::user("recent question here"),   // kept
+        ];
+
+        // Total tokens: ~100 * 4 + 5 = ~405 >> 5 threshold.
+        assert!(cm.needs_pruning(&messages));
+
+        // Prune with a mock summary.
+        let summary = "User discussed topics a, b with the assistant.";
+        let pruned = cm.prune(&messages, summary);
+
+        // Should be shorter than original: 1 summary + 3 kept = 4 < 5.
+        assert!(
+            pruned.len() < messages.len(),
+            "Pruned ({}) should be shorter than original ({})",
+            pruned.len(),
+            messages.len(),
+        );
+
+        // First message should be the context summary.
+        assert_eq!(pruned[0].role, Role::System);
+        let content = pruned[0].content.as_deref().unwrap();
+        assert!(content.contains("[Context Summary]"));
+        assert!(content.contains(summary));
+
+        // The last (recent) message should still be present.
+        let last_pruned = pruned.last().unwrap();
+        assert_eq!(last_pruned.role, Role::User);
+        assert_eq!(
+            last_pruned.content.as_deref().unwrap(),
+            "recent question here",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Prune with short history returns unchanged
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prune_short_history_returns_unchanged() {
+        let cm = ContextManager::with_config(100_000, 10_000, 8_000);
+        let messages = vec![
+            Message::user("Hi"),
+            Message::assistant("Hello!"),
+        ];
+        // Total tokens ~4, well below prune threshold.
+        assert!(!cm.needs_pruning(&messages));
+        let pruned = cm.prune(&messages, "A summary");
+        // Messages are shorter than prune_window, so all are returned as-is.
+        assert_eq!(pruned.len(), messages.len());
+        for (p, m) in pruned.iter().zip(messages.iter()) {
+            assert_eq!(p.content.as_deref(), m.content.as_deref());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Prune with long history summarizes (boundary check)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn prune_long_history_replaces_beginning_with_summary() {
+        // prune_window = 30 tokens means roughly 120 chars of content.
+        let cm = ContextManager::with_config(100_000, 10, 30);
+        let messages = vec![
+            Message::user("a".repeat(80)),        // ~20 tokens
+            Message::assistant("b".repeat(80)),    // ~20 tokens, cumul 40 >= 30
+            Message::user("c".repeat(40)),         // kept
+            Message::assistant("d".repeat(40)),    // kept
+        ];
+        let pruned = cm.prune(&messages, "Summary of a and b.");
+        // Summary + 2 remaining messages.
+        assert!(pruned.len() < messages.len());
+        assert_eq!(pruned[0].role, Role::System);
+        assert!(pruned[0].content.as_deref().unwrap().contains("Summary of a and b."));
+    }
+
+    // -----------------------------------------------------------------------
+    // Token counting works correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn token_counting_single_message() {
+        // 100 chars / 4 = 25 tokens.
+        let messages = vec![Message::user("a".repeat(100))];
+        assert_eq!(ContextManager::estimate_tokens(&messages), 25);
+    }
+
+    #[test]
+    fn token_counting_multiple_messages() {
+        let messages = vec![
+            Message::user("a".repeat(40)),      // 10 tokens
+            Message::assistant("b".repeat(60)),  // 15 tokens
+        ];
+        assert_eq!(ContextManager::estimate_tokens(&messages), 25);
+    }
+
+    #[test]
+    fn token_counting_empty_content() {
+        // A message with no content should contribute 0 tokens.
+        let messages = vec![Message {
+            role: Role::System,
+            content: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }];
+        assert_eq!(ContextManager::estimate_tokens(&messages), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty history returns empty
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn empty_history_returns_empty_vec() {
+        let cm = ContextManager::default();
+        let pruned = cm.prune(&[], "some summary");
+        assert!(pruned.is_empty());
+    }
+
+    #[test]
+    fn empty_history_estimate_tokens_is_zero() {
+        assert_eq!(ContextManager::estimate_tokens(&[]), 0);
+    }
+
+    #[test]
+    fn empty_history_does_not_need_pruning() {
+        let cm = ContextManager::default();
+        assert!(!cm.needs_pruning(&[]));
+    }
+
+    #[test]
+    fn summarization_prompt_on_empty_history() {
+        let prompt = ContextManager::summarization_prompt(&[]);
+        // Should still produce a valid prompt with no conversation lines.
+        assert!(prompt.contains("Summarize the following conversation"));
+        assert!(prompt.contains("State memo:"));
+    }
 }

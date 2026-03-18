@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 500" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#4a9eff"/>
+    </marker>
+    <marker id="arr-green" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2ed573"/>
+    </marker>
+    <marker id="arr-orange" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#ffa502"/>
+    </marker>
+  </defs>
+
+  <rect width="1000" height="500" fill="#0d1117" rx="12"/>
+  <text x="500" y="35" text-anchor="middle" fill="#e6edf3" font-size="20" font-weight="bold">Three-Stage Voice Pipeline</text>
+
+  <!-- Stage 1: VAD -->
+  <rect x="30" y="80" width="200" height="120" rx="10" fill="#1a2d1a" stroke="#2ed573" stroke-width="2"/>
+  <text x="130" y="105" text-anchor="middle" fill="#2ed573" font-size="15" font-weight="bold">Stage 1: VAD</text>
+  <text x="130" y="125" text-anchor="middle" fill="#8b949e" font-size="11">Voice Activity Detection</text>
+  <text x="130" y="145" text-anchor="middle" fill="#6e7681" font-size="10">RMS energy, 30ms frames</text>
+  <text x="130" y="165" text-anchor="middle" fill="#2ed573" font-size="11" font-weight="bold">~0.1% CPU</text>
+  <text x="130" y="185" text-anchor="middle" fill="#6e7681" font-size="10">Filters silence</text>
+
+  <!-- Arrow 1→2 -->
+  <line x1="230" y1="140" x2="280" y2="140" stroke="#2ed573" stroke-width="2" marker-end="url(#arr-green)"/>
+  <text x="255" y="132" text-anchor="middle" fill="#2ed573" font-size="9">speech</text>
+
+  <!-- Stage 2: KWS -->
+  <rect x="290" y="80" width="200" height="120" rx="10" fill="#2d2d1a" stroke="#ffa502" stroke-width="2"/>
+  <text x="390" y="105" text-anchor="middle" fill="#ffa502" font-size="15" font-weight="bold">Stage 2: KWS</text>
+  <text x="390" y="125" text-anchor="middle" fill="#8b949e" font-size="11">Keyword Spotting (ONNX)</text>
+  <text x="390" y="145" text-anchor="middle" fill="#6e7681" font-size="10">openWakeWord models</text>
+  <text x="390" y="165" text-anchor="middle" fill="#ffa502" font-size="11" font-weight="bold">~1-3% CPU</text>
+  <text x="390" y="185" text-anchor="middle" fill="#6e7681" font-size="10">Detects wake word</text>
+
+  <!-- Arrow 2→3 -->
+  <line x1="490" y1="140" x2="540" y2="140" stroke="#ffa502" stroke-width="2" marker-end="url(#arr-orange)"/>
+  <text x="515" y="132" text-anchor="middle" fill="#ffa502" font-size="9">wake!</text>
+
+  <!-- Stage 3: STT -->
+  <rect x="550" y="80" width="200" height="120" rx="10" fill="#1a1a3a" stroke="#4a9eff" stroke-width="2"/>
+  <text x="650" y="105" text-anchor="middle" fill="#4a9eff" font-size="15" font-weight="bold">Stage 3: STT</text>
+  <text x="650" y="125" text-anchor="middle" fill="#8b949e" font-size="11">Whisper Transcription</text>
+  <text x="650" y="145" text-anchor="middle" fill="#6e7681" font-size="10">whisper.cpp (local)</text>
+  <text x="650" y="165" text-anchor="middle" fill="#4a9eff" font-size="11" font-weight="bold">Burst only</text>
+  <text x="650" y="185" text-anchor="middle" fill="#6e7681" font-size="10">Transcribes command</text>
+
+  <!-- Arrow 3→LLM -->
+  <line x1="750" y1="140" x2="800" y2="140" stroke="#4a9eff" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- LLM -->
+  <rect x="810" y="95" width="160" height="90" rx="10" fill="#2d1a2d" stroke="#a29bfe" stroke-width="2"/>
+  <text x="890" y="125" text-anchor="middle" fill="#a29bfe" font-size="15" font-weight="bold">LLM</text>
+  <text x="890" y="145" text-anchor="middle" fill="#8b949e" font-size="11">Claude / OpenAI</text>
+  <text x="890" y="165" text-anchor="middle" fill="#6e7681" font-size="10">+ Tool calls</text>
+
+  <!-- Microphone -->
+  <text x="20" y="145" fill="#8b949e" font-size="22">🎤</text>
+
+  <!-- State Machine -->
+  <rect x="30" y="250" width="940" height="110" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="500" y="275" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="bold">Voice Listener State Machine</text>
+
+  <!-- Idle state -->
+  <rect x="60" y="290" width="280" height="50" rx="25" fill="#1a2d1a" stroke="#2ed573" stroke-width="1.5"/>
+  <text x="200" y="320" text-anchor="middle" fill="#2ed573" font-size="13" font-weight="bold">IDLE</text>
+  <text x="200" y="335" text-anchor="middle" fill="#8b949e" font-size="10">Feed audio → VAD → KWS</text>
+
+  <!-- Arrow Idle → Capture -->
+  <line x1="340" y1="315" x2="430" y2="315" stroke="#ffa502" stroke-width="2" marker-end="url(#arr-orange)"/>
+  <text x="385" y="308" text-anchor="middle" fill="#ffa502" font-size="10">wake word!</text>
+
+  <!-- Capture state -->
+  <rect x="440" y="290" width="280" height="50" rx="25" fill="#2d2d1a" stroke="#ffa502" stroke-width="1.5"/>
+  <text x="580" y="320" text-anchor="middle" fill="#ffa502" font-size="13" font-weight="bold">CAPTURE</text>
+  <text x="580" y="335" text-anchor="middle" fill="#8b949e" font-size="10">Record command → Whisper → send</text>
+
+  <!-- Arrow Capture → Idle -->
+  <path d="M 720 315 Q 770 315 770 360 Q 770 380 500 380 Q 60 380 60 340 Q 60 315 60 315" fill="none" stroke="#4a9eff" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="450" y="395" text-anchor="middle" fill="#4a9eff" font-size="10">silence timeout / transcribed</text>
+
+  <!-- Fallback path -->
+  <rect x="30" y="420" width="940" height="60" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <text x="500" y="445" text-anchor="middle" fill="#8b949e" font-size="12" font-weight="bold">Fallback (no KWS model): VAD → Whisper → keyword match on text → LLM</text>
+  <text x="500" y="465" text-anchor="middle" fill="#6e7681" font-size="11">Used when ONNX models not available (dev machine, VM without libonnxruntime)</text>
+</svg>

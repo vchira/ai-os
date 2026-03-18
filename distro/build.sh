@@ -154,7 +154,7 @@ docker run --rm \
     -v "${CARGO_CACHE}:/root/.cargo/registry" \
     -w /work/aios-app-rs \
     -e "AIOS_VERSION=${AIOS_VERSION}" \
-    "${IMAGE}" cargo build --release 2>&1
+    "${IMAGE}" env CARGO_TARGET_DIR=/work/aios-app-rs/target cargo build --release 2>&1
 
 AIOS_BIN="${REPO_DIR}/aios-app-rs/target/release/aios"
 if [ ! -f "${AIOS_BIN}" ]; then

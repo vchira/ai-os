@@ -26,6 +26,8 @@ pub enum ChannelKind {
     Signal,
     /// Voice-only (TTS/STT, no visual UI).
     Voice,
+    /// Internal system messages (boot, setup, status). Not a user-facing channel.
+    System,
 }
 
 impl Default for ChannelKind {
@@ -41,6 +43,7 @@ impl fmt::Display for ChannelKind {
             Self::Web => "web",
             Self::Signal => "signal",
             Self::Voice => "voice",
+            Self::System => "system",
         };
         f.write_str(label)
     }
@@ -54,6 +57,7 @@ impl ChannelKind {
             "web" => Some(Self::Web),
             "signal" => Some(Self::Signal),
             "voice" => Some(Self::Voice),
+            "system" => Some(Self::System),
             _ => None,
         }
     }
@@ -138,6 +142,7 @@ impl ChannelCapabilities {
             ChannelKind::Web => Self::web(),
             ChannelKind::Signal => Self::signal(),
             ChannelKind::Voice => Self::voice(),
+            ChannelKind::System => Self::voice(), // System has no rendering surface
         }
     }
 }
@@ -490,5 +495,353 @@ mod tests {
         assert_eq!(ChannelContext::web().kind, ChannelKind::Web);
         assert_eq!(ChannelContext::signal().kind, ChannelKind::Signal);
         assert_eq!(ChannelContext::voice().kind, ChannelKind::Voice);
+    }
+
+    // ========================================================================
+    // Additional comprehensive tests — System variant & edge cases
+    // ========================================================================
+
+    // -- ChannelKind::System in Display -------------------------------------
+
+    #[test]
+    fn channel_kind_system_display() {
+        assert_eq!(ChannelKind::System.to_string(), "system");
+    }
+
+    // -- ChannelKind::System in from_str_opt --------------------------------
+
+    #[test]
+    fn channel_kind_system_from_str_opt() {
+        assert_eq!(ChannelKind::from_str_opt("system"), Some(ChannelKind::System));
+        assert_eq!(ChannelKind::from_str_opt("SYSTEM"), Some(ChannelKind::System));
+        assert_eq!(ChannelKind::from_str_opt("System"), Some(ChannelKind::System));
+        assert_eq!(ChannelKind::from_str_opt("sYsTeM"), Some(ChannelKind::System));
+    }
+
+    // -- ChannelKind::System in serde ---------------------------------------
+
+    #[test]
+    fn channel_kind_system_serialize() {
+        let json = serde_json::to_string(&ChannelKind::System).unwrap();
+        assert_eq!(json, "\"system\"");
+    }
+
+    #[test]
+    fn channel_kind_system_deserialize() {
+        let kind: ChannelKind = serde_json::from_str("\"system\"").unwrap();
+        assert_eq!(kind, ChannelKind::System);
+    }
+
+    #[test]
+    fn channel_kind_system_serde_roundtrip() {
+        let json = serde_json::to_string(&ChannelKind::System).unwrap();
+        let back: ChannelKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ChannelKind::System);
+    }
+
+    // -- ChannelCapabilities::for_kind(System) returns minimal caps ---------
+
+    #[test]
+    fn capabilities_for_kind_system_is_minimal() {
+        let caps = ChannelCapabilities::for_kind(ChannelKind::System);
+        // System has no rendering surface — should be same as voice (minimal)
+        assert!(!caps.rich_panels);
+        assert!(!caps.images);
+        assert!(!caps.markdown);
+        assert!(!caps.notifications);
+        assert!(!caps.structured_input);
+        assert!(!caps.password_input);
+        assert!(caps.max_text_length.is_none());
+    }
+
+    #[test]
+    fn capabilities_for_kind_system_matches_voice() {
+        let system_caps = ChannelCapabilities::for_kind(ChannelKind::System);
+        let voice_caps = ChannelCapabilities::for_kind(ChannelKind::Voice);
+        assert_eq!(system_caps.rich_panels, voice_caps.rich_panels);
+        assert_eq!(system_caps.images, voice_caps.images);
+        assert_eq!(system_caps.markdown, voice_caps.markdown);
+        assert_eq!(system_caps.notifications, voice_caps.notifications);
+        assert_eq!(system_caps.structured_input, voice_caps.structured_input);
+        assert_eq!(system_caps.password_input, voice_caps.password_input);
+        assert_eq!(system_caps.max_text_length, voice_caps.max_text_length);
+    }
+
+    // -- ChannelKind hash includes System -----------------------------------
+
+    #[test]
+    fn channel_kind_hash_includes_system() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(ChannelKind::Desktop);
+        set.insert(ChannelKind::Web);
+        set.insert(ChannelKind::Signal);
+        set.insert(ChannelKind::Voice);
+        set.insert(ChannelKind::System);
+        assert_eq!(set.len(), 5);
+    }
+
+    // -- ChannelKind::System is not default ---------------------------------
+
+    #[test]
+    fn channel_kind_system_is_not_default() {
+        assert_ne!(ChannelKind::default(), ChannelKind::System);
+    }
+
+    // -- ChannelContext for System ------------------------------------------
+
+    #[test]
+    fn channel_context_new_system() {
+        let ctx = ChannelContext::new(ChannelKind::System);
+        assert_eq!(ctx.kind, ChannelKind::System);
+        assert!(!ctx.capabilities.rich_panels);
+        assert!(!ctx.capabilities.images);
+    }
+
+    // -- ChannelKind serde all five variants roundtrip ----------------------
+
+    #[test]
+    fn channel_kind_serde_all_five_roundtrip() {
+        let variants = [
+            ChannelKind::Desktop,
+            ChannelKind::Web,
+            ChannelKind::Signal,
+            ChannelKind::Voice,
+            ChannelKind::System,
+        ];
+        for kind in &variants {
+            let json = serde_json::to_string(kind).unwrap();
+            let back: ChannelKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(*kind, back, "serde roundtrip failed for {:?}", kind);
+        }
+    }
+
+    // -- ChannelKind from_str_opt all five variants -------------------------
+
+    #[test]
+    fn channel_kind_from_str_opt_all_five() {
+        let cases = [
+            ("desktop", ChannelKind::Desktop),
+            ("web", ChannelKind::Web),
+            ("signal", ChannelKind::Signal),
+            ("voice", ChannelKind::Voice),
+            ("system", ChannelKind::System),
+        ];
+        for (input, expected) in &cases {
+            assert_eq!(
+                ChannelKind::from_str_opt(input),
+                Some(*expected),
+                "from_str_opt(\"{input}\") failed"
+            );
+        }
+    }
+
+    // -- ChannelKind deserialize invalid ------------------------------------
+
+    #[test]
+    fn channel_kind_deserialize_invalid() {
+        let result: Result<ChannelKind, _> = serde_json::from_str("\"telegram\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn channel_kind_deserialize_number_invalid() {
+        let result: Result<ChannelKind, _> = serde_json::from_str("42");
+        assert!(result.is_err());
+    }
+
+    // -- ChannelKind Display all five variants ------------------------------
+
+    #[test]
+    fn channel_kind_display_all_five() {
+        assert_eq!(ChannelKind::Desktop.to_string(), "desktop");
+        assert_eq!(ChannelKind::Web.to_string(), "web");
+        assert_eq!(ChannelKind::Signal.to_string(), "signal");
+        assert_eq!(ChannelKind::Voice.to_string(), "voice");
+        assert_eq!(ChannelKind::System.to_string(), "system");
+    }
+
+    // -- ChannelCapabilities web equals desktop -----------------------------
+
+    #[test]
+    fn web_capabilities_equal_desktop() {
+        let web = ChannelCapabilities::web();
+        let desktop = ChannelCapabilities::desktop();
+        assert_eq!(web.rich_panels, desktop.rich_panels);
+        assert_eq!(web.images, desktop.images);
+        assert_eq!(web.markdown, desktop.markdown);
+        assert_eq!(web.notifications, desktop.notifications);
+        assert_eq!(web.structured_input, desktop.structured_input);
+        assert_eq!(web.password_input, desktop.password_input);
+        assert_eq!(web.max_text_length, desktop.max_text_length);
+    }
+
+    // -- Signal has text limit, others don't --------------------------------
+
+    #[test]
+    fn only_signal_has_text_length_limit() {
+        assert!(ChannelCapabilities::desktop().max_text_length.is_none());
+        assert!(ChannelCapabilities::web().max_text_length.is_none());
+        assert_eq!(ChannelCapabilities::signal().max_text_length, Some(4096));
+        assert!(ChannelCapabilities::voice().max_text_length.is_none());
+    }
+
+    // -- Signal can display images ------------------------------------------
+
+    #[test]
+    fn signal_supports_images_but_not_rich() {
+        let caps = ChannelCapabilities::signal();
+        assert!(caps.images);
+        assert!(!caps.rich_panels);
+        assert!(!caps.markdown);
+    }
+
+    // -- IncomingMessage with empty text ------------------------------------
+
+    #[test]
+    fn incoming_message_with_empty_text() {
+        let msg = IncomingMessage {
+            channel: ChannelKind::System,
+            text: String::new(),
+            sender_id: None,
+        };
+        assert!(msg.text.is_empty());
+        assert_eq!(msg.channel, ChannelKind::System);
+    }
+
+    // -- IncomingMessage from System channel --------------------------------
+
+    #[test]
+    fn incoming_message_from_system() {
+        let msg = IncomingMessage {
+            channel: ChannelKind::System,
+            text: "Boot complete".to_string(),
+            sender_id: None,
+        };
+        assert_eq!(msg.channel, ChannelKind::System);
+        assert_eq!(msg.text, "Boot complete");
+        assert!(msg.sender_id.is_none());
+    }
+
+    // ========================================================================
+    // Further edge-case tests
+    // ========================================================================
+
+    #[test]
+    fn channel_kind_from_str_opt_returns_none_for_numeric() {
+        assert!(ChannelKind::from_str_opt("0").is_none());
+        assert!(ChannelKind::from_str_opt("1").is_none());
+        assert!(ChannelKind::from_str_opt("42").is_none());
+    }
+
+    #[test]
+    fn channel_kind_from_str_opt_returns_none_for_special_chars() {
+        assert!(ChannelKind::from_str_opt("@desktop").is_none());
+        assert!(ChannelKind::from_str_opt("web!").is_none());
+        assert!(ChannelKind::from_str_opt("signal.").is_none());
+    }
+
+    #[test]
+    fn channel_context_system_has_no_password_input() {
+        let ctx = ChannelContext::new(ChannelKind::System);
+        assert!(!ctx.capabilities.password_input);
+    }
+
+    #[test]
+    fn channel_context_desktop_has_password_input() {
+        let ctx = ChannelContext::desktop();
+        assert!(ctx.capabilities.password_input);
+    }
+
+    #[test]
+    fn channel_context_web_has_password_input() {
+        let ctx = ChannelContext::web();
+        assert!(ctx.capabilities.password_input);
+    }
+
+    #[test]
+    fn channel_context_signal_no_password_input() {
+        let ctx = ChannelContext::signal();
+        assert!(!ctx.capabilities.password_input);
+    }
+
+    #[test]
+    fn channel_kind_all_five_are_copy() {
+        // ChannelKind is Copy — verify by assigning without move
+        let a = ChannelKind::System;
+        let b = a;
+        let c = a;
+        assert_eq!(b, c);
+        assert_eq!(a, ChannelKind::System);
+    }
+
+    #[test]
+    fn channel_kind_debug_format_includes_variant_name() {
+        let debug = format!("{:?}", ChannelKind::System);
+        assert!(debug.contains("System"));
+
+        let debug = format!("{:?}", ChannelKind::Desktop);
+        assert!(debug.contains("Desktop"));
+    }
+
+    #[test]
+    fn channel_context_clone_shares_capabilities_arc() {
+        let ctx1 = ChannelContext::new(ChannelKind::System);
+        let ctx2 = ctx1.clone();
+        // Arc::ptr_eq checks that they share the same allocation
+        assert!(Arc::ptr_eq(&ctx1.capabilities, &ctx2.capabilities));
+    }
+
+    #[test]
+    fn incoming_message_with_unicode_text() {
+        let msg = IncomingMessage {
+            channel: ChannelKind::Web,
+            text: "Hallo Welt! Salut! \u{1f600}".to_string(),
+            sender_id: Some("user-42".to_string()),
+        };
+        assert!(msg.text.contains("Hallo"));
+        assert!(msg.text.contains("\u{1f600}"));
+    }
+
+    #[test]
+    fn incoming_message_with_very_long_text() {
+        let long_text = "a".repeat(100_000);
+        let msg = IncomingMessage {
+            channel: ChannelKind::Desktop,
+            text: long_text.clone(),
+            sender_id: None,
+        };
+        assert_eq!(msg.text.len(), 100_000);
+    }
+
+    #[test]
+    fn channel_capabilities_for_kind_covers_all_variants() {
+        // Ensure for_kind does not panic for any variant
+        let variants = [
+            ChannelKind::Desktop,
+            ChannelKind::Web,
+            ChannelKind::Signal,
+            ChannelKind::Voice,
+            ChannelKind::System,
+        ];
+        for kind in &variants {
+            let _caps = ChannelCapabilities::for_kind(*kind);
+        }
+    }
+
+    #[test]
+    fn channel_kind_serialize_all_five_are_distinct_strings() {
+        let variants = [
+            ChannelKind::Desktop,
+            ChannelKind::Web,
+            ChannelKind::Signal,
+            ChannelKind::Voice,
+            ChannelKind::System,
+        ];
+        let jsons: Vec<String> = variants.iter().map(|k| serde_json::to_string(k).unwrap()).collect();
+        let mut unique = jsons.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 5, "all 5 channel kinds should serialize to distinct strings");
     }
 }

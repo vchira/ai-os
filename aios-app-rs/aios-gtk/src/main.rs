@@ -4,7 +4,16 @@
 //! and launches the libadwaita application.
 
 mod app;
+mod boot_status;
+mod command_handler;
+mod first_boot_flow;
+mod llm_handler;
+mod message_loop;
+mod setup;
+mod tts;
 mod ui;
+mod voice_listener;
+mod voice_setup;
 
 use gtk4::prelude::*;
 use tracing_subscriber::EnvFilter;

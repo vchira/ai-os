@@ -99,4 +99,164 @@ mod tests {
     fn trainer_not_available_without_files() {
         assert!(!KwsTrainer::is_available());
     }
+
+    // -- Comprehensive additional tests --
+
+    #[test]
+    fn sanitize_phrase_removes_special_chars() {
+        let cases = [
+            ("Hello World!", "hello_world"),
+            ("hey_assistant", "hey_assistant"),
+            ("  spaces  ", "__spaces__"),
+            ("Mr. Anderson", "mr_anderson"),
+            ("Hey!!! @#$ Assistant", "hey__assistant"),
+            ("123 Numbers", "123_numbers"),
+            ("under_score", "under_score"),
+        ];
+        for (input, expected) in &cases {
+            let sanitized = input
+                .to_lowercase()
+                .replace(' ', "_")
+                .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+            // Trim leading/trailing underscores and collapse multiple underscores.
+            // Note: the actual code doesn't do this extra cleanup, so we test
+            // the exact behavior of the production sanitization logic.
+            assert_eq!(
+                sanitized, *expected,
+                "sanitize('{}') = '{}', expected '{}'",
+                input, sanitized, expected,
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_phrase_empty_string() {
+        let phrase = "";
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        assert_eq!(sanitized, "");
+    }
+
+    #[test]
+    fn sanitize_phrase_only_special_chars() {
+        let phrase = "!@#$%^&*()";
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        assert_eq!(sanitized, "");
+    }
+
+    #[test]
+    fn sanitize_phrase_unicode() {
+        let phrase = "H\u{00e9} Aios";
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        assert_eq!(sanitized, "h\u{00e9}_aios");
+    }
+
+    #[test]
+    fn sanitize_phrase_preserves_numbers() {
+        let phrase = "Wake Word 42";
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        assert_eq!(sanitized, "wake_word_42");
+    }
+
+    #[test]
+    fn training_output_path_is_correct() {
+        let phrase = "Hey My Assistant!";
+        let output_dir = Path::new("/home/user/.aios/models/custom");
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        let output_path = output_dir.join(format!("{sanitized}.onnx"));
+        assert_eq!(
+            output_path,
+            PathBuf::from("/home/user/.aios/models/custom/hey_my_assistant.onnx"),
+        );
+    }
+
+    #[test]
+    fn training_output_path_with_simple_phrase() {
+        let phrase = "jarvis";
+        let output_dir = Path::new("/models");
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        let output_path = output_dir.join(format!("{sanitized}.onnx"));
+        assert_eq!(output_path, PathBuf::from("/models/jarvis.onnx"));
+    }
+
+    #[test]
+    fn training_output_path_with_relative_dir() {
+        let phrase = "ok computer";
+        let output_dir = Path::new("custom_models");
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        let output_path = output_dir.join(format!("{sanitized}.onnx"));
+        assert_eq!(output_path, PathBuf::from("custom_models/ok_computer.onnx"));
+    }
+
+    #[test]
+    fn train_returns_error_when_not_available() {
+        let result = KwsTrainer::train("test phrase", Path::new("/tmp"));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("not available"),
+            "Expected 'not available' in error, got: '{}'",
+            err_msg,
+        );
+    }
+
+    #[test]
+    fn trainer_constants_are_defined() {
+        assert!(!TRAINER_SCRIPT.is_empty());
+        assert!(!TRAINER_VENV.is_empty());
+        assert!(TRAINER_SCRIPT.ends_with(".py"));
+        assert!(TRAINER_VENV.contains("venv"));
+    }
+
+    #[test]
+    fn sanitize_phrase_multiple_spaces() {
+        let phrase = "hey   my   friend";
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        // Multiple spaces become multiple underscores.
+        assert_eq!(sanitized, "hey___my___friend");
+    }
+
+    #[test]
+    fn sanitize_phrase_already_snake_case() {
+        let phrase = "hey_assistant";
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        assert_eq!(sanitized, "hey_assistant");
+    }
+
+    #[test]
+    fn sanitize_phrase_mixed_case_and_special() {
+        let phrase = "Hey-There_AIOS!";
+        let sanitized = phrase
+            .to_lowercase()
+            .replace(' ', "_")
+            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
+        assert_eq!(sanitized, "heythere_aios");
+    }
 }

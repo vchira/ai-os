@@ -35,14 +35,18 @@ generate_language() {
     local lang_name=${LANG_NAMES[$lang]}
     echo "Generating ${lang_name} (${lang})..."
 
+    local direction="ltr"
+    if [ "$lang" = "ar" ]; then direction="rtl"; fi
+
     local prompt="Translate all string values in this JSON to ${lang_name}. Rules:
 - Keep all JSON keys exactly as they are (do not translate keys)
 - Only translate the string values
+- Update the _meta block: set language to \"${lang_name}\", code to \"${lang}\", direction to \"${direction}\"
 - Keep {placeholder} variables unchanged (e.g., {provider}, {name}, {size})
 - Keep emoji/unicode symbols unchanged
 - Keep URLs unchanged
-- Keep technical terms like API, SSH, TTS, STT unchanged
-- Return valid JSON only, no explanation or markdown"
+- Keep technical terms like API, SSH, TTS, STT, LLM, AiOS unchanged
+- Return ONLY valid JSON — no markdown code fences, no explanation, no backticks"
 
     local response
     response=$(curl -s https://api.anthropic.com/v1/messages \
@@ -55,8 +59,22 @@ generate_language() {
             messages: [{role: "user", content: ($prompt + "\n\n" + $source)}]
         }')")
 
-    # Extract the text content and save
-    echo "$response" | jq -r '.content[0].text' > "${OUTPUT_DIR}/${lang}.json"
+    # Check for API errors
+    local error
+    error=$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null)
+    if [ -n "$error" ]; then
+        echo "  ERROR: API returned: ${error}"
+        return 1
+    fi
+
+    # Extract the text content
+    local text
+    text=$(echo "$response" | jq -r '.content[0].text')
+
+    # Strip markdown code fences if present (```json ... ``` or ``` ... ```)
+    text=$(echo "$text" | sed '/^```\(json\)\?$/d')
+
+    echo "$text" > "${OUTPUT_DIR}/${lang}.json"
 
     # Validate JSON
     if ! jq empty "${OUTPUT_DIR}/${lang}.json" 2>/dev/null; then
@@ -65,10 +83,19 @@ generate_language() {
         return 1
     fi
 
+    # Pretty-print to normalize formatting
+    local tmp="${OUTPUT_DIR}/${lang}.json.tmp"
+    jq '.' "${OUTPUT_DIR}/${lang}.json" > "$tmp" && mv "$tmp" "${OUTPUT_DIR}/${lang}.json"
+
     echo "  -> ${OUTPUT_DIR}/${lang}.json ($(wc -l < "${OUTPUT_DIR}/${lang}.json") lines)"
 }
 
 if [ -n "${1:-}" ]; then
+    if [ -z "${LANG_NAMES[$1]+x}" ]; then
+        echo "Error: Unknown language code '$1'"
+        echo "Supported: ${LANGUAGES[*]}"
+        exit 1
+    fi
     generate_language "$1"
 else
     for lang in "${LANGUAGES[@]}"; do

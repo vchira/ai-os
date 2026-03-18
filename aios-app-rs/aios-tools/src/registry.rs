@@ -174,6 +174,19 @@ impl ToolRegistry {
             }
         }
     }
+
+    /// Register queue-dependent tools.
+    ///
+    /// Call this after creating the message queue. Registers `conversation_history`.
+    pub fn register_queue_tools(
+        &mut self,
+        queue: std::sync::Arc<std::sync::Mutex<aios_core::queue::MessageQueue>>,
+    ) {
+        let tool = builtin::ConversationHistoryTool::new(queue);
+        if let Err(e) = self.register(Box::new(tool)) {
+            tracing::warn!(error = %e, "failed to register conversation_history tool");
+        }
+    }
 }
 
 impl Default for ToolRegistry {
@@ -431,5 +444,248 @@ mod tests {
         reg.load_builtins();
         // Should have 12 built-in tools.
         assert_eq!(reg.len(), 12);
+    }
+
+    // -- New comprehensive tests --
+
+    #[test]
+    fn register_duplicate_fails() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();
+        let err = reg.register(Box::new(DummyTool));
+        assert!(err.is_err());
+        match err.unwrap_err() {
+            ToolError::AlreadyRegistered(name) => assert_eq!(name, "dummy"),
+            other => panic!("Expected AlreadyRegistered, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unregister_nonexistent_fails() {
+        let mut reg = ToolRegistry::new();
+        let err = reg.unregister("does_not_exist");
+        assert!(err.is_err());
+        match err.unwrap_err() {
+            ToolError::NotFound(name) => assert_eq!(name, "does_not_exist"),
+            other => panic!("Expected NotFound, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_nonexistent_returns_none() {
+        let reg = ToolRegistry::new();
+        assert!(reg.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn register_queue_tools_adds_conversation_history() {
+        let queue = aios_core::queue::MessageQueue::open_in_memory().unwrap();
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
+
+        let mut reg = ToolRegistry::new();
+        reg.register_queue_tools(queue);
+
+        assert!(reg.get("conversation_history").is_some());
+        assert_eq!(reg.get("conversation_history").unwrap().name(), "conversation_history");
+    }
+
+    #[test]
+    fn get_schemas_returns_all_registered() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();
+        reg.register(Box::new(DummyTool2)).unwrap();
+
+        let schemas = reg.get_schemas();
+        assert_eq!(schemas.len(), 2);
+        let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"dummy"));
+        assert!(names.contains(&"dummy2"));
+    }
+
+    #[test]
+    fn get_schemas_by_categories_filters_correctly() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();  // category: "general"
+        reg.register(Box::new(DummyTool2)).unwrap();  // category: "test_category"
+
+        // Only "test_category"
+        let schemas = reg.get_schemas_by_categories(&["test_category"]);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].name, "dummy2");
+
+        // Only "general" (DummyTool's default category)
+        let schemas = reg.get_schemas_by_categories(&["general"]);
+        assert_eq!(schemas.len(), 1);
+        assert_eq!(schemas[0].name, "dummy");
+
+        // Both
+        let schemas = reg.get_schemas_by_categories(&["general", "test_category"]);
+        assert_eq!(schemas.len(), 2);
+
+        // Non-existent category
+        let schemas = reg.get_schemas_by_categories(&["no_such_category"]);
+        assert!(schemas.is_empty());
+    }
+
+    #[test]
+    fn execute_registered_tool() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();
+
+        let result = reg.execute("dummy", serde_json::json!({}));
+        assert!(result.success);
+        assert_eq!(result.output, "dummy ok");
+    }
+
+    #[test]
+    fn execute_nonexistent_tool_fails() {
+        let reg = ToolRegistry::new();
+        let result = reg.execute("no_such_tool", serde_json::json!({}));
+        assert!(!result.success);
+        assert!(result.output.contains("not found") || result.error.as_deref().unwrap_or("").contains("not found"));
+    }
+
+    #[test]
+    fn register_unregister_reregister() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();
+        reg.unregister("dummy").unwrap();
+        // Should be able to re-register after unregister.
+        reg.register(Box::new(DummyTool)).unwrap();
+        assert!(reg.get("dummy").is_some());
+    }
+
+    #[test]
+    fn list_tools_after_unregister() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(DummyTool)).unwrap();
+        reg.register(Box::new(DummyTool2)).unwrap();
+        reg.unregister("dummy").unwrap();
+
+        let names = reg.list_tools();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0], "dummy2");
+    }
+
+    #[test]
+    fn register_queue_tools_duplicate_fails_gracefully() {
+        let queue = aios_core::queue::MessageQueue::open_in_memory().unwrap();
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
+
+        let mut reg = ToolRegistry::new();
+        reg.register_queue_tools(std::sync::Arc::clone(&queue));
+        // Registering again should not panic — just log a warning.
+        reg.register_queue_tools(queue);
+        // Still only 1 conversation_history tool.
+        let count = reg
+            .list_tools()
+            .iter()
+            .filter(|n| n.as_str() == "conversation_history")
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn get_schemas_correct_count_after_load_builtins() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        let schemas = reg.get_schemas();
+        assert_eq!(schemas.len(), 12);
+        // Verify schemas are sorted by name.
+        for pair in schemas.windows(2) {
+            assert!(
+                pair[0].name <= pair[1].name,
+                "schemas not sorted: {} > {}",
+                pair[0].name,
+                pair[1].name
+            );
+        }
+    }
+
+    #[test]
+    fn after_register_queue_tools_tool_count_is_13() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        assert_eq!(reg.len(), 12);
+
+        let queue = aios_core::queue::MessageQueue::open_in_memory().unwrap();
+        let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
+        reg.register_queue_tools(queue);
+
+        assert_eq!(reg.len(), 13);
+        let names = reg.list_tools();
+        assert!(names.contains(&"conversation_history".to_string()));
+    }
+
+    #[test]
+    fn get_schemas_by_categories_with_builtins() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+
+        // filesystem category: files, process_data, find_content.
+        let fs_schemas = reg.get_schemas_by_categories(&["filesystem"]);
+        let fs_names: Vec<&str> = fs_schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(fs_names.contains(&"files"));
+        assert!(fs_names.contains(&"process_data"));
+        assert!(fs_names.contains(&"find_content"));
+        assert_eq!(fs_schemas.len(), 3);
+
+        // system category: system, execute_code, delegate_to.
+        let sys_schemas = reg.get_schemas_by_categories(&["system"]);
+        let sys_names: Vec<&str> = sys_schemas.iter().map(|s| s.name.as_str()).collect();
+        assert!(sys_names.contains(&"system"));
+        assert!(sys_names.contains(&"execute_code"));
+        assert!(sys_names.contains(&"delegate_to"));
+        assert_eq!(sys_schemas.len(), 3);
+
+        // ui category: display, ui_panel.
+        let ui_schemas = reg.get_schemas_by_categories(&["ui"]);
+        assert_eq!(ui_schemas.len(), 2);
+    }
+
+    #[test]
+    fn schemas_have_valid_structure() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        for schema in reg.get_schemas() {
+            assert!(!schema.name.is_empty(), "tool name must not be empty");
+            assert!(
+                !schema.description.is_empty(),
+                "tool description must not be empty for {}",
+                schema.name
+            );
+            assert!(
+                schema.parameters.is_object(),
+                "tool parameters must be a JSON object for {}",
+                schema.name
+            );
+        }
+    }
+
+    #[test]
+    fn list_tools_includes_all_expected_builtins() {
+        let mut reg = ToolRegistry::new();
+        reg.load_builtins();
+        let names = reg.list_tools();
+        let expected = [
+            "delegate_to",
+            "display",
+            "execute_code",
+            "files",
+            "find_content",
+            "memory",
+            "process_data",
+            "recall_episodes",
+            "reflect",
+            "system",
+            "ui_panel",
+            "web",
+        ];
+        for name in &expected {
+            assert!(
+                names.contains(&name.to_string()),
+                "missing builtin tool: {name}"
+            );
+        }
     }
 }

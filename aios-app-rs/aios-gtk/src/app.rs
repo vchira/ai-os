@@ -4,6 +4,15 @@
 //! all subsystem managers and wires them together via closures and
 //! [`glib::MainContext::channel`] for async communication from Tokio back
 //! to the GTK main thread.
+//!
+//! Most of the heavy lifting is delegated to extracted modules:
+//! - [`crate::command_handler`] -- slash command processing
+//! - [`crate::llm_handler`] -- LLM calls and response handling
+//! - [`crate::first_boot_flow`] -- first-boot wizard and autoconfig
+//! - [`crate::boot_status`] -- boot status text generation
+//! - [`crate::voice_setup`] -- KWS engine, voice listener, VU meter
+//! - [`crate::tts`] -- TTS functions
+//! - [`crate::voice_listener`] -- voice / wake-word listener
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -12,738 +21,91 @@ use std::sync::Arc;
 use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
-use tracing::{debug, error, info, warn};
+use tracing::{info, warn};
 
-use aios_core::config::commands::{CommandHandler, CommandResult, PanelFieldKind};
 use aios_core::config::ConfigManager;
-use aios_core::i18n::{t, t_fmt};
+use aios_core::i18n::t;
 use aios_core::secure::Vault;
-use aios_core::secure::vault::{SecretEntry, SecretKind};
 use aios_llm::{ClaudeProvider, LlmManager, OpenAIProvider};
 use aios_tools::ToolRegistry;
 use aios_tools::builtin::ui_panel::UiPanelTool;
 
+use crate::boot_status;
+use crate::command_handler;
+use crate::first_boot_flow;
+use crate::llm_handler;
 use crate::ui::channel_overlay::ChannelOverlay;
 use crate::ui::chat_view::ChatView;
-use crate::ui::first_boot::SetupConversation;
 use crate::ui::main_window;
 use crate::ui::panel_renderer::PanelRenderer;
 use crate::ui::prompt_input::PromptInput;
-use crate::ui::settings_dialog;
+use crate::voice_setup;
+
+// ---------------------------------------------------------------------------
+// Shared types
+// ---------------------------------------------------------------------------
+
+/// Shared message queue handle (thread-safe).
+pub(crate) type SharedQueue = Arc<std::sync::Mutex<aios_core::queue::MessageQueue>>;
 
 // ---------------------------------------------------------------------------
 // AiosApp
 // ---------------------------------------------------------------------------
-
-/// Listener state machine for wake-word detection and speech capture.
-enum ListenerState {
-    /// Waiting for wake word (KWS or fallback) or passing audio through.
-    Idle,
-    /// Wake word triggered — capturing command audio until silence or timeout.
-    Capture {
-        command_buffer: Vec<f32>,
-        capture_start: std::time::Instant,
-        silence_start: Option<std::time::Instant>,
-    },
-}
-
-/// Samples to skip after wake word trigger (300 ms at 16 kHz).
-const POST_WAKE_DELAY_SAMPLES: usize = 4800;
-
-/// Silence duration that ends a capture (1500 ms).
-const CAPTURE_SILENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
-
-/// Maximum capture duration before forced transcription (15 s).
-const CAPTURE_MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(15);
-
-/// Circular buffer capacity — 2 seconds of audio at 16 kHz.
-const RING_BUFFER_CAPACITY: usize = 32000;
-
-/// Start a background voice listener thread that continuously captures audio,
-/// detects speech via VAD, and transcribes using whisper-cpp (or sends raw
-/// audio to the STT engine). Transcribed text is sent back to the GTK thread
-/// via the provided sender.
-///
-/// The listener operates as a two-state machine:
-///
-/// - **Idle**: listens for a wake word via KWS engine (ONNX), Whisper-based
-///   keyword match (fallback), or passes all speech through (wake disabled).
-/// - **Capture**: accumulates command audio after wake trigger until silence
-///   timeout or max duration, then transcribes and sends the result.
-fn start_voice_listener(
-    stt_tx: std::sync::mpsc::Sender<String>,
-    stt_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    wake_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    wake_training_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    kws_engine: std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>>,
-    audio_level: std::sync::Arc<std::sync::atomic::AtomicU32>,
-) -> std::thread::JoinHandle<()> {
-    use std::collections::VecDeque;
-    use aios_voice::audio::capture::AudioCapture;
-    use aios_voice::audio::vad::{VadConfig, VoiceActivityDetector, DEFAULT_FRAME_SIZE};
-
-    std::thread::spawn(move || {
-        info!("Voice listener thread started");
-
-        let mut capture = AudioCapture::new();
-        let mut vad = VoiceActivityDetector::new(VadConfig {
-            threshold: 0.015,
-            min_speech_frames: 4,
-            min_silence_frames: 20, // ~600ms of silence to end utterance
-        });
-
-        // State machine
-        let mut state = ListenerState::Idle;
-
-        // Circular buffer for pre-trigger audio (avoids clipping command start)
-        let mut ring_buf: VecDeque<f32> = VecDeque::with_capacity(RING_BUFFER_CAPACITY);
-
-        // Buffer used in Idle mode for VAD-based speech detection
-        let mut speech_buffer: Vec<f32> = Vec::new();
-        let mut was_active = false;
-
-        // Fallback wake word detector (Whisper + keyword match)
-        let wake_detector = aios_voice::WakeWordDetector::new(
-            aios_voice::WakeWordConfig::default(),
-        );
-
-        // Track how many samples to skip after KWS trigger
-        let mut post_wake_skip: usize = 0;
-
-        // Try to start recording — may fail in VMs where mic is not available
-        if let Err(e) = capture.start_recording() {
-            warn!("Voice listener: no microphone available: {e}");
-            let _ = stt_tx.send(String::new()); // empty = no error shown
-            // Check if we're in a VM (no mic through SPICE)
-            let is_vm = std::path::Path::new("/sys/class/dmi/id/product_name")
-                .read_dir().is_ok()
-                || std::fs::read_to_string("/sys/class/dmi/id/chassis_type")
-                    .map(|s| s.trim() == "1") // "1" = Other (VM)
-                    .unwrap_or(false);
-            if is_vm {
-                info!("Voice listener: running in VM — microphone not available via SPICE. STT will work on real hardware.");
-            }
-            return;
-        }
-        info!("Voice listener: recording started, waiting for speech...");
-
-        loop {
-            // Check if STT is still enabled (mic toggle)
-            if !stt_enabled.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                continue;
-            }
-
-            // If wake word training is in progress, pause audio processing
-            if wake_training_in_progress.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                continue;
-            }
-
-            // Read accumulated samples from the capture buffer
-            std::thread::sleep(std::time::Duration::from_millis(30));
-
-            let samples = {
-                if let Ok(mut buf) = capture.buffer().lock() {
-                    let s = std::mem::take(&mut *buf);
-                    s
-                } else {
-                    continue;
-                }
-            };
-
-            if samples.is_empty() {
-                audio_level.store(0, std::sync::atomic::Ordering::Relaxed);
-                continue;
-            }
-
-            // Compute RMS energy level for the VU meter (0-100 scale)
-            let rms = {
-                let sum: f32 = samples.iter().map(|s| s * s).sum();
-                (sum / samples.len() as f32).sqrt()
-            };
-            // Map RMS to 0-100: typical speech is 0.02-0.10, scale so 0.05 = ~50
-            let level = ((rms / 0.1) * 100.0).min(100.0) as u32;
-            audio_level.store(level, std::sync::atomic::Ordering::Relaxed);
-
-            let wake_on = wake_enabled.load(std::sync::atomic::Ordering::Relaxed);
-            let has_kws_model = kws_engine.lock()
-                .map(|e| e.as_ref().map(|eng| eng.has_model()).unwrap_or(false))
-                .unwrap_or(false);
-
-            match state {
-                ListenerState::Idle => {
-                    if !wake_on {
-                        // --- Wake disabled: pass all speech directly to Whisper ---
-                        for chunk in samples.chunks(DEFAULT_FRAME_SIZE) {
-                            let is_active = vad.process_frame(chunk);
-
-                            if is_active {
-                                speech_buffer.extend_from_slice(chunk);
-                            } else if was_active && !is_active {
-                                let audio_duration = speech_buffer.len() as f32 / 16000.0;
-                                if audio_duration > 0.5 && audio_duration < 30.0 {
-                                    info!("Voice listener: speech detected ({audio_duration:.1}s), transcribing...");
-                                    match transcribe_with_whisper(&speech_buffer) {
-                                        Ok(text) if !text.is_empty() => {
-                                            info!("Voice listener: transcribed: {}", &text[..text.len().min(50)]);
-                                            let _ = stt_tx.send(text);
-                                        }
-                                        Ok(_) => {
-                                            debug!("Voice listener: empty transcription, ignoring");
-                                        }
-                                        Err(e) => {
-                                            warn!("Voice listener: transcription failed: {e}");
-                                        }
-                                    }
-                                }
-                                speech_buffer.clear();
-                                vad.reset();
-                            }
-                            was_active = is_active;
-                        }
-
-                        // Prevent unbounded buffer growth
-                        if speech_buffer.len() > 16000 * 30 {
-                            warn!("Voice listener: speech buffer too large, clearing");
-                            speech_buffer.clear();
-                            vad.reset();
-                        }
-                    } else if has_kws_model {
-                        // --- KWS path: feed audio to ONNX engine ---
-
-                        // Feed samples into the circular buffer
-                        for &s in &samples {
-                            if ring_buf.len() >= RING_BUFFER_CAPACITY {
-                                ring_buf.pop_front();
-                            }
-                            ring_buf.push_back(s);
-                        }
-
-                        let result = kws_engine.lock()
-                            .map(|mut e| {
-                                e.as_mut()
-                                    .map(|eng| eng.process_audio(&samples))
-                                    .unwrap_or(aios_voice::KwsResult { confidence: 0.0, triggered: false })
-                            })
-                            .unwrap_or(aios_voice::KwsResult { confidence: 0.0, triggered: false });
-
-                        if result.triggered {
-                            info!("Voice listener: KWS triggered (confidence: {:.2})", result.confidence);
-
-                            // Transition to Capture — seed with ring buffer contents
-                            // (skip POST_WAKE_DELAY_SAMPLES from the end to avoid
-                            // capturing the wake word itself)
-                            let buf_vec: Vec<f32> = ring_buf.iter().copied().collect();
-                            let keep = buf_vec.len().saturating_sub(POST_WAKE_DELAY_SAMPLES);
-                            let seed: Vec<f32> = if keep > 0 {
-                                // Keep only pre-trigger audio that is NOT the wake word.
-                                // The last POST_WAKE_DELAY_SAMPLES are the trigger — skip them.
-                                buf_vec[..keep].to_vec()
-                            } else {
-                                Vec::new()
-                            };
-
-                            state = ListenerState::Capture {
-                                command_buffer: seed,
-                                capture_start: std::time::Instant::now(),
-                                silence_start: None,
-                            };
-                            ring_buf.clear();
-                            post_wake_skip = POST_WAKE_DELAY_SAMPLES;
-
-                            // Reset KWS engine to avoid re-triggering
-                            if let Ok(mut e) = kws_engine.lock() {
-                                if let Some(ref mut eng) = *e {
-                                    eng.reset();
-                                }
-                            }
-                            vad.reset();
-                            was_active = false;
-                        }
-                    } else {
-                        // --- Fallback path: Whisper + keyword match ---
-                        // Feed audio through VAD, transcribe speech segments,
-                        // check if transcription contains the wake phrase.
-
-                        // Feed samples into the circular buffer
-                        for &s in &samples {
-                            if ring_buf.len() >= RING_BUFFER_CAPACITY {
-                                ring_buf.pop_front();
-                            }
-                            ring_buf.push_back(s);
-                        }
-
-                        for chunk in samples.chunks(DEFAULT_FRAME_SIZE) {
-                            let is_active = vad.process_frame(chunk);
-
-                            if is_active {
-                                speech_buffer.extend_from_slice(chunk);
-                            } else if was_active && !is_active {
-                                let audio_duration = speech_buffer.len() as f32 / 16000.0;
-                                if audio_duration > 0.3 && audio_duration < 10.0 {
-                                    // Transcribe and check for wake word
-                                    match transcribe_with_whisper(&speech_buffer) {
-                                        Ok(text) if !text.is_empty() => {
-                                            if wake_detector.matches_wake_word(&text) {
-                                                info!("Voice listener: wake word detected via fallback: \"{}\"", &text[..text.len().min(50)]);
-                                                // Transition to Capture
-                                                state = ListenerState::Capture {
-                                                    command_buffer: Vec::new(),
-                                                    capture_start: std::time::Instant::now(),
-                                                    silence_start: None,
-                                                };
-                                                ring_buf.clear();
-                                                speech_buffer.clear();
-                                                vad.reset();
-                                                was_active = false;
-                                                break;
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                                speech_buffer.clear();
-                                vad.reset();
-                            }
-                            was_active = is_active;
-                        }
-
-                        // Prevent unbounded buffer growth
-                        if speech_buffer.len() > 16000 * 30 {
-                            speech_buffer.clear();
-                            vad.reset();
-                        }
-                    }
-                }
-
-                ListenerState::Capture {
-                    ref mut command_buffer,
-                    capture_start,
-                    ref mut silence_start,
-                } => {
-                    // Skip post-wake samples to avoid capturing the trigger phrase
-                    let effective_samples = if post_wake_skip > 0 {
-                        let skip = post_wake_skip.min(samples.len());
-                        post_wake_skip -= skip;
-                        &samples[skip..]
-                    } else {
-                        &samples[..]
-                    };
-
-                    // Process through VAD and accumulate
-                    for chunk in effective_samples.chunks(DEFAULT_FRAME_SIZE) {
-                        let is_active = vad.process_frame(chunk);
-
-                        if is_active {
-                            command_buffer.extend_from_slice(chunk);
-                            *silence_start = None;
-                        } else {
-                            // Still accumulate during short silences (pauses in speech)
-                            command_buffer.extend_from_slice(chunk);
-                            if silence_start.is_none() {
-                                *silence_start = Some(std::time::Instant::now());
-                            }
-                        }
-                    }
-
-                    // Check termination conditions
-                    let elapsed = capture_start.elapsed();
-                    let silence_exceeded = silence_start
-                        .map(|s| s.elapsed() >= CAPTURE_SILENCE_TIMEOUT)
-                        .unwrap_or(false);
-                    let timeout_exceeded = elapsed >= CAPTURE_MAX_DURATION;
-
-                    if silence_exceeded || timeout_exceeded {
-                        let reason = if timeout_exceeded { "timeout" } else { "silence" };
-                        let audio_duration = command_buffer.len() as f32 / 16000.0;
-                        info!("Voice listener: capture ended ({reason}), {audio_duration:.1}s of audio");
-
-                        if audio_duration > 0.3 && !command_buffer.is_empty() {
-                            match transcribe_with_whisper(command_buffer) {
-                                Ok(text) if !text.is_empty() => {
-                                    info!("Voice listener: command transcribed: {}", &text[..text.len().min(50)]);
-                                    let _ = stt_tx.send(text);
-                                }
-                                Ok(_) => {
-                                    debug!("Voice listener: empty command transcription, ignoring");
-                                }
-                                Err(e) => {
-                                    warn!("Voice listener: command transcription failed: {e}");
-                                }
-                            }
-                        }
-
-                        // Return to Idle
-                        state = ListenerState::Idle;
-                        speech_buffer.clear();
-                        vad.reset();
-                        was_active = false;
-                        post_wake_skip = 0;
-                    }
-
-                    // Prevent unbounded buffer growth in capture mode
-                    if let ListenerState::Capture { ref command_buffer, .. } = state {
-                        if command_buffer.len() > 16000 * 30 {
-                            warn!("Voice listener: command buffer too large, forcing transcription");
-                            // Force end of capture on next iteration
-                            // (timeout_exceeded will be true or we set silence_start)
-                        }
-                    }
-                }
-            }
-        }
-    })
-}
-
-/// Transcribe audio samples using whisper-cpp-cli.
-fn transcribe_with_whisper(samples: &[f32]) -> Result<String, String> {
-    // Write samples as WAV to a temp file
-    let tmp_path = "/tmp/aios-stt-input.wav";
-    let sample_rate: u32 = 16000;
-    let num_samples = samples.len() as u32;
-    let data_size = num_samples * 2; // 16-bit samples
-
-    let mut buf: Vec<u8> = Vec::with_capacity(44 + data_size as usize);
-    buf.extend_from_slice(b"RIFF");
-    buf.extend_from_slice(&(36 + data_size).to_le_bytes());
-    buf.extend_from_slice(b"WAVE");
-    buf.extend_from_slice(b"fmt ");
-    buf.extend_from_slice(&16u32.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    buf.extend_from_slice(&1u16.to_le_bytes()); // mono
-    buf.extend_from_slice(&sample_rate.to_le_bytes());
-    buf.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
-    buf.extend_from_slice(&2u16.to_le_bytes()); // block align
-    buf.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    buf.extend_from_slice(b"data");
-    buf.extend_from_slice(&data_size.to_le_bytes());
-
-    for &s in samples {
-        let sample = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        buf.extend_from_slice(&sample.to_le_bytes());
-    }
-
-    std::fs::write(tmp_path, &buf).map_err(|e| format!("Failed to write WAV: {e}"))?;
-
-    // Try whisper-cpp-cli
-    let output = std::process::Command::new("whisper-cpp-cli")
-        .args(["-m", "/home/aios/.aios/models/whisper/ggml-tiny.bin"])
-        .args(["-f", tmp_path])
-        .args(["--no-timestamps", "-nt"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| format!("whisper-cpp-cli not available: {e}"))?;
-
-    let _ = std::fs::remove_file(tmp_path);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("whisper failed: {stderr}"));
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string();
-
-    Ok(text)
-}
-
-/// Stop any running TTS playback immediately.
-fn stop_tts() {
-    std::thread::spawn(|| {
-        let _ = std::process::Command::new("pkill")
-            .args(["-f", "piper"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        let _ = std::process::Command::new("pkill")
-            .args(["-f", "espeak-ng"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        let _ = std::process::Command::new("pkill")
-            .args(["-f", "aplay.*raw"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    });
-}
-
-/// Strip markup and code blocks from text, returning clean plain text.
-fn strip_for_tts(raw: &str) -> (String, u32) {
-    let mut text = String::new();
-    let mut in_code = false;
-    let mut code_block_count = 0u32;
-    for line in raw.lines() {
-        if line.trim_start().starts_with("```") {
-            in_code = !in_code;
-            if !in_code {
-                code_block_count += 1;
-            }
-            continue;
-        }
-        if !in_code {
-            text.push_str(line);
-            text.push('\n');
-        }
-    }
-    let plain = aios_core::types::to_plain(&text);
-    (plain.trim().to_string(), code_block_count)
-}
-
-/// For short responses, return plain text directly.
-/// For long responses, return None — caller should use LLM summary.
-fn prepare_tts_text_short(raw: &str) -> Option<String> {
-    let (plain, code_blocks) = strip_for_tts(raw);
-    if plain.is_empty() {
-        return Some(String::new());
-    }
-
-    let suffix = if code_blocks > 0 {
-        format!(
-            " I also included {} code {}.",
-            code_blocks,
-            if code_blocks == 1 { "block" } else { "blocks" }
-        )
-    } else {
-        String::new()
-    };
-
-    // Short enough to read directly
-    if plain.len() <= 300 {
-        return Some(format!("{plain}{suffix}"));
-    }
-
-    // Long — needs LLM summary
-    None
-}
-
-/// Summarize a long response using Claude Haiku (fast, cheap).
-/// Falls back to sentence truncation if API call fails.
-fn summarize_for_tts(raw: &str, api_key: &str) -> String {
-    let (plain, code_blocks) = strip_for_tts(raw);
-
-    let code_mention = if code_blocks > 0 {
-        format!(" I also included {code_blocks} code {}.", if code_blocks == 1 { "block" } else { "blocks" })
-    } else {
-        String::new()
-    };
-
-    // Try Haiku summarization
-    if !api_key.is_empty() {
-        let body = serde_json::json!({
-            "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 100,
-            "messages": [{
-                "role": "user",
-                "content": format!(
-                    "Summarize the following AI assistant response in exactly ONE short spoken sentence (max 30 words). \
-                     No markdown, no special characters, no asterisks, no hashtags — just plain spoken English. \
-                     End with: The detailed answer is in the chat.\n\n---\n{}",
-                    &plain[..plain.len().min(2000)]
-                )
-            }]
-        });
-
-        let client = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build();
-
-        if let Ok(client) = client {
-            let resp = client
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .body(body.to_string())
-                .send();
-
-            if let Ok(resp) = resp {
-                if let Ok(json) = resp.json::<serde_json::Value>() {
-                    if let Some(text) = json["content"][0]["text"].as_str() {
-                        let summary = text.trim().to_string();
-                        if !summary.is_empty() {
-                            tracing::debug!("TTS summary from Haiku: {summary}");
-                            return format!("{summary}{code_mention}");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Fallback: truncate at sentence boundary
-    let boundary = plain[..plain.len().min(300)]
-        .rfind(|c: char| c == '.' || c == '!' || c == '?')
-        .map(|i| i + 1)
-        .unwrap_or(plain.len().min(300));
-    format!(
-        "{} The detailed answer is in the chat.{code_mention}",
-        &plain[..boundary].trim(),
-    )
-}
-
-/// Speak text using TTS if enabled.
-///
-/// Runs in a background thread so it doesn't block the GTK main loop.
-/// For long responses, uses Claude Haiku to generate a one-sentence summary.
-fn speak_if_enabled(text: &str, config: &ConfigManager) {
-    speak_if_enabled_with_signal(text, config, None);
-}
-
-/// Speak the response text via TTS if enabled.
-///
-/// If `tts_started` is provided, the flag is set to `true` when the TTS
-/// audio actually begins playing (not when summarization finishes). This
-/// keeps the "thinking" indicator visible until the voice starts.
-fn speak_if_enabled_with_signal(
-    text: &str,
-    config: &ConfigManager,
-    tts_started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) {
-    let tts_enabled = config.get_bool("voice.tts_enabled", true);
-    if !tts_enabled {
-        // Signal immediately if TTS is off — caller should remove thinking now
-        if let Some(flag) = tts_started {
-            flag.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        return;
-    }
-
-    // Short responses: speak directly (no LLM call needed)
-    if let Some(short) = prepare_tts_text_short(text) {
-        if short.is_empty() {
-            if let Some(flag) = tts_started {
-                flag.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-            return;
-        }
-        let speak_text = short;
-        std::thread::spawn(move || {
-            do_tts_with_signal(&speak_text, tts_started);
-        });
-        return;
-    }
-
-    // Long responses: summarize with Haiku in background thread
-    let raw = text.to_string();
-    let api_key = config.get_str("llm.claude_api_key", "");
-    std::thread::spawn(move || {
-        let speak_text = summarize_for_tts(&raw, &api_key);
-        do_tts_with_signal(&speak_text, tts_started);
-    });
-}
-
-/// Perform TTS with an optional signal that fires when audio starts playing.
-///
-/// The signal flag is set right when the audio playback process (`aplay` or
-/// `espeak-ng`) is spawned — not when summarization finishes. This ensures
-/// the thinking placeholder stays visible until the voice actually begins.
-fn do_tts_with_signal(
-    speak_text: &str,
-    tts_started: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
-) {
-    let signal = |flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>| {
-        if let Some(f) = flag {
-            f.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    };
-
-    // Try Piper first (high-quality, natural sounding voice)
-    let piper_model = "/home/aios/.aios/models/piper/en_US-amy-medium.onnx";
-    if std::path::Path::new(piper_model).exists() {
-        let mut child = match std::process::Command::new("piper")
-            .args(["--model", piper_model, "--output_raw"])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => {
-                // Piper not available, fall through to espeak
-                signal(&tts_started);
-                let _ = std::process::Command::new("espeak-ng")
-                    .args(["-v", "en", "-s", "170"])
-                    .arg(speak_text)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                return;
-            }
-        };
-
-        // Write text to piper's stdin
-        if let Some(mut stdin) = child.stdin.take() {
-            use std::io::Write;
-            let _ = stdin.write_all(speak_text.as_bytes());
-            drop(stdin); // Close stdin to signal EOF
-        }
-
-        // Pipe piper's raw audio output to aplay — signal when aplay starts
-        if let Some(stdout) = child.stdout.take() {
-            signal(&tts_started); // Voice is about to start!
-            let _ = std::process::Command::new("aplay")
-                .args(["-r", "22050", "-f", "S16_LE", "-t", "raw", "-c", "1"])
-                .stdin(stdout)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        } else {
-            signal(&tts_started);
-        }
-        let _ = child.wait();
-        return;
-    }
-
-    // Fallback: espeak-ng — signal right before it speaks
-    signal(&tts_started);
-    let _ = std::process::Command::new("espeak-ng")
-        .args(["-v", "en", "-s", "170"])
-        .arg(speak_text)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-/// Actually perform TTS (called from background thread, no signal).
-fn do_tts(speak_text: &str) {
-    do_tts_with_signal(speak_text, None);
-}
 
 /// Application-level state shared across signal handlers.
 ///
 /// Wrapped in `Rc<RefCell<...>>` for the GTK main-thread parts, and
 /// `Arc<tokio::sync::Mutex<...>>` for anything shared with the Tokio runtime.
 pub struct AiosApp {
-    config: ConfigManager,
-    llm: Arc<tokio::sync::Mutex<LlmManager>>,
+    pub(crate) config: ConfigManager,
+    pub(crate) llm: Arc<tokio::sync::Mutex<LlmManager>>,
     #[allow(dead_code)]
-    tools: ToolRegistry,
-    conversation: Vec<aios_core::types::Message>,
-    rt: tokio::runtime::Handle,
+    pub(crate) tools: ToolRegistry,
+    pub(crate) conversation: Vec<aios_core::types::Message>,
+    pub(crate) rt: tokio::runtime::Handle,
+    /// Persistent message queue (SQLite-backed).
+    pub(crate) queue: Option<SharedQueue>,
     /// KWS engine for wake word detection (None if infrastructure models missing).
-    kws_engine: Option<std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>>>,
+    pub(crate) kws_engine: Option<Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>>>,
     /// Flag: wake word training is currently in progress.
-    wake_training_in_progress: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) wake_training_in_progress: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Flag: wake word detection is enabled.
-    wake_enabled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) wake_enabled: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Directory containing KWS models.
-    kws_models_dir: std::path::PathBuf,
+    pub(crate) kws_models_dir: std::path::PathBuf,
 }
 
 impl AiosApp {
+    /// Create a new AiosApp with the given subsystems.
+    pub(crate) fn new(
+        config: ConfigManager,
+        llm: LlmManager,
+        tools: ToolRegistry,
+        rt: tokio::runtime::Handle,
+        queue: Option<SharedQueue>,
+    ) -> Self {
+        Self {
+            config,
+            llm: Arc::new(tokio::sync::Mutex::new(llm)),
+            tools,
+            conversation: Vec::new(),
+            rt,
+            queue,
+            kws_engine: None,
+            wake_training_in_progress: None,
+            wake_enabled: None,
+            kws_models_dir: std::path::PathBuf::new(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Entry point
+    // -----------------------------------------------------------------------
+
     /// Called from `Application::connect_activate`. Builds the entire UI and
     /// wires up signals.
     pub fn activate(app: &adw::Application, rt: tokio::runtime::Handle) {
-        // Apply dark theme IMMEDIATELY — before any window is created.
-        // This prevents a visible flash from light (system default) to dark.
+        // Apply dark theme IMMEDIATELY -- before any window is created.
         {
             let theme = ConfigManager::new()
                 .map(|c| c.get_str("ui.theme", "dark"))
@@ -751,1690 +113,226 @@ impl AiosApp {
             Self::apply_theme(&theme);
         }
 
+        // Initialize the persistent message queue (SQLite).
+        let queue_path = ConfigManager::default_config_dir().join("messages.db");
+        let queue = aios_core::queue::MessageQueue::open(&queue_path).unwrap_or_else(|e| {
+            warn!("Failed to open message queue: {e}, using in-memory fallback");
+            aios_core::queue::MessageQueue::open_in_memory()
+                .expect("Failed to create in-memory message queue")
+        });
+        let queue: SharedQueue = Arc::new(std::sync::Mutex::new(queue));
+        info!("Message queue initialized at {:?}", queue_path);
+
         // Check if the vault exists. If not, run the first-boot setup.
         let vault_path = ConfigManager::default_config_dir().join("vault.enc");
         let vault = Vault::new(vault_path);
 
         if !vault.exists() {
-            // Check for autoconfig — if found, apply it and skip the wizard.
             if let Some(auto) = aios_core::config::autoconfig::load_autoconfig() {
-                info!("Autoconfig found — applying unattended setup");
-                Self::apply_autoconfig(app, rt, auto);
+                info!("Autoconfig found -- applying unattended setup");
+                first_boot_flow::apply_autoconfig(app, rt, auto, queue);
                 return;
             }
-            info!("No vault found — launching first-boot setup conversation");
-            Self::run_first_boot_setup(app, rt);
+            info!("No vault found -- launching first-boot setup conversation");
+            first_boot_flow::run_first_boot_setup(app, rt, queue);
             return;
         }
 
-        // Vault exists — proceed with normal startup.
-        Self::activate_main(app, rt);
+        // Vault exists -- proceed with normal startup.
+        Self::activate_main(app, rt, queue);
     }
 
-    /// Run the first-boot setup as a conversation in the main chat view.
-    ///
-    /// Builds the normal main window (fullscreen) but starts a
-    /// [`SetupConversation`] that drives setup cards through the chat view.
-    /// Once setup completes, the vault is created, secrets are stored, the
-    /// LLM manager is configured, and normal chat mode begins.
-    ///
-    /// **Channel restriction**: First-boot setup can only happen on the
-    /// Desktop (GTK) or Web channel. Remote channels (Signal, Voice, etc.)
-    /// are not started until `activate_main()`, which runs *after* the vault
-    /// has been created. This means the setup wizard is never reachable from
-    /// remote channels — by the time they are online, the vault already
-    /// exists and `activate()` takes the normal startup path.
-    fn run_first_boot_setup(app: &adw::Application, rt: tokio::runtime::Handle) {
-        // Build the main UI — same window as normal mode.
-        let chat_view = ChatView::new();
-        let prompt_input = PromptInput::new();
-        let channel_overlay = ChannelOverlay::new();
+    // -----------------------------------------------------------------------
+    // Normal startup
+    // -----------------------------------------------------------------------
 
-        // Load config and create channel infrastructure for setup mode.
-        let mut config = match ConfigManager::new() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to load config for first-boot, using defaults: {e}");
-                match ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json")) {
-                    Ok(c) => c,
-                    Err(e2) => {
-                        error!("Fallback config also failed: {e2}");
-                        panic!("Cannot initialize configuration from any path");
-                    }
-                }
-            }
-        };
+    /// Normal application startup -- builds the UI and wires up all signals.
+    fn activate_main(app: &adw::Application, rt: tokio::runtime::Handle, queue: SharedQueue) {
+        let mut config = first_boot_flow::load_config();
+        first_boot_flow::init_i18n(&config);
 
-        // Initialize i18n system.
-        aios_core::i18n::init();
-        let lang = config.get_str("assistant.language", "");
-        if lang.is_empty() {
-            let detected = aios_core::i18n::detect_system_language();
-            aios_core::i18n::set_language(&detected);
-        } else {
-            aios_core::i18n::set_language(&lang);
-        }
-
-        let mw = main_window::build_main_window(app, &chat_view, &prompt_input, &channel_overlay, &[&t("setup.window_title")]);
-        let window = mw.window;
-        let vu_meter_ref = mw.vu_meter;
-
-        // Hide the prompt input during setup — it will be shown in transition_to_normal_mode.
-        prompt_input.widget().set_visible(false);
-
-        // Apply assistant display name from config.
-        let assistant_name = config.get_str("assistant.name", "Assistant");
-        crate::ui::chat_view::set_assistant_display_name(&assistant_name);
-
-        // Create the shared AppRuntime for multi-channel orchestration.
-        let runtime = aios_core::channel::AppRuntime::new();
-
-        // Register Desktop channel (always available).
-        runtime.switcher.register_channel(
-            aios_core::channel::ChannelKind::Desktop,
-            aios_core::channel::ChannelContext::desktop(),
-        );
-
-        // Build boot status text for setup mode.
-        let boot_status_text = {
-            use aios_core::types::{BootStatus, StatusLine};
-            let mut status = BootStatus::new();
-
-            status.add(StatusLine::new(&t("boot.status.desktop"), true, "GTK4/libadwaita"));
-
-            let web_enabled = config.get_bool("channels.web.enabled", true);
-            let web_port = config.get_str("channels.web.port", "80");
-            if web_enabled {
-                status.add(StatusLine::new(&t("boot.status.web_channel"), true, format!("http://aios.local:{web_port}")));
-            } else {
-                status.add(StatusLine::new(&t("boot.status.web_channel"), false, &t("boot.status.disabled_web")));
-            }
-
-            // Check audio
-            let has_piper = std::path::Path::new("/usr/bin/piper").exists();
-            let has_espeak = std::path::Path::new("/usr/bin/espeak-ng").exists();
-            let has_whisper = std::path::Path::new("/usr/bin/whisper-cpp-cli").exists();
-            let tts_backend = if has_piper { "Piper" } else if has_espeak { "espeak-ng" } else { "none" };
-            status.add(StatusLine::new(&t("boot.status.audio_output"), has_piper || has_espeak, tts_backend));
-            let stt_backend = if has_whisper { "Whisper".to_string() } else { t("boot.status.not_installed") };
-            status.add(StatusLine::new(&t("boot.status.audio_input"), has_whisper, &stt_backend));
-
-            // System info
-            let kb = config.get_str("system.keyboard_layout", "us");
-            let tz = std::fs::read_to_string("/etc/timezone")
-                .unwrap_or_else(|_| "UTC".into()).trim().to_string();
-            let boot_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            status.add(StatusLine::new(&t("boot.status.keyboard"), true, kb));
-            status.add(StatusLine::new(&t("boot.status.timezone"), true, &tz));
-            status.add(StatusLine::new(&t("boot.status.boot_time"), true, boot_time));
-
-            status.format()
-        };
-
-        // Start the web server so the setup wizard is also available via browser.
-        // Enter the Tokio runtime context — server.start() uses tokio::spawn().
-        let _guard = rt.enter();
-        let _web_server = Self::start_web_server(
-            &mut config,
-            &runtime,
-            Some(boot_status_text.clone()),
-        );
-
-        // Show boot status on Desktop.
-        chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
-
-        // Apply theme from config at startup.
-        {
-            let theme = config.get_str("ui.theme", "dark");
-            Self::apply_theme(&theme);
-        }
-
-        // Check for hostname collision (set by aios-hostname-check.service at boot).
-        if std::path::Path::new("/tmp/aios-name-conflict").exists() {
-            if let Ok(conflicting) = std::fs::read_to_string("/tmp/aios-name-conflict") {
-                let conflicting = conflicting.trim().to_string();
-                let random_suffix = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos() % 10000) as u16;
-                let suggestion = format!("{conflicting}-{random_suffix}");
-
-                chat_view.add_level_message(
-                    aios_core::types::MessageLevel::Warning,
-                    &t_fmt("hostname.conflict.warning", &[("name", &conflicting)]),
-                );
-
-                // Show rename card
-                let input_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-                input_box.set_margin_top(8);
-
-                let entry = gtk4::Entry::builder()
-                    .placeholder_text(&t("hostname.conflict.placeholder"))
-                    .text(&suggestion)
-                    .hexpand(true)
-                    .build();
-                input_box.append(&entry);
-
-                let hint = gtk4::Label::new(Some(&t("hostname.conflict.hint")));
-                hint.add_css_class("dim-label");
-                hint.set_halign(gtk4::Align::Start);
-                hint.set_wrap(true);
-                input_box.append(&hint);
-
-                let error_label = gtk4::Label::new(None);
-                error_label.add_css_class("error");
-                error_label.set_visible(false);
-                error_label.set_halign(gtk4::Align::Start);
-                input_box.append(&error_label);
-
-                let apply_btn = gtk4::Button::with_label(&t("hostname.conflict.apply"));
-                apply_btn.add_css_class("suggested-action");
-                apply_btn.set_halign(gtk4::Align::Start);
-                apply_btn.set_margin_top(4);
-                input_box.append(&apply_btn);
-
-                let entry_ref = entry.clone();
-                let error_ref = error_label.clone();
-                let chat_ref = chat_view.clone();
-                apply_btn.connect_clicked(move |b| {
-                    let name = entry_ref.text().to_string().trim().to_lowercase();
-
-                    // Validate: lowercase alphanumeric + hyphens, 1-63 chars, no leading/trailing hyphens
-                    let valid = !name.is_empty()
-                        && name.len() <= 63
-                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                        && !name.starts_with('-')
-                        && !name.ends_with('-');
-
-                    if !valid {
-                        error_ref.set_text(&t("hostname.conflict.error_invalid"));
-                        error_ref.set_visible(true);
-                        return;
-                    }
-
-                    b.set_sensitive(false);
-                    error_ref.set_visible(false);
-
-                    // Apply hostname change
-                    let _ = std::process::Command::new("sudo")
-                        .args(["hostnamectl", "set-hostname", &name])
-                        .status();
-                    let _ = std::process::Command::new("sudo")
-                        .args(["systemctl", "restart", "avahi-daemon"])
-                        .status();
-
-                    // Update config
-                    if let Ok(mut cfg) = aios_core::config::ConfigManager::new() {
-                        let _ = cfg.set("system.machine_name", serde_json::json!(name));
-                    }
-
-                    chat_ref.add_message("system", &t_fmt("hostname.conflict.changed", &[("name", &name)]));
-                    let _ = std::fs::remove_file("/tmp/aios-name-conflict");
-                });
-
-                chat_view.add_setup_card(
-                    "network-server-symbolic",
-                    &t("hostname.conflict.title"),
-                    &t_fmt("hostname.conflict.description", &[("name", &conflicting)]),
-                    Some(input_box.upcast_ref()),
-                );
-            }
-        }
-
-        // Create the setup conversation with config for pre-filling API keys.
-        let setup = SetupConversation::new(chat_view.clone(), Some(config));
-
-        // On completion: create vault, store secrets, transition to normal mode.
-        let app_ref = app.clone();
-        let rt_ref = rt.clone();
-        let chat_view_ref = chat_view.clone();
-        let prompt_ref = prompt_input.clone();
-        let window_ref = window.clone();
-        let vu_meter_for_transition = vu_meter_ref.clone();
-        setup.on_complete(move |result| {
-            info!(
-                "First-boot setup complete: {} provider(s) configured",
-                result.providers.len()
-            );
-
-            // Create the vault and store the API keys.
-            let vault_path = ConfigManager::default_config_dir().join("vault.enc");
-            let mut vault = Vault::new(vault_path);
-
-            if let Err(e) = vault.create(&result.master_password) {
-                warn!("Failed to create vault: {e}");
-                // Continue anyway — the user can set keys later.
-            } else {
-                for provider in &result.providers {
-                    let key_name = format!("{}_api_key", provider.name);
-                    let label = match provider.name.as_str() {
-                        "claude" => "Claude API Key",
-                        "openai" => "OpenAI API Key",
-                        other => other,
-                    };
-                    let entry = SecretEntry {
-                        kind: SecretKind::ApiKey,
-                        value: provider.api_key.clone(),
-                        label: label.to_string(),
-                        created: chrono::Utc::now(),
-                        last_accessed: None,
-                    };
-                    if let Err(e) = vault.set(&key_name, entry) {
-                        warn!("Failed to store {key_name} in vault: {e}");
-                    }
-                }
-                info!("Vault created with {} secret(s)", result.providers.len());
-            }
-
-            // Store provider/key info in the config so the LLM manager
-            // can pick them up immediately.
-            if let Ok(mut config) = ConfigManager::new() {
-                if let Some(primary) = result.providers.first() {
-                    let _ = config.set(
-                        "llm.provider",
-                        serde_json::json!(primary.name),
-                    );
-                }
-                for p in &result.providers {
-                    match p.name.as_str() {
-                        "claude" => {
-                            let _ = config.set(
-                                "llm.claude_api_key",
-                                serde_json::json!(p.api_key),
-                            );
-                        }
-                        "openai" => {
-                            let _ = config.set(
-                                "llm.openai_api_key",
-                                serde_json::json!(p.api_key),
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Save assistant identity
-                let _ = config.set("assistant.name", serde_json::json!(result.assistant_name));
-                let _ = config.set("voice.wake_word", serde_json::json!(result.wake_word));
-                let _ = config.set("system.machine_name", serde_json::json!(result.machine_name));
-
-                // Determine wake word source: pretrained model or custom training
-                let normalized = result.wake_word.to_lowercase().replace(' ', "_");
-                let pretrained_ids = ["hey_assistant", "hey_jarvis", "computer", "ok_computer",
-                    "hey_friday", "jarvis", "ok_jarvis", "skynet", "terminator",
-                    "hey_house", "ok_home", "home_assistant", "mr_anderson", "mr_smith",
-                    "hey_dick_head", "oi_fuckwhit", "yo_homie"];
-                if pretrained_ids.contains(&normalized.as_str()) {
-                    let _ = config.set("voice.wake_word_source", serde_json::json!("pretrained"));
-                } else {
-                    let _ = config.set("voice.wake_word_source", serde_json::json!("training"));
-                }
-            }
-
-            // Apply country-derived settings to the live or installed system.
-            if let Some(ref country) = result.country {
-                let _ = std::process::Command::new("sudo")
-                    .args(["localectl", "set-x11-keymap", country.keyboard])
-                    .status();
-                let _ = std::process::Command::new("sudo")
-                    .args(["timedatectl", "set-timezone", country.timezone])
-                    .status();
-
-                if let Ok(mut cfg) = ConfigManager::new() {
-                    let _ = cfg.set("system.keyboard_layout", serde_json::json!(country.keyboard));
-                    let _ = cfg.set("system.timezone", serde_json::json!(country.timezone));
-                    let _ = cfg.set("system.language", serde_json::json!(country.language));
-                    let _ = cfg.set("system.time_format_24h", serde_json::json!(country.time_format_24h));
-                }
-            }
-
-            // Update SSH password from default 'aios' to the master password.
-            let _ = std::process::Command::new("sudo")
-                .args(["chpasswd"])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .and_then(|mut child| {
-                    if let Some(mut stdin) = child.stdin.take() {
-                        use std::io::Write;
-                        let _ = stdin.write_all(format!("aios:{}\n", result.master_password).as_bytes());
-                    }
-                    child.wait()
-                });
-
-            // Update display name
-            crate::ui::chat_view::set_assistant_display_name(&result.assistant_name);
-
-            // Update system hostname
-            let _ = std::process::Command::new("sudo")
-                .args(["hostnamectl", "set-hostname", &result.machine_name])
-                .status();
-            let _ = std::process::Command::new("sudo")
-                .args(["systemctl", "restart", "avahi-daemon"])
-                .status();
-
-            // If installation to hard drive was done, the reboot dialog is
-            // already showing — do not transition to normal mode.
-            if result.installed_to_drive {
-                info!("Installation completed — reboot dialog is showing, skipping normal mode transition");
-                return;
-            }
-
-            // Transition to normal mode: initialize LLM, wire up the real
-            // prompt handler, and show the ready message.
-            Self::transition_to_normal_mode(
-                &app_ref,
-                rt_ref.clone(),
-                &chat_view_ref,
-                &prompt_ref,
-                &window_ref,
-                Some(vu_meter_for_transition.clone()),
-            );
-        });
-
-        // During setup, the prompt input feeds into the setup conversation
-        // as voice-like text input (for steps that accept it).
-        let setup_ref = setup.clone();
-        prompt_input.on_submit(move |text| {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                return;
-            }
-            if setup_ref.is_active() {
-                setup_ref.on_voice_input(&text);
-            }
-        });
-
-        // Start the conversation.
-        setup.start();
-
-        window.present();
-    }
-
-    /// After first-boot setup completes, configure the app for normal chat mode.
-    ///
-    /// This initializes the LLM manager, creates the shared application state,
-    /// and re-wires the prompt input for real chat.
-    fn transition_to_normal_mode(
-        _app: &adw::Application,
-        rt: tokio::runtime::Handle,
-        chat_view: &ChatView,
-        prompt_input: &PromptInput,
-        window: &adw::ApplicationWindow,
-        vu_meter_widget: Option<gtk4::LevelBar>,
-    ) {
-        // Load configuration (now includes the keys we just stored).
-        let config = match ConfigManager::new() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to load config, using defaults: {e}");
-                match ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json")) {
-                    Ok(c) => c,
-                    Err(e2) => {
-                        error!("Fallback config also failed: {e2}");
-                        panic!("Cannot initialize configuration from any path");
-                    }
-                }
-            }
-        };
-
-        // Initialize tool registry.
+        // Initialize tools and LLM.
         let mut tools = ToolRegistry::new();
         tools.load_builtins();
+        tools.register_queue_tools(queue.clone());
         info!("Loaded {} built-in tools", tools.len());
 
-        // Initialize LLM providers.
         let mut llm = LlmManager::new();
         Self::init_llm(&config, &mut llm);
 
-        // Create a UiPanelTool with the GTK panel renderer callback.
-        let ui_panel_tool = Self::create_ui_panel_tool(window);
-
-        // Wire tool executor into LLM manager.
-        let tool_registry = Arc::new(std::sync::Mutex::new(ToolRegistry::new()));
-        {
-            let mut tr = tool_registry.lock().unwrap();
-            tr.load_builtins();
-            // Replace the callback-less builtin with the GTK-wired one.
-            let _ = tr.unregister("ui_panel");
-            let _ = tr.register(Box::new(UiPanelToolWrapper(ui_panel_tool.clone())));
-        }
-        let tr_for_executor = tool_registry.clone();
-        llm.set_tool_executor(Arc::new(move |name, args, channel| {
-            let registry = tr_for_executor.lock().unwrap();
-            let result = registry.execute_on_channel(&name, args, &channel);
-            if result.success {
-                result.output
-            } else {
-                format!("Tool error: {}", result.output)
-            }
-        }));
-
-        // Collect configured providers before config is moved into the state.
-        let configured_providers: Vec<&str> = {
-            let mut providers = Vec::new();
-            if !config.get_str("llm.claude_api_key", "").is_empty() {
-                providers.push("Claude");
-            }
-            let openai_key = config.get_str("llm.openai_api_key", "");
-            if !openai_key.is_empty() && openai_key != "your-api-key-here" {
-                providers.push("ChatGPT");
-            }
-            providers
-        };
-
-        // Create shared application state.
-        let state = Rc::new(RefCell::new(AiosApp {
-            config,
-            llm: Arc::new(tokio::sync::Mutex::new(llm)),
-            tools,
-            conversation: Vec::new(),
-            rt,
-            kws_engine: None,
-            wake_training_in_progress: None,
-            wake_enabled: None,
-            kws_models_dir: std::path::PathBuf::new(),
-        }));
-
-        // Show the transition message.
-        chat_view.add_message(
-            "system",
-            &t("setup.transition"),
-        );
-
-        // Show the settings button (hidden during setup).
-        main_window::set_settings_button_visible(window, true);
-
-        // Show the prompt input (hidden during setup).
-        prompt_input.widget().set_visible(true);
-
-        // Update the provider dropdown to show only configured providers.
-        main_window::update_provider_dropdown(window, &configured_providers);
-
-        // --- Connect signals ---
-
-        // Provider dropdown changed.
-        let state_ref = state.clone();
-        let chat_view_ref = chat_view.clone();
-        main_window::connect_provider_dropdown(window, move |provider_name| {
-            let mut s = state_ref.borrow_mut();
-            let name = match provider_name {
-                "ChatGPT" | "chatgpt" => "openai".to_string(),
-                other => other.to_lowercase(),
-            };
-            let _ = s.config.set("llm.provider", serde_json::json!(name));
-            if let Ok(mut llm) = s.llm.try_lock() {
-                if llm.set_active(&name).is_err() {
-                    chat_view_ref
-                        .add_message("system", &format!("Provider '{name}' not available"));
-                } else {
-                    chat_view_ref.add_message("system", &format!("Switched to {name}"));
-                }
-            }
-        });
-
-        // Settings button.
-        let state_ref = state.clone();
-        let win_ref = window.clone();
-        main_window::connect_settings_button(window, move || {
-            let s = state_ref.borrow();
-            settings_dialog::show_settings(&win_ref, &s.config);
-        });
-
-        // Mic toggle.
-        let state_ref = state.clone();
-        main_window::connect_mic_toggle(window, move |active| {
-            let mut s = state_ref.borrow_mut();
-            let _ = s.config.set("voice.stt_enabled", serde_json::json!(active));
-            info!("Mic toggled: {active}");
-        });
-
-        // Speaker toggle.
-        let state_ref = state.clone();
-        main_window::connect_speaker_toggle(window, move |active| {
-            let mut s = state_ref.borrow_mut();
-            let _ = s.config.set("voice.tts_enabled", serde_json::json!(active));
-            if !active {
-                stop_tts();
-            }
-            info!("Speaker toggled: {active}");
-        });
-
-        // Re-wire message submission for normal chat mode.
-        let state_ref = state.clone();
-        let chat_view_ref = chat_view.clone();
-        let prompt_ref = prompt_input.clone();
-        prompt_input.on_submit(move |text| {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                return;
-            }
-
-            // Check if it's a slash command.
-            if text.starts_with('/') {
-                Self::handle_command(&state_ref, &chat_view_ref, &text);
-                return;
-            }
-
-            // Display the user message immediately.
-            chat_view_ref.add_message("user", &text);
-
-            // Force immediate redraw before the async LLM call begins.
-            while gtk4::glib::MainContext::default().iteration(false) {}
-
-            // Send to LLM asynchronously.
-            Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
-        });
-
-        // --- Voice listener + VU meter ---
-        // This block is wrapped defensively — if KWS/voice init fails for any
-        // reason (missing libonnxruntime, audio device issues, etc.), the chat
-        // UI still works. Voice is a nice-to-have, not a hard dependency.
-        let stt_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-            state.borrow().config.get_bool("voice.stt_enabled", true),
-        ));
-        let stt_flag = stt_enabled.clone();
-        let state_ref = state.clone();
-        // Re-connect mic toggle to actually control the STT flag
-        main_window::connect_mic_toggle(window, move |active| {
-            let mut s = state_ref.borrow_mut();
-            let _ = s.config.set("voice.stt_enabled", serde_json::json!(active));
-            stt_flag.store(active, std::sync::atomic::Ordering::Relaxed);
-            info!("Mic toggled (voice): {active}");
-        });
-
-        let wake_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-            state.borrow().config.get_bool("voice.wake_enabled", true),
-        ));
-        let wake_training = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        // KWS engine (best-effort — None if models not found)
-        let kws_models_dir = aios_core::config::ConfigManager::default_config_dir().join("models/kws");
-        let kws_engine: std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> = {
-            match aios_voice::KwsEngine::new(&kws_models_dir) {
-                Ok(engine) => {
-                    info!("KWS engine initialized in transition mode");
-                    std::sync::Arc::new(std::sync::Mutex::new(Some(engine)))
-                }
-                Err(e) => {
-                    info!("KWS engine not available: {e} — using fallback");
-                    std::sync::Arc::new(std::sync::Mutex::new(None))
-                }
-            }
-        };
-
-        let audio_level = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
-        let _voice_handle = start_voice_listener(
-            stt_tx,
-            stt_enabled,
-            wake_enabled,
-            wake_training,
-            kws_engine,
-            audio_level.clone(),
-        );
-
-        // VU meter polling
-        if let Some(vu) = vu_meter_widget {
-            let vu_level = audio_level.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                let level = vu_level.load(std::sync::atomic::Ordering::Relaxed);
-                vu.set_value(level as f64 / 5.0);
-                glib::ControlFlow::Continue
-            });
-        }
-
-        // Poll for transcribed text from the voice listener
-        let state_ref = state.clone();
-        let chat_view_ref = chat_view.clone();
-        let prompt_ref = prompt_input.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            while let Ok(text) = stt_rx.try_recv() {
-                let text = text.trim().to_string();
-                if text.is_empty() {
-                    continue;
-                }
-                info!("STT transcription received: {}", &text[..text.len().min(50)]);
-                chat_view_ref.add_message("user", &format!("\u{1f3a4} {text}"));
-                Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
-            }
-            glib::ControlFlow::Continue
-        });
-    }
-
-    /// Apply autoconfig — show status, create vault, store keys, configure system, then boot normally.
-    fn apply_autoconfig(
-        app: &adw::Application,
-        rt: tokio::runtime::Handle,
-        auto: aios_core::config::autoconfig::AutoConfig,
-    ) {
-        use aios_core::secure::{SecretEntry, SecretKind, Vault};
-        use aios_core::types::MessageLevel;
-
-        // Build the UI so we can show status messages.
+        // Build the UI.
         let chat_view = ChatView::new();
         let prompt_input = PromptInput::new();
         let channel_overlay = ChannelOverlay::new();
 
-        let mut config = ConfigManager::new().unwrap_or_else(|e| {
-            warn!("Config load failed: {e}");
-            ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json")).unwrap()
-        });
-
-        aios_core::i18n::init();
-        aios_core::i18n::set_language(&auto.system.language);
+        let available_providers = Self::available_providers(&config);
+        let provider_refs: Vec<&str> = available_providers.iter().map(|s| s.as_str()).collect();
 
         let mw = main_window::build_main_window(
-            app, &chat_view, &prompt_input, &channel_overlay, &["AiOS"],
-        );
-        let window = mw.window;
-        let vu_meter_autoconfig = mw.vu_meter;
-        prompt_input.widget().set_visible(false);
-
-        // Show boot status.
-        let boot_status = {
-            use aios_core::types::{BootStatus, StatusLine};
-            let mut status = BootStatus::new();
-            status.add(StatusLine::new("Desktop", true, "GTK4/libadwaita"));
-            status.add(StatusLine::new("LLM Provider", true, &auto.provider.primary));
-            status.add(StatusLine::new("Keyboard", true, &auto.system.keyboard));
-            status
-        };
-        chat_view.add_level_message(MessageLevel::Info, &boot_status.format());
-
-        // Show autoconfig detection message with masked values.
-        let mask = |s: &str| -> String {
-            if s.is_empty() { "(empty)".to_string() }
-            else if s.len() <= 8 { "****".to_string() }
-            else { format!("{}****{}", &s[..4], &s[s.len()-4..]) }
-        };
-
-        let autoconfig_msg = format!(
-            "**Autoconfig detected** — applying unattended configuration:\n\n\
-             **Provider:** {}\n\
-             **Claude API Key:** {}\n\
-             **OpenAI API Key:** {}\n\
-             **Keyboard:** {}\n\
-             **Language:** {}\n\
-             **Timezone:** {}\n\
-             **Hostname:** {}\n\
-             **Password:** ****\n\
-             **Install to disk:** {}\n\
-             **Assistant name:** {}",
-            auto.provider.primary,
-            mask(&auto.provider.claude_api_key),
-            mask(&auto.provider.openai_api_key),
-            auto.system.keyboard,
-            auto.system.language,
-            if auto.system.timezone.is_empty() { "auto" } else { &auto.system.timezone },
-            auto.system.hostname,
-            if auto.install.enabled { "yes" } else { "no (live mode)" },
-            auto.assistant.name,
-        );
-        chat_view.add_level_message(MessageLevel::Info, &autoconfig_msg);
-
-        // 1. Create vault.
-        let vault_path = ConfigManager::default_config_dir().join("vault.enc");
-        let mut vault = Vault::new(vault_path);
-        if let Err(e) = vault.create(&auto.system.master_password) {
-            error!("Autoconfig: failed to create vault: {e}");
-            chat_view.add_level_message(
-                MessageLevel::Error,
-                &format!("Autoconfig failed: {e}\nFalling back to interactive setup."),
-            );
-            window.present();
-            return;
-        }
-
-        // 2. Store API keys.
-        if !auto.provider.claude_api_key.is_empty() {
-            let entry = SecretEntry {
-                kind: SecretKind::ApiKey,
-                value: auto.provider.claude_api_key.clone(),
-                label: "Claude API Key".to_string(),
-                created: chrono::Utc::now(),
-                last_accessed: None,
-            };
-            let _ = vault.set("claude_api_key", entry);
-        }
-        if !auto.provider.openai_api_key.is_empty() {
-            let entry = SecretEntry {
-                kind: SecretKind::ApiKey,
-                value: auto.provider.openai_api_key.clone(),
-                label: "OpenAI API Key".to_string(),
-                created: chrono::Utc::now(),
-                last_accessed: None,
-            };
-            let _ = vault.set("openai_api_key", entry);
-        }
-
-        // 3. Write config.
-        let _ = config.set("llm.claude_api_key", serde_json::json!(auto.provider.claude_api_key));
-        let _ = config.set("llm.openai_api_key", serde_json::json!(auto.provider.openai_api_key));
-        let _ = config.set("assistant.name", serde_json::json!(auto.assistant.name));
-        let _ = config.set("assistant.language", serde_json::json!(auto.system.language));
-        let _ = config.set("llm.effort", serde_json::json!(auto.assistant.effort));
-
-        // 4. Show success message.
-        chat_view.add_level_message(
-            MessageLevel::Success,
-            &format!(
-                "**Autoconfig applied successfully!**\n\n\
-                 Vault created, API keys stored, system configured.\n\
-                 Provider: **{}** | Keyboard: **{}** | Mode: **{}**",
-                auto.provider.primary,
-                auto.system.keyboard,
-                if auto.install.enabled { "hard drive install" } else { "live ISO" },
-            ),
-        );
-
-        info!("Autoconfig applied — transitioning to normal mode");
-
-        // 5. Transition to normal chat mode.
-        let app_clone = app.clone();
-        let chat_view_clone = chat_view.clone();
-        let prompt_clone = prompt_input.clone();
-        let window_clone = window.clone();
-        gtk4::glib::idle_add_local_once(move || {
-            Self::transition_to_normal_mode(
-                &app_clone, rt, &chat_view_clone, &prompt_clone, &window_clone,
-                Some(vu_meter_autoconfig),
-            );
-        });
-
-        window.present();
-    }
-
-    /// Normal application startup — builds the UI and wires up signals.
-    fn activate_main(app: &adw::Application, rt: tokio::runtime::Handle) {
-        // Load configuration.
-        let mut config = match ConfigManager::new() {
-            Ok(c) => c,
-            Err(e) => {
-                warn!("Failed to load config, using defaults: {e}");
-                match ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json")) {
-                    Ok(c) => c,
-                    Err(e2) => {
-                        error!("Fallback config also failed: {e2}");
-                        panic!("Cannot initialize configuration from any path");
-                    }
-                }
-            }
-        };
-
-        // Initialize i18n system.
-        aios_core::i18n::init();
-        let lang = config.get_str("assistant.language", "");
-        if lang.is_empty() {
-            let detected = aios_core::i18n::detect_system_language();
-            aios_core::i18n::set_language(&detected);
-        } else {
-            aios_core::i18n::set_language(&lang);
-        }
-
-        // Initialize tool registry with built-in tools.
-        let mut tools = ToolRegistry::new();
-        tools.load_builtins();
-        info!("Loaded {} built-in tools", tools.len());
-
-        // Initialize LLM providers.
-        let mut llm = LlmManager::new();
-        Self::init_llm(&config, &mut llm);
-
-        // Build the UI first so we can wire the UiPanelTool callback.
-        let chat_view = ChatView::new();
-        let prompt_input = PromptInput::new();
-        let channel_overlay = ChannelOverlay::new();
-
-        // Build provider list — only show providers with API keys configured.
-        let mut available_providers = Vec::new();
-        if !config.get_str("llm.claude_api_key", "").is_empty() {
-            available_providers.push("Claude");
-        }
-        if !config.get_str("llm.openai_api_key", "").is_empty() {
-            let k = config.get_str("llm.openai_api_key", "");
-            if k != "your-api-key-here" {
-                available_providers.push("ChatGPT");
-            }
-        }
-        let provider_refs: Vec<&str> = available_providers.iter().map(|s| *s).collect();
-
-        let mw = main_window::build_main_window(
-            app,
-            &chat_view,
-            &prompt_input,
-            &channel_overlay,
-            &provider_refs,
+            app, &chat_view, &prompt_input, &channel_overlay, &provider_refs,
         );
         let window = mw.window;
         let vu_meter_widget = mw.vu_meter;
-
-        // Normal boot — show settings button (it starts hidden for setup flow).
         main_window::set_settings_button_visible(&window, true);
 
-        // Create a UiPanelTool with the GTK panel renderer callback.
-        let ui_panel_tool = Self::create_ui_panel_tool(&window);
+        // Wire UiPanelTool and tool executor into LLM.
+        Self::wire_tool_executor(&mut llm, &window, queue.clone());
 
-        // Wire tool executor into LLM manager.
-        // The LLM executor gets its own registry that includes the
-        // ui_panel tool with the GTK callback already set.
-        let tool_registry = Arc::new(std::sync::Mutex::new(ToolRegistry::new()));
-        {
-            let mut tr = tool_registry.lock().unwrap();
-            tr.load_builtins();
-            // The builtin UiPanelTool has no callback — replace it with
-            // the one that has the GTK callback wired in.
-            let _ = tr.unregister("ui_panel");
-            let _ = tr.register(Box::new(UiPanelToolWrapper(ui_panel_tool.clone())));
-        }
-        let tr_for_executor = tool_registry.clone();
-        llm.set_tool_executor(Arc::new(move |name, args, channel| {
-            let registry = tr_for_executor.lock().unwrap();
-            let result = registry.execute_on_channel(&name, args, &channel);
-            if result.success {
-                result.output
-            } else {
-                format!("Tool error: {}", result.output)
-            }
-        }));
-
-        // Read channel config (used by both boot status and channel startup).
-        let web_enabled = config.get_bool("channels.web.enabled", true);
-        let web_port = config.get_str("channels.web.port", "80");
+        // Read channel config.
         let signal_enabled = config.get_bool("channels.signal.enabled", false);
         let signal_phone = config.get_str("channels.signal.phone", "");
 
-        // Build boot status text (used by GTK + Web).
-        let boot_status_text = {
-            use aios_core::types::{BootStatus, StatusLine};
-
-            let mut status = BootStatus::new();
-
-            // -- Channels --
-            status.add(StatusLine::new(&t("boot.status.desktop"), true, "GTK4/libadwaita"));
-            if web_enabled {
-                status.add(StatusLine::new(&t("boot.status.web_channel"), true, format!("http://aios.local:{web_port}")));
-            } else {
-                status.add(StatusLine::new(&t("boot.status.web_channel"), false, &t("boot.status.disabled_web")));
-            }
-            if signal_enabled && !signal_phone.is_empty() {
-                status.add(StatusLine::new(&t("boot.status.signal"), true, &signal_phone));
-            } else {
-                status.add(StatusLine::new(&t("boot.status.signal"), false, &t("boot.status.disabled_signal")));
-            }
-
-            // -- LLM Provider + Model --
-            let provider = config.get_str("llm.provider", "claude");
-            let claude_key = config.get_str("llm.claude_api_key", "");
-            let openai_key = config.get_str("llm.openai_api_key", "");
-            let has_claude = !claude_key.is_empty();
-            let has_openai = !openai_key.is_empty() && openai_key != "your-api-key-here";
-            let has_key = match provider.as_str() {
-                "claude" => has_claude,
-                "openai" => has_openai,
-                _ => false,
-            };
-            let model = match provider.as_str() {
-                "claude" => config.get_str("llm.claude_model", "claude-sonnet-4-20250514"),
-                "openai" => config.get_str("llm.openai_model", "gpt-4o"),
-                _ => provider.clone(),
-            };
-            if has_key {
-                status.add(StatusLine::new(&t("boot.status.llm_provider"), true, format!("{provider} ({model})")));
-            } else {
-                status.add(StatusLine::new(&t("boot.status.llm_provider"), false, t_fmt("boot.status.no_api_key_hint", &[("provider", &provider)])));
-            }
-
-            // Show backup provider if available
-            if has_claude && provider != "claude" {
-                status.add(StatusLine::new(&t("boot.status.backup"), true, t_fmt("boot.status.backup_available", &[("provider", "Claude")])));
-            }
-            if has_openai && provider != "openai" {
-                status.add(StatusLine::new(&t("boot.status.backup"), true, t_fmt("boot.status.backup_available", &[("provider", "ChatGPT")])));
-            }
-
-            // -- Voice --
-            let stt = config.get_bool("voice.stt_enabled", true);
-            let tts = config.get_bool("voice.tts_enabled", true);
-            let tts_voice = config.get_str("voice.tts_voice", "en_US-amy-medium");
-            let has_piper = std::path::Path::new("/usr/bin/piper").exists();
-            let has_whisper = std::path::Path::new("/usr/bin/whisper-cpp-cli").exists();
-            let tts_backend = if has_piper { "Piper" } else { "espeak-ng" };
-            let not_installed = t("boot.status.not_installed");
-            let stt_backend = if has_whisper { "Whisper" } else { &not_installed };
-            status.add(StatusLine::new(&t("boot.status.audio_output"), tts,
-                format!("{tts_backend} — voice: {tts_voice}")));
-            status.add(StatusLine::new(&t("boot.status.audio_input"), stt && has_whisper,
-                format!("{stt_backend}{}", if !stt { " — disabled" } else { "" })));
-
-            // -- KWS (Wake Word Detection) --
-            {
-                let kws_models_dir = dirs::home_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
-                    .join(".aios/models/kws");
-                let wake_word = config.get_str("voice.wake_word", "hey assistant");
-                let wake_source = config.get_str("voice.wake_word_source", "pretrained");
-                let infra_present = kws_models_dir.join("infrastructure/melspectrogram.onnx").exists()
-                    || kws_models_dir.join("infrastructure/embedding_model.onnx").exists();
-
-                if !infra_present {
-                    status.add(StatusLine::new("KWS", false, "models not found"));
-                } else if wake_source == "training" {
-                    status.add(StatusLine::new("KWS", false,
-                        format!("training — \"{wake_word}\" (mic disabled until ready)")));
-                } else {
-                    // Check whether the actual model file exists.
-                    let model_available = if let Some(pretrained) = aios_voice::find_pretrained(&wake_word) {
-                        aios_voice::pretrained_model_path(&kws_models_dir, pretrained).exists()
-                    } else {
-                        let sanitized = wake_word.to_lowercase()
-                            .replace(' ', "_")
-                            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
-                        kws_models_dir.join("custom").join(format!("{sanitized}.onnx")).exists()
-                    };
-                    if model_available {
-                        status.add(StatusLine::new("KWS", true,
-                            format!("{wake_word} ({wake_source})")));
-                    } else {
-                        status.add(StatusLine::new("KWS", false, "models not found"));
-                    }
-                }
-            }
-
-            // -- System --
-            let kb_layout = config.get_str("system.keyboard_layout", "us");
-            let timezone = std::fs::read_to_string("/etc/timezone")
-                .unwrap_or_else(|_| "UTC".into())
-                .trim().to_string();
-            let boot_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            status.add(StatusLine::new(&t("boot.status.keyboard"), true, kb_layout));
-            status.add(StatusLine::new(&t("boot.status.timezone"), true, &timezone));
-            status.add(StatusLine::new(&t("boot.status.boot_time"), true, boot_time));
-
-            status.format()
-        };
-
-        // Show boot status on Desktop.
+        // Boot status.
+        let boot_status_text = boot_status::build_boot_status(&config);
         chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
-
-        // Apply theme from config at startup.
         {
-            let theme = config.get_str("ui.theme", "dark");
-            Self::apply_theme(&theme);
+            let mut q = queue.lock().unwrap();
+            q.push(aios_core::queue::QueuedMessage {
+                role: aios_core::types::Role::System,
+                channel: aios_core::channel::ChannelKind::System,
+                source: Some("system".into()),
+                content: Some(boot_status_text.clone()),
+                level: Some(aios_core::types::MessageLevel::Info),
+                ..Default::default()
+            });
         }
 
-        // Check for hostname collision (set by aios-hostname-check.service at boot).
-        if std::path::Path::new("/tmp/aios-name-conflict").exists() {
-            if let Ok(conflicting) = std::fs::read_to_string("/tmp/aios-name-conflict") {
-                let conflicting = conflicting.trim().to_string();
-                let random_suffix = (std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .subsec_nanos() % 10000) as u16;
-                let suggestion = format!("{conflicting}-{random_suffix}");
-
-                chat_view.add_level_message(
-                    aios_core::types::MessageLevel::Warning,
-                    &t_fmt("hostname.conflict.warning", &[("name", &conflicting)]),
-                );
-
-                // Show rename card
-                let input_box = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-                input_box.set_margin_top(8);
-
-                let entry = gtk4::Entry::builder()
-                    .placeholder_text(&t("hostname.conflict.placeholder"))
-                    .text(&suggestion)
-                    .hexpand(true)
-                    .build();
-                input_box.append(&entry);
-
-                let hint = gtk4::Label::new(Some(&t("hostname.conflict.hint")));
-                hint.add_css_class("dim-label");
-                hint.set_halign(gtk4::Align::Start);
-                hint.set_wrap(true);
-                input_box.append(&hint);
-
-                let error_label = gtk4::Label::new(None);
-                error_label.add_css_class("error");
-                error_label.set_visible(false);
-                error_label.set_halign(gtk4::Align::Start);
-                input_box.append(&error_label);
-
-                let apply_btn = gtk4::Button::with_label(&t("hostname.conflict.apply"));
-                apply_btn.add_css_class("suggested-action");
-                apply_btn.set_halign(gtk4::Align::Start);
-                apply_btn.set_margin_top(4);
-                input_box.append(&apply_btn);
-
-                let entry_ref = entry.clone();
-                let error_ref = error_label.clone();
-                let chat_ref = chat_view.clone();
-                apply_btn.connect_clicked(move |b| {
-                    let name = entry_ref.text().to_string().trim().to_lowercase();
-
-                    // Validate: lowercase alphanumeric + hyphens, 1-63 chars, no leading/trailing hyphens
-                    let valid = !name.is_empty()
-                        && name.len() <= 63
-                        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-                        && !name.starts_with('-')
-                        && !name.ends_with('-');
-
-                    if !valid {
-                        error_ref.set_text(&t("hostname.conflict.error_invalid"));
-                        error_ref.set_visible(true);
-                        return;
-                    }
-
-                    b.set_sensitive(false);
-                    error_ref.set_visible(false);
-
-                    // Apply hostname change
-                    let _ = std::process::Command::new("sudo")
-                        .args(["hostnamectl", "set-hostname", &name])
-                        .status();
-                    let _ = std::process::Command::new("sudo")
-                        .args(["systemctl", "restart", "avahi-daemon"])
-                        .status();
-
-                    // Update config
-                    if let Ok(mut cfg) = aios_core::config::ConfigManager::new() {
-                        let _ = cfg.set("system.machine_name", serde_json::json!(name));
-                    }
-
-                    chat_ref.add_message("system", &t_fmt("hostname.conflict.changed", &[("name", &name)]));
-                    let _ = std::fs::remove_file("/tmp/aios-name-conflict");
-                });
-
-                chat_view.add_setup_card(
-                    "network-server-symbolic",
-                    &t("hostname.conflict.title"),
-                    &t_fmt("hostname.conflict.description", &[("name", &conflicting)]),
-                    Some(input_box.upcast_ref()),
-                );
-            }
-        }
-
+        Self::apply_theme(&config.get_str("ui.theme", "dark"));
+        first_boot_flow::show_hostname_conflict_card(&chat_view);
         chat_view.add_message("system", &t("setup.type_message"));
 
-        // Apply assistant display name from config.
         let assistant_name = config.get_str("assistant.name", "Assistant");
         crate::ui::chat_view::set_assistant_display_name(&assistant_name);
 
         // --- Channel infrastructure ---
-
-        // Create the shared AppRuntime for multi-channel orchestration.
         let runtime = aios_core::channel::AppRuntime::new();
-
-        // Register Desktop channel (always available).
         runtime.switcher.register_channel(
             aios_core::channel::ChannelKind::Desktop,
             aios_core::channel::ChannelContext::desktop(),
         );
 
-        // Start Web server if enabled.
-        let web_server = Self::start_web_server(
-            &mut config,
-            &runtime,
-            Some(boot_status_text.clone()),
+        let web_server =
+            Self::start_web_server(&mut config, &runtime, Some(boot_status_text.clone()));
+
+        let signal_sender = Self::start_signal_listener(
+            &config, signal_enabled, &signal_phone, &runtime,
         );
 
-        // Start Signal listener if enabled.
-        let signal_sender = if signal_enabled && !signal_phone.is_empty() {
-            let contacts_str = config.get_str("channels.signal.allowed_contacts", "");
-            let allowed: Vec<String> = contacts_str
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let listener = aios_signal::SignalListener::new(
-                signal_phone.clone(),
-                allowed,
-            );
-            let sig_tx = runtime.message_sender();
-            listener.start(sig_tx);
-            runtime.switcher.register_channel(
-                aios_core::channel::ChannelKind::Signal,
-                aios_core::channel::ChannelContext::signal(),
-            );
-            info!("Signal channel started for {signal_phone}");
-            Some(Arc::new(aios_signal::SignalSender::new(signal_phone)))
-        } else {
-            None
-        };
+        // Wire channel switcher to overlay.
+        Self::wire_channel_overlay(&runtime, &channel_overlay);
 
-        // Wire channel switcher to the overlay (item 5).
-        // GTK widgets aren't Send, so we use a std::sync::mpsc channel to
-        // bridge from the switcher callback (any thread) to the GTK thread.
-        {
-            let (overlay_tx, overlay_rx) =
-                std::sync::mpsc::channel::<aios_core::channel::ChannelKind>();
-
-            runtime.switcher.on_switch(Arc::new(move |_old, new| {
-                let _ = overlay_tx.send(new);
-            }));
-
-            // GTK-side: poll the channel and update the overlay.
-            let overlay_for_poll = channel_overlay.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                while let Ok(new_kind) = overlay_rx.try_recv() {
-                    if new_kind == aios_core::channel::ChannelKind::Desktop {
-                        overlay_for_poll.hide();
-                    } else {
-                        overlay_for_poll.show(new_kind);
-                    }
-                }
-                glib::ControlFlow::Continue
-            });
-
-            // "Switch back here" button → switch to Desktop.
-            let switcher_for_btn = runtime.switcher.clone();
-            channel_overlay.on_switch_back(move || {
-                let _ = switcher_for_btn.switch_to(aios_core::channel::ChannelKind::Desktop);
-            });
-        }
-
-        // Warn if no API key is configured.
-        {
-            let provider = config.get_str("llm.provider", "claude");
-            let has_key = match provider.as_str() {
-                "claude" => !config.get_str("llm.claude_api_key", "").is_empty(),
-                "openai" => !config.get_str("llm.openai_api_key", "").is_empty(),
-                _ => false,
-            };
-            if !has_key {
-                chat_view.add_level_message(
-                    aios_core::types::MessageLevel::Warning,
-                    &t("app.no_api_key_warning"),
-                );
-            }
-        }
+        // Warn if no API key.
+        Self::warn_if_no_api_key(&config, &chat_view);
 
         // Create shared application state.
         let llm_arc = Arc::new(tokio::sync::Mutex::new(llm));
-        let kws_models_dir_for_state = dirs::home_dir()
+        let kws_models_dir = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
             .join(".aios/models/kws");
         let state = Rc::new(RefCell::new(AiosApp {
             config,
-            llm: llm_arc.clone(),
+            llm: llm_arc,
             tools,
             conversation: Vec::new(),
             rt: rt.clone(),
             kws_engine: None,
             wake_training_in_progress: None,
             wake_enabled: None,
-            kws_models_dir: kws_models_dir_for_state,
+            kws_models_dir: kws_models_dir.clone(),
+            queue: Some(queue),
         }));
 
-        // --- Unified message loop (item 3) ---
-        // Poll incoming messages from ALL channels (Web, Signal, Desktop)
-        // and route them through the LLM.
-        {
-            let msg_rx_holder = runtime.clone();
-            let state_for_loop = state.clone();
-            let chat_for_loop = chat_view.clone();
-            let switcher_for_loop = runtime.switcher.clone();
-            let llm_for_loop = llm_arc.clone();
-            let rt_for_loop = rt.clone();
-            let web_tx = web_server.clone();
-            let sig_sender = signal_sender.clone();
-
-            // We take the receiver on the Tokio side and poll it from GTK.
-            let (bridge_tx, bridge_rx) =
-                std::sync::mpsc::channel::<aios_core::channel::IncomingMessage>();
-
-            // Tokio task: drain AppRuntime's message channel into the std bridge.
-            rt.spawn(async move {
-                if let Some(mut rx) = msg_rx_holder.take_message_rx().await {
-                    while let Some(msg) = rx.recv().await {
-                        if bridge_tx.send(msg).is_err() {
-                            break;
-                        }
-                    }
-                }
-            });
-
-            // GTK poll: check for incoming messages from remote channels.
-            glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                while let Ok(msg) = bridge_rx.try_recv() {
-                    // Switch channel if needed.
-                    if switcher_for_loop.active_kind() != msg.channel {
-                        let _ = switcher_for_loop.switch_to(msg.channel);
-                    }
-
-                    // Always show in Desktop chat (conversation continuity).
-                    chat_for_loop.add_message("user", &msg.text);
-
-                    // Handle slash commands from remote channels (don't add to LLM history).
-                    if msg.text.starts_with('/') {
-                        Self::handle_command(&state_for_loop, &chat_for_loop, &msg.text);
-                        continue;
-                    }
-
-                    // Record in conversation history (after slash command check).
-                    {
-                        let mut s = state_for_loop.borrow_mut();
-                        s.conversation.push(aios_core::types::Message::user(&msg.text));
-                    }
-
-                    // Send to LLM and route response to active channel (item 4).
-                    let llm = llm_for_loop.clone();
-                    let history = state_for_loop.borrow().conversation.clone();
-                    let text = msg.text.clone();
-                    let sender_id = msg.sender_id.clone();
-                    let active_channel = msg.channel;
-                    let (resp_tx, resp_rx) = std::sync::mpsc::channel::<LlmResult>();
-                    let web_tx_inner = web_tx.clone();
-                    let sig_inner = sig_sender.clone();
-
-                    rt_for_loop.spawn(async move {
-                        let mut llm_guard = llm.lock().await;
-                        let mut history = history;
-                        if history.last().is_some_and(|m| m.role == aios_core::types::Role::User) {
-                            history.pop();
-                        }
-                        let result = llm_guard.chat(&text, Some(&mut history), &[], None).await;
-                        drop(llm_guard);
-
-                        match result {
-                            Ok(response) => {
-                                let content = response.content.unwrap_or_else(|| "I received your message but have no response text.".to_string());
-                                // Route to active channel.
-                                match active_channel {
-                                    aios_core::channel::ChannelKind::Web => {
-                                        if let Some(ref tx) = web_tx_inner {
-                                            let msg = aios_web::protocol::ServerMessage::Message {
-                                                role: "assistant".into(),
-                                                content: content.clone(),
-                                                level: None,
-                                            };
-                                            if let Ok(json) = serde_json::to_string(&msg) {
-                                                let _ = tx.send(json);
-                                            }
-                                        }
-                                    }
-                                    aios_core::channel::ChannelKind::Signal => {
-                                        if let Some(ref sender) = sig_inner {
-                                            if let Some(ref recipient) = sender_id {
-                                                let _ = sender.send_text(recipient, &content).await;
-                                            }
-                                        }
-                                    }
-                                    _ => {} // Desktop is handled below via resp_tx.
-                                }
-                                let _ = resp_tx.send(LlmResult::Success {
-                                    content,
-                                    updated_history: history,
-                                });
-                            }
-                            Err(e) => {
-                                let _ = resp_tx.send(LlmResult::Error(format!("{e}")));
-                            }
-                        }
-                    });
-
-                    // Poll for this response too (displays on Desktop).
-                    let chat_for_resp = chat_for_loop.clone();
-                    let state_for_resp = state_for_loop.clone();
-                    glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                        match resp_rx.try_recv() {
-                            Ok(LlmResult::Success { content, updated_history }) => {
-                                chat_for_resp.add_message("assistant", &content);
-                                speak_if_enabled(&content, &state_for_resp.borrow().config);
-                                let mut s = state_for_resp.borrow_mut();
-                                s.conversation = updated_history;
-                                s.conversation.push(aios_core::types::Message::assistant(&content));
-                                glib::ControlFlow::Break
-                            }
-                            Ok(LlmResult::Error(err)) => {
-                                chat_for_resp.add_message("system", &format!("Error: {err}"));
-                                glib::ControlFlow::Break
-                            }
-                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-                        }
-                    });
-                }
-                glib::ControlFlow::Continue
-            });
-        }
-
-        // --- Connect GTK signals ---
-
-        // Provider dropdown changed.
-        let state_ref = state.clone();
-        let chat_view_ref = chat_view.clone();
-        main_window::connect_provider_dropdown(&window, move |provider_name| {
-            let mut s = state_ref.borrow_mut();
-            let name = match provider_name {
-                "ChatGPT" | "chatgpt" => "openai".to_string(),
-                other => other.to_lowercase(),
-            };
-            let _ = s.config.set("llm.provider", serde_json::json!(name));
-            if let Ok(mut llm) = s.llm.try_lock() {
-                if llm.set_active(&name).is_err() {
-                    chat_view_ref
-                        .add_message("system", &format!("Provider '{name}' not available"));
-                } else {
-                    chat_view_ref.add_message("system", &format!("Switched to {name}"));
-                }
-            }
-        });
-
-        // Settings button.
-        let state_ref = state.clone();
-        let win_ref = window.clone();
-        main_window::connect_settings_button(&window, move || {
-            let s = state_ref.borrow();
-            settings_dialog::show_settings(&win_ref, &s.config);
-        });
-
-        // Mic toggle + voice listener.
-        let stt_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
-            state.borrow().config.get_bool("voice.stt_enabled", true),
-        ));
-        let stt_flag = stt_enabled.clone();
-        let state_ref = state.clone();
-        main_window::connect_mic_toggle(&window, move |active| {
-            let mut s = state_ref.borrow_mut();
-            let _ = s.config.set("voice.stt_enabled", serde_json::json!(active));
-            stt_flag.store(active, std::sync::atomic::Ordering::Relaxed);
-            info!("Mic toggled: {active}");
-        });
-
-        // --- KWS engine setup ---
-        // Read wake word configuration from the app state.
-        let wake_word_cfg = {
-            let s = state.borrow();
-            let wake_phrase = s.config.get_str("voice.wake_word", "hey assistant");
-            let wake_on = s.config.get_bool("voice.wake_enabled", true);
-            let wake_source = s.config.get_str("voice.wake_word_source", "");
-            (wake_phrase, wake_on, wake_source)
-        };
-
-        let wake_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(wake_word_cfg.1));
-        let wake_training_in_progress = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        // Copy KWS infrastructure models from ISO to user dir on first run.
-        let kws_models_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
-            .join(".aios/models/kws");
-        {
-            let iso_kws_dir = std::path::Path::new("/opt/aios-app/models/kws");
-            if iso_kws_dir.exists() && !kws_models_dir.exists() {
-                if let Err(e) = copy_dir_recursive(iso_kws_dir, &kws_models_dir) {
-                    warn!("KWS: failed to copy models from ISO: {e}");
-                } else {
-                    info!("KWS: copied infrastructure models from ISO to {}", kws_models_dir.display());
-                }
-            }
-        }
-
-        // Try to create the KWS engine. Infrastructure models live at ~/.aios/models/kws/.
-        // Wrapped in Option — None when ONNX infrastructure models are missing (dev/VM).
-        let kws_engine: std::sync::Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> = {
-            match aios_voice::KwsEngine::new(&kws_models_dir) {
-                Ok(mut engine) => {
-                    // Try to load the active wake word model.
-                    let wake_phrase = &wake_word_cfg.0;
-                    let wake_source = &wake_word_cfg.2;
-
-                    // Check pretrained catalog first.
-                    if let Some(pretrained) = aios_voice::find_pretrained(wake_phrase) {
-                        let model_path = aios_voice::pretrained_model_path(&kws_models_dir, pretrained);
-                        if model_path.exists() {
-                            match engine.load_wake_model(&model_path, pretrained.display_name) {
-                                Ok(()) => info!("KWS: loaded pretrained model for \"{}\"", pretrained.display_name),
-                                Err(e) => warn!("KWS: failed to load pretrained model: {e}"),
-                            }
-                        } else {
-                            warn!("KWS: pretrained model file not found at {}", model_path.display());
-                        }
-                    } else if wake_source == "training" || wake_source == "custom" {
-                        // Try custom model path.
-                        let sanitized = wake_phrase
-                            .to_lowercase()
-                            .replace(' ', "_")
-                            .replace(|c: char| !c.is_alphanumeric() && c != '_', "");
-                        let custom_path = kws_models_dir.join("custom").join(format!("{sanitized}.onnx"));
-                        if custom_path.exists() {
-                            match engine.load_wake_model(&custom_path, wake_phrase) {
-                                Ok(()) => info!("KWS: loaded custom model for \"{}\"", wake_phrase),
-                                Err(e) => warn!("KWS: failed to load custom model: {e}"),
-                            }
-                        } else {
-                            warn!("KWS: custom model not found at {} — will use fallback detection", custom_path.display());
-                        }
-                    } else if !wake_phrase.is_empty() {
-                        info!("KWS: no model for \"{wake_phrase}\" — will use Whisper fallback detection");
-                    }
-
-                    std::sync::Arc::new(std::sync::Mutex::new(Some(engine)))
-                }
-                Err(e) => {
-                    warn!("KWS: failed to create engine (infrastructure models missing?): {e}");
-                    warn!("KWS: wake word detection will use Whisper fallback if enabled");
-                    std::sync::Arc::new(std::sync::Mutex::new(None))
-                }
-            }
-        };
-
-        // Store KWS state in the app so handle_command can access it.
-        {
-            let mut s = state.borrow_mut();
-            s.kws_engine = Some(kws_engine.clone());
-            s.wake_training_in_progress = Some(wake_training_in_progress.clone());
-            s.wake_enabled = Some(wake_enabled.clone());
-            s.kws_models_dir = kws_models_dir.clone();
-        }
-
-        // Training recovery: if last shutdown happened mid-training, restart or reset.
-        {
-            let wake_source = state.borrow().config.get_str("voice.wake_word_source", "pretrained");
-            if wake_source == "training" {
-                let phrase = state.borrow().config.get_str("voice.wake_word", "hey assistant");
-                let retries = state.borrow().config.get_f64("voice.wake_training_retries", 0.0) as i64;
-                info!("KWS: detected interrupted training for \"{phrase}\" (attempt {retries})");
-
-                if retries >= 3 {
-                    // Too many failures — reset to pretrained default.
-                    {
-                        let mut s = state.borrow_mut();
-                        let _ = s.config.set("voice.wake_word", serde_json::json!("hey assistant"));
-                        let _ = s.config.set("voice.wake_word_source", serde_json::json!("pretrained"));
-                        let _ = s.config.set("voice.wake_training_retries", serde_json::json!(0));
-                    }
-                    chat_view.add_message("system",
-                        "[SYSTEM] Wake word training failed after 3 attempts. Reset to \"Hey Assistant\".");
-                } else {
-                    // Increment retry count and restart training.
-                    {
-                        let mut s = state.borrow_mut();
-                        let _ = s.config.set("voice.wake_training_retries", serde_json::json!(retries + 1));
-                    }
-                    chat_view.add_message("system",
-                        &format!("[SYSTEM] Restarting wake word training for \"{}\" (attempt {})...",
-                            phrase, retries + 1));
-
-                    wake_training_in_progress.store(true, std::sync::atomic::Ordering::Relaxed);
-
-                    let output_dir = kws_models_dir.join("custom");
-                    let chat_for_recovery = chat_view.clone();
-                    let state_for_recovery = state.clone();
-                    let kws_engine_for_recovery = kws_engine.clone();
-                    let wake_enabled_for_recovery = wake_enabled.clone();
-                    let training_flag_for_recovery = wake_training_in_progress.clone();
-                    let phrase_clone = phrase.clone();
-                    let (train_tx, train_rx) = std::sync::mpsc::channel::<Result<std::path::PathBuf, String>>();
-
-                    std::thread::spawn(move || {
-                        let result = aios_voice::KwsTrainer::train(&phrase_clone, &output_dir);
-                        let _ = train_tx.send(result.map_err(|e| e.to_string()));
-                    });
-
-                    glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-                        match train_rx.try_recv() {
-                            Ok(Ok(model_path)) => {
-                                info!("KWS recovery training complete: {}", model_path.display());
-                                chat_for_recovery.add_message("system",
-                                    &format!("Wake word training complete for \"{phrase}\". Model saved."));
-
-                                // Hot-swap the model into the KWS engine.
-                                if let Ok(mut guard) = kws_engine_for_recovery.lock() {
-                                    if let Some(ref mut engine) = *guard {
-                                        match engine.load_wake_model(&model_path, &phrase) {
-                                            Ok(()) => {
-                                                info!("KWS: hot-swapped model for \"{}\"", phrase);
-                                                chat_for_recovery.add_message("system",
-                                                    &format!("Wake word \"{phrase}\" is now active."));
-                                            }
-                                            Err(e) => {
-                                                warn!("KWS: failed to load trained model: {e}");
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // Enable wake word detection and clear retry count.
-                                wake_enabled_for_recovery.store(true, std::sync::atomic::Ordering::Relaxed);
-                                if let Ok(mut cfg) = aios_core::config::ConfigManager::new() {
-                                    let _ = cfg.set("voice.wake_word_source", serde_json::json!("custom"));
-                                    let _ = cfg.set("voice.wake_training_retries", serde_json::json!(0));
-                                }
-
-                                training_flag_for_recovery.store(false, std::sync::atomic::Ordering::Relaxed);
-                                glib::ControlFlow::Break
-                            }
-                            Ok(Err(e)) => {
-                                warn!("KWS recovery training failed: {e}");
-                                chat_for_recovery.add_level_message(
-                                    aios_core::types::MessageLevel::Warning,
-                                    &format!("Wake word training failed: {e}"),
-                                );
-                                let s = state_for_recovery.borrow();
-                                if let Some(ref flag) = s.wake_training_in_progress {
-                                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                                }
-                                glib::ControlFlow::Break
-                            }
-                            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                let s = state_for_recovery.borrow();
-                                if let Some(ref flag) = s.wake_training_in_progress {
-                                    flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                                }
-                                glib::ControlFlow::Break
-                            }
-                        }
-                    });
-                }
-            }
-        }
-
-        // Start voice listener thread — receives transcribed text via mpsc channel.
-        let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
-        let audio_level = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
-        let _voice_handle = start_voice_listener(
-            stt_tx,
-            stt_enabled,
-            wake_enabled.clone(),
-            wake_training_in_progress.clone(),
-            kws_engine.clone(),
-            audio_level.clone(),
+        // Remote channel message loop.
+        voice_setup::start_remote_channel_loop(
+            &rt, &runtime, &state, &chat_view, web_server, signal_sender,
         );
 
-        // VU meter: poll audio level and drive the level bar.
-        let vu_level = audio_level.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-            let level = vu_level.load(std::sync::atomic::Ordering::Relaxed);
-            // Scale 0-100 to 0-20 (20 discrete segments)
-            vu_meter_widget.set_value(level as f64 / 5.0);
-            glib::ControlFlow::Continue
-        });
+        // Connect GTK signals (provider dropdown, settings, prompt submit).
+        first_boot_flow::connect_common_signals(&state, &chat_view, &prompt_input, &window);
 
-        // Poll for transcribed text from the voice listener (GTK main thread).
-        let state_ref = state.clone();
-        let chat_view_ref = chat_view.clone();
-        let prompt_ref = prompt_input.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            while let Ok(text) = stt_rx.try_recv() {
-                let text = text.trim().to_string();
-                if text.is_empty() {
-                    continue;
-                }
-
-                info!("STT transcription received: {}", &text[..text.len().min(50)]);
-                chat_view_ref.add_message("user", &format!("\u{1f3a4} {text}"));
-
-                // Send to LLM
-                Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
-            }
-            glib::ControlFlow::Continue
-        });
-
-        // Speaker toggle.
-        let state_ref = state.clone();
-        main_window::connect_speaker_toggle(&window, move |active| {
-            let mut s = state_ref.borrow_mut();
-            let _ = s.config.set("voice.tts_enabled", serde_json::json!(active));
-            if !active {
-                stop_tts();
-            }
-            info!("Speaker toggled: {active}");
-        });
-
-        // Message submission (Enter key or send button) — Desktop channel.
-        let state_ref = state.clone();
-        let chat_view_ref = chat_view.clone();
-        let prompt_ref = prompt_input.clone();
-        prompt_input.on_submit(move |text| {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                return;
-            }
-
-            // Check if it's a slash command.
-            if text.starts_with('/') {
-                Self::handle_command(&state_ref, &chat_view_ref, &text);
-                return;
-            }
-
-            // Display the user message immediately.
-            chat_view_ref.add_message("user", &text);
-
-            // Force immediate redraw before the async LLM call begins.
-            while gtk4::glib::MainContext::default().iteration(false) {}
-
-            // Send to LLM asynchronously.
-            Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
-        });
+        // KWS + voice setup.
+        voice_setup::setup_kws_and_voice(
+            &state, &chat_view, &prompt_input, &window, vu_meter_widget, &kws_models_dir,
+        );
 
         window.present();
     }
 
+    // -----------------------------------------------------------------------
+    // Command handling (delegates to crate::command_handler)
+    // -----------------------------------------------------------------------
+
+    /// Handle a slash command by bridging to the extracted command handler.
+    pub(crate) fn handle_command(
+        state: &Rc<RefCell<AiosApp>>,
+        chat_view: &ChatView,
+        input: &str,
+    ) {
+        let cmd_state = {
+            let s = state.borrow();
+            let config = first_boot_flow::load_config();
+            command_handler::CommandHandlerState {
+                config,
+                llm: s.llm.clone(),
+                conversation: s.conversation.clone(),
+                rt: s.rt.clone(),
+                kws_engine: s.kws_engine.clone(),
+                wake_training_in_progress: s.wake_training_in_progress.clone(),
+                wake_enabled: s.wake_enabled.clone(),
+                kws_models_dir: s.kws_models_dir.clone(),
+            }
+        };
+
+        let cmd_state = Rc::new(RefCell::new(cmd_state));
+        command_handler::handle_command(&cmd_state, chat_view, input);
+
+        // Sync changes back.
+        {
+            let cmd_s = cmd_state.borrow();
+            let mut s = state.borrow_mut();
+            s.conversation = cmd_s.conversation.clone();
+            s.config = first_boot_flow::load_config();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Small helpers
+    // -----------------------------------------------------------------------
+
+    /// Initialize LLM providers from config.
+    pub(crate) fn init_llm(config: &ConfigManager, llm: &mut LlmManager) {
+        let claude_key = config.get_str("llm.claude_api_key", "");
+        let claude_model = config.get_str("llm.claude_model", "claude-sonnet-4-20250514");
+        llm.register_provider(Box::new(ClaudeProvider::new(
+            claude_key, Some(claude_model), None,
+        )));
+
+        let openai_key = config.get_str("llm.openai_api_key", "");
+        let openai_model = config.get_str("llm.openai_model", "gpt-4o");
+        llm.register_provider(Box::new(OpenAIProvider::new(
+            openai_key, Some(openai_model), None,
+        )));
+
+        let active = config.get_str("llm.provider", "claude");
+        if let Err(e) = llm.set_active(&active) {
+            warn!("Failed to set active provider to '{active}': {e}");
+        }
+        info!("LLM providers initialized, active: {active}");
+    }
+
     /// Start the web server if enabled in config.
-    ///
-    /// Reads web-channel settings from `config`, generates or loads an auth
-    /// token, creates a [`aios_web::server::WebServer`], starts it, and
-    /// registers the Web channel on the given `runtime`.
-    ///
-    /// Returns `Some(broadcast::Sender)` for routing AI responses to web
-    /// clients, or `None` if the web channel is disabled.
-    fn start_web_server(
+    pub(crate) fn start_web_server(
         config: &mut ConfigManager,
-        runtime: &aios_core::channel::AppRuntime,
+        runtime: &Arc<aios_core::channel::AppRuntime>,
         welcome_message: Option<String>,
     ) -> Option<tokio::sync::broadcast::Sender<String>> {
-        let web_enabled = config.get_bool("channels.web.enabled", true);
-        if !web_enabled {
+        if !config.get_bool("channels.web.enabled", true) {
             return None;
         }
 
-        let web_port = config.get_str("channels.web.port", "80");
-        let port: u16 = web_port.parse().unwrap_or(80);
+        let port: u16 = config.get_str("channels.web.port", "80").parse().unwrap_or(80);
         let web_tx = runtime.message_sender();
 
-        // Generate or load auth token for web access.
         let web_token = config.get_str("channels.web.token", "");
         let web_token = if web_token.is_empty() {
             let token = uuid::Uuid::new_v4().to_string().replace("-", "")[..16].to_string();
@@ -2446,11 +344,7 @@ impl AiosApp {
         };
 
         let server = aios_web::server::WebServer::new(
-            port,
-            web_tx,
-            web_token,
-            Some(runtime.switcher.clone()),
-            welcome_message,
+            port, web_tx, web_token, Some(runtime.switcher.clone()), welcome_message,
         );
         let response_tx = server.response_tx.clone();
         server.start();
@@ -2462,69 +356,24 @@ impl AiosApp {
         Some(response_tx)
     }
 
-    /// Initialize LLM providers from config.
-    fn init_llm(config: &ConfigManager, llm: &mut LlmManager) {
-        let claude_key = config.get_str("llm.claude_api_key", "");
-        let claude_model = config.get_str("llm.claude_model", "claude-sonnet-4-20250514");
-        llm.register_provider(Box::new(ClaudeProvider::new(
-            claude_key,
-            Some(claude_model),
-            None,
-        )));
-
-        let openai_key = config.get_str("llm.openai_api_key", "");
-        let openai_model = config.get_str("llm.openai_model", "gpt-4o");
-        llm.register_provider(Box::new(OpenAIProvider::new(
-            openai_key,
-            Some(openai_model),
-            None,
-        )));
-
-        let active = config.get_str("llm.provider", "claude");
-        if let Err(e) = llm.set_active(&active) {
-            warn!("Failed to set active provider to '{active}': {e}");
-        }
-        info!("LLM providers initialized, active: {active}");
-    }
-
     /// Create a [`UiPanelTool`] with its callback wired to the GTK
     /// [`PanelRenderer`].
-    ///
-    /// The returned tool can be used from any thread.  When `execute()` is
-    /// called, it marshals the panel display to the GTK main thread via
-    /// `glib::idle_add_local_once` and blocks until the user responds.
-    ///
-    /// GTK widgets are not `Send`/`Sync`, but the tool callback must be.
-    /// We use a `std::sync::mpsc` channel protected by a mutex to route
-    /// panel requests from the worker thread to the GTK main thread:
-    ///
-    /// 1. Worker thread sends `(PanelRequest, reply_tx)` into a shared queue.
-    /// 2. A periodic `glib::timeout_add_local` polls the queue on the GTK
-    ///    main thread and calls `PanelRenderer::build_and_show_panel`.
-    /// 3. Worker thread blocks on `reply_rx.recv()`.
-    fn create_ui_panel_tool(parent_window: &adw::ApplicationWindow) -> Arc<UiPanelTool> {
+    pub(crate) fn create_ui_panel_tool(
+        parent_window: &adw::ApplicationWindow,
+    ) -> Arc<UiPanelTool> {
         use aios_tools::builtin::ui_panel::{PanelRequest, PanelResponse};
 
-        type PanelMsg = (
-            PanelRequest,
-            std::sync::mpsc::Sender<Option<PanelResponse>>,
-        );
+        type PanelMsg = (PanelRequest, std::sync::mpsc::Sender<Option<PanelResponse>>);
 
-        // Shared queue: worker pushes, GTK main thread pops.
         let queue: Arc<std::sync::Mutex<Vec<PanelMsg>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
-        // Poll the queue from the GTK main thread.
         let queue_for_gtk = queue.clone();
         let window: adw::ApplicationWindow = parent_window.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
             let msg = {
                 let mut q = queue_for_gtk.lock().unwrap();
-                if q.is_empty() {
-                    None
-                } else {
-                    Some(q.remove(0))
-                }
+                if q.is_empty() { None } else { Some(q.remove(0)) }
             };
             if let Some((request, reply_tx)) = msg {
                 let parent: gtk4::Window = window.clone().upcast();
@@ -2533,7 +382,6 @@ impl AiosApp {
             glib::ControlFlow::Continue
         });
 
-        // The tool callback: Send-safe, captures only the Arc<Mutex<Vec>>.
         let queue_for_tool = queue.clone();
         let tool = Arc::new(UiPanelTool::new());
         tool.set_panel_callback(move |request, _channel| {
@@ -2542,774 +390,166 @@ impl AiosApp {
                 let mut q = queue_for_tool.lock().unwrap();
                 q.push((request, reply_tx));
             }
-            // Block the worker thread until the GTK main thread responds.
             reply_rx.recv().ok().flatten()
         });
-
         tool
     }
 
-    /// Handle a slash command.
-    fn handle_command(
-        state: &Rc<RefCell<AiosApp>>,
-        chat_view: &ChatView,
-        input: &str,
-    ) {
-        let mut s = state.borrow_mut();
-        let mut handler = CommandHandler::new(&mut s.config);
-        let result = handler.execute(input);
-
-        match result {
-            CommandResult::Response(text) => {
-                chat_view.add_message("system", &text);
-            }
-            CommandResult::Clear => {
-                chat_view.clear();
-                s.conversation.clear();
-                chat_view.add_message("system", "Chat history cleared.");
-            }
-            CommandResult::Configure => {
-                chat_view.add_message(
-                    "system",
-                    "Use the settings button (gear icon) to configure AiOS.",
-                );
-            }
-            CommandResult::SysInfo => {
-                drop(s);
-                let info = aios_core::system_monitor::SystemInfo::gather();
-                chat_view.add_level_message(
-                    aios_core::types::MessageLevel::Info,
-                    &info.format_text(),
-                );
-                return;
-            }
-            CommandResult::ClosePanel => {
-                drop(s);
-                let closed = Self::close_topmost_dialog();
-                if closed {
-                    chat_view.add_message("system", "Panel closed.");
-                } else {
-                    chat_view.add_message("system", "No open panel or dialog to close.");
-                }
-                return;
-            }
-            CommandResult::SelfTest(filter) => {
-                drop(s);
-                Self::run_selftest(state, chat_view, &filter);
-                return;
-            }
-            CommandResult::Update(url) => {
-                let url = url.trim().to_string();
-                if url.is_empty() {
-                    chat_view.add_message("system",
-                        "Usage: /update <url>\n\
-                         Example: /update https://example.com/aios\n\n\
-                         Or from your dev machine:\n\
-                         ./deploy.sh aios.local");
-                } else {
-                    chat_view.add_level_message(
-                        aios_core::types::MessageLevel::Warning,
-                        &format!("Updating AiOS from: **{url}**\nThis will restart the app..."),
-                    );
-                    // Run aios-update in the background.
-                    let rt = s.rt.clone();
-                    drop(s);
-                    rt.spawn(async move {
-                        let output = tokio::process::Command::new("aios-update")
-                            .arg(&url)
-                            .output()
-                            .await;
-                        match output {
-                            Ok(o) => {
-                                let stdout = String::from_utf8_lossy(&o.stdout);
-                                let stderr = String::from_utf8_lossy(&o.stderr);
-                                tracing::info!("aios-update: {stdout}{stderr}");
-                            }
-                            Err(e) => {
-                                tracing::error!("aios-update failed: {e}");
-                            }
-                        }
-                    });
-                    return;
-                }
-            }
-            CommandResult::Upgrade => {
-                use aios_core::types::MessageLevel;
-
-                // Show a "Checking..." message immediately on the GTK thread.
-                chat_view.add_message("system", &t("cmd.upgrade.checking"));
-
-                // Pull the update URL from config before dropping the borrow.
-                let update_url = s.config.get_str(
-                    "system.update_url",
-                    "https://api.github.com/repos/aios-dev/aios/releases/latest",
-                );
-                let rt = s.rt.clone();
-                drop(s);
-
-                // Use mpsc channel: tokio task sends result, GTK polls via timeout_add_local.
-                let (tx, rx) = std::sync::mpsc::channel::<UpgradeCheckResult>();
-
-                // Spawn version check on Tokio (no GTK types captured).
-                rt.spawn(async move {
-                    let result = aios_core::upgrade::check_for_update(&update_url).await;
-                    let _ = tx.send(match result {
-                        Err(e) => UpgradeCheckResult::Error(e.to_string()),
-                        Ok(None) => UpgradeCheckResult::UpToDate,
-                        Ok(Some(info)) => UpgradeCheckResult::Available(info),
-                    });
-                });
-
-                // Poll for result on the GTK thread.
-                let chat = chat_view.clone();
-                let state_clone = state.clone();
-                glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-                    match rx.try_recv() {
-                        Ok(UpgradeCheckResult::Error(e)) => {
-                            let msg = t_fmt("cmd.upgrade.check_failed", &[("error", &e)]);
-                            chat.add_level_message(MessageLevel::Warning, &msg);
-                            glib::ControlFlow::Break
-                        }
-                        Ok(UpgradeCheckResult::UpToDate) => {
-                            let version = aios_core::upgrade::CURRENT_VERSION.trim();
-                            let msg = t_fmt("cmd.upgrade.up_to_date", &[("version", version)]);
-                            chat.add_message("system", &msg);
-                            glib::ControlFlow::Break
-                        }
-                        Ok(UpgradeCheckResult::Available(info)) => {
-                            let current = aios_core::upgrade::CURRENT_VERSION.trim();
-                            let msg = t_fmt("cmd.upgrade.available", &[("latest", &info.version), ("current", current)]);
-                            chat.add_message("system", &msg);
-                            if !info.changelog.is_empty() {
-                                let label = t("cmd.upgrade.changelog_label");
-                                chat.add_message("system", &format!("{label} {}", info.changelog));
-                            }
-                            Self::show_upgrade_confirm_dialog(&state_clone, &chat, info);
-                            glib::ControlFlow::Break
-                        }
-                        Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                        Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-                    }
-                });
-                return;
-            }
-            CommandResult::Panel { title, description, fields, config_key } => {
-                // Render the panel as an interactive card in the chat view.
-                let input_box = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
-                input_box.set_margin_top(8);
-
-                if !description.is_empty() {
-                    let desc = gtk4::Label::new(Some(&description));
-                    desc.set_halign(gtk4::Align::Start);
-                    desc.set_opacity(0.7);
-                    input_box.append(&desc);
-                }
-
-                for field in &fields {
-                    match &field.kind {
-                        PanelFieldKind::Dropdown { options, selected } => {
-                            let label = gtk4::Label::new(Some(&field.label));
-                            label.set_halign(gtk4::Align::Start);
-                            label.add_css_class("heading");
-                            input_box.append(&label);
-
-                            let string_list = gtk4::StringList::new(
-                                &options.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-                            );
-                            let dropdown = gtk4::DropDown::new(
-                                Some(string_list),
-                                gtk4::Expression::NONE,
-                            );
-
-                            // Set the currently selected value.
-                            if let Some(sel) = selected {
-                                if let Some(idx) = options.iter().position(|o| o == sel) {
-                                    dropdown.set_selected(idx as u32);
-                                }
-                            }
-                            input_box.append(&dropdown);
-
-                            // Apply button.
-                            let apply_btn = gtk4::Button::with_label("Apply");
-                            apply_btn.add_css_class("suggested-action");
-                            apply_btn.set_halign(gtk4::Align::Start);
-                            apply_btn.set_margin_top(4);
-
-                            let options_clone = options.clone();
-                            let config_key_clone = config_key.clone();
-                            let state_for_panel = state.clone();
-                            let chat_for_panel = chat_view.clone();
-                            let dd_ref = dropdown.clone();
-                            let field_id = field.id.clone();
-                            apply_btn.connect_clicked(move |b| {
-                                b.set_sensitive(false);
-                                let idx = dd_ref.selected() as usize;
-                                if let Some(value) = options_clone.get(idx) {
-                                    let mut s = state_for_panel.borrow_mut();
-                                    let _ = s.config.set(
-                                        &config_key_clone,
-                                        serde_json::json!(value),
-                                    );
-
-                                    // Apply theme change immediately via libadwaita.
-                                    if config_key_clone == "ui.theme" {
-                                        Self::apply_theme(value);
-                                    }
-
-                                    // Apply resolution change.
-                                    if field_id == "resolution" {
-                                        aios_core::config::commands::CommandHandler::apply_resolution(value);
-                                    }
-
-                                    chat_for_panel.add_message(
-                                        "system",
-                                        &format!("Set to: {value}"),
-                                    );
-                                }
-                            });
-                            input_box.append(&apply_btn);
-                        }
-                    }
-                }
-
-                drop(s);
-                chat_view.add_setup_card(
-                    "preferences-system-symbolic",
-                    &title,
-                    "",
-                    Some(input_box.upcast_ref()),
-                );
-                return;
-            }
-            CommandResult::BackgroundTask { description, task } => {
-                chat_view.add_message("system", &description);
-
-                match task {
-                    aios_core::config::commands::BackgroundTaskKind::WakeWordTraining { phrase, output_dir } => {
-                        // Get shared state for training.
-                        let training_flag = s.wake_training_in_progress.clone();
-                        let kws_engine_arc = s.kws_engine.clone();
-                        let _kws_models_dir = s.kws_models_dir.clone();
-                        let wake_enabled_flag = s.wake_enabled.clone();
-                        drop(s);
-
-                        if let Some(ref flag) = training_flag {
-                            flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
-
-                        // Spawn training in a background thread.
-                        let chat_for_train = chat_view.clone();
-                        let (train_tx, train_rx) = std::sync::mpsc::channel::<Result<std::path::PathBuf, String>>();
-
-                        let phrase_clone = phrase.clone();
-                        std::thread::spawn(move || {
-                            let result = aios_voice::KwsTrainer::train(&phrase_clone, &output_dir);
-                            let _ = train_tx.send(result.map_err(|e| e.to_string()));
-                        });
-
-                        // Poll for training completion on the GTK thread.
-                        let state_for_train = state.clone();
-                        glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-                            match train_rx.try_recv() {
-                                Ok(Ok(model_path)) => {
-                                    info!("KWS training complete: {}", model_path.display());
-                                    chat_for_train.add_message("system",
-                                        &format!("Wake word training complete for \"{phrase}\". Model saved."));
-
-                                    // Hot-swap the model into the KWS engine.
-                                    if let Some(ref engine_arc) = kws_engine_arc {
-                                        if let Ok(mut guard) = engine_arc.lock() {
-                                            if let Some(ref mut engine) = *guard {
-                                                match engine.load_wake_model(&model_path, &phrase) {
-                                                    Ok(()) => {
-                                                        info!("KWS: hot-swapped model for \"{}\"", phrase);
-                                                        chat_for_train.add_message("system",
-                                                            &format!("Wake word \"{phrase}\" is now active."));
-                                                    }
-                                                    Err(e) => {
-                                                        warn!("KWS: failed to load trained model: {e}");
-                                                        chat_for_train.add_message("system",
-                                                            &format!("Model trained but failed to load: {e}"));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Enable wake word detection.
-                                    if let Some(ref flag) = wake_enabled_flag {
-                                        flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    }
-
-                                    // Update config.
-                                    if let Ok(mut cfg) = aios_core::config::ConfigManager::new() {
-                                        let _ = cfg.set("voice.wake_word_source", serde_json::json!("custom"));
-                                    }
-
-                                    // Clear training flag.
-                                    let s = state_for_train.borrow();
-                                    if let Some(ref flag) = s.wake_training_in_progress {
-                                        flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                                    }
-
-                                    glib::ControlFlow::Break
-                                }
-                                Ok(Err(e)) => {
-                                    warn!("KWS training failed: {e}");
-                                    chat_for_train.add_level_message(
-                                        aios_core::types::MessageLevel::Warning,
-                                        &format!("Wake word training failed: {e}"),
-                                    );
-
-                                    // Clear training flag.
-                                    let s = state_for_train.borrow();
-                                    if let Some(ref flag) = s.wake_training_in_progress {
-                                        flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                                    }
-
-                                    glib::ControlFlow::Break
-                                }
-                                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                    // Training thread crashed.
-                                    let s = state_for_train.borrow();
-                                    if let Some(ref flag) = s.wake_training_in_progress {
-                                        flag.store(false, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    glib::ControlFlow::Break
-                                }
-                            }
-                        });
-                        return;
-                    }
-                }
-            }
-            CommandResult::Unknown(cmd) => {
-                chat_view.add_message(
-                    "system",
-                    &format!("Unknown command: {cmd}\nType /help for available commands."),
-                );
-            }
-        }
-
-        // Re-apply any provider/key changes to the LLM manager.
-        let provider = s.config.get_str("llm.provider", "claude");
-        if let Ok(mut llm) = s.llm.try_lock() {
-            let _ = llm.set_active(&provider);
-
-            let claude_key = s.config.get_str("llm.claude_api_key", "");
-            if !claude_key.is_empty() {
-                let _ = llm.set_api_key("claude", claude_key);
-            }
-            let openai_key = s.config.get_str("llm.openai_api_key", "");
-            if !openai_key.is_empty() {
-                let _ = llm.set_api_key("openai", openai_key);
-            }
-        }
-
-        // Re-apply theme from config (handles /theme dark, /theme light, etc.).
-        let theme = s.config.get_str("ui.theme", "dark");
-        Self::apply_theme(&theme);
-    }
-
-    /// Show an "Install update?" confirm dialog for the upgrade flow.
-    fn show_upgrade_confirm_dialog(
-        state: &Rc<RefCell<AiosApp>>,
-        chat_view: &ChatView,
-        info: aios_core::upgrade::ReleaseInfo,
-    ) {
-        use adw::prelude::*;
-
-        // Find the top-level window from the chat view widget.
-        let widget = chat_view.widget();
-        let window = widget.root()
-            .and_then(|r| r.downcast::<adw::ApplicationWindow>().ok());
-        let win_ref: Option<&gtk4::Window> = window.as_ref()
-            .map(|w| w.upcast_ref::<gtk4::Window>());
-
-        let dialog = adw::MessageDialog::new(
-            win_ref,
-            Some(&t("cmd.upgrade.install_prompt")),
-            Some(&format!("Install AiOS v{}?", info.version)),
-        );
-        dialog.add_response("skip", "Skip");
-        dialog.add_response("install", "Install");
-        dialog.set_response_appearance("install", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("skip"));
-
-        let chat = chat_view.clone();
-        let state_clone = state.clone();
-
-        dialog.connect_response(None, move |_dlg, response| {
-            if response != "install" {
-                return;
-            }
-            Self::run_upgrade(&state_clone, &chat, info.clone());
-        });
-
-        dialog.present();
-    }
-
-    /// Drive the download + verify + install sequence, reporting progress via
-    /// the chat view, then show the reboot dialog.
-    fn run_upgrade(
-        state: &Rc<RefCell<AiosApp>>,
-        chat_view: &ChatView,
-        info: aios_core::upgrade::ReleaseInfo,
-    ) {
-        use aios_core::types::MessageLevel;
-
-        let rt = state.borrow().rt.clone();
-        let chat = chat_view.clone();
-        let state_clone = state.clone();
-
-        chat.add_message("system", &t("cmd.upgrade.downloading"));
-
-        // Use mpsc channel: tokio task sends result, GTK polls via timeout_add_local.
-        let (tx, rx) = std::sync::mpsc::channel::<UpgradeInstallResult>();
-
-        let sha256 = info.sha256.clone();
-
-        // Spawn download + verify + install on Tokio (no GTK types captured).
-        rt.spawn(async move {
-            // --- Download ---
-            let dl_result = aios_core::upgrade::download_binary(&info, |_downloaded, _total| {
-                // Progress reporting intentionally omitted to avoid Send issues.
-                // The "Downloading..." message is already shown.
-            })
-            .await;
-
-            if let Err(e) = dl_result {
-                let _ = tx.send(UpgradeInstallResult::Error(e.to_string()));
-                return;
-            }
-
-            // --- Verify checksum ---
-            if let Err(e) = aios_core::upgrade::verify_checksum(&sha256).await {
-                let _ = tx.send(UpgradeInstallResult::Error(e.to_string()));
-                return;
-            }
-
-            // --- Install ---
-            if let Err(e) = aios_core::upgrade::install_binary().await {
-                let _ = tx.send(UpgradeInstallResult::Error(e.to_string()));
-                return;
-            }
-
-            let _ = tx.send(UpgradeInstallResult::Success);
-        });
-
-        // Poll for result on the GTK thread.
-        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-            match rx.try_recv() {
-                Ok(UpgradeInstallResult::Error(e)) => {
-                    let msg = t_fmt("cmd.upgrade.install_failed", &[("error", &e)]);
-                    chat.add_level_message(MessageLevel::Warning, &msg);
-                    glib::ControlFlow::Break
-                }
-                Ok(UpgradeInstallResult::Success) => {
-                    chat.add_message("system", &t("cmd.upgrade.install_ok"));
-                    Self::show_reboot_dialog(&state_clone, &chat);
-                    glib::ControlFlow::Break
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-            }
-        });
-    }
-
-    /// Show a "Reboot now?" dialog after a successful upgrade install.
-    fn show_reboot_dialog(
-        state: &Rc<RefCell<AiosApp>>,
-        chat_view: &ChatView,
-    ) {
-        use adw::prelude::*;
-
-        // Find the top-level window from the chat view widget.
-        let widget = chat_view.widget();
-        let window = widget.root()
-            .and_then(|r| r.downcast::<adw::ApplicationWindow>().ok());
-        let win_ref: Option<&gtk4::Window> = window.as_ref()
-            .map(|w| w.upcast_ref::<gtk4::Window>());
-
-        let dialog = adw::MessageDialog::new(
-            win_ref,
-            Some(&t("cmd.upgrade.reboot_prompt")),
-            Some("Reboot now to apply the update?"),
-        );
-        dialog.add_response("later", "Later");
-        dialog.add_response("reboot", "Reboot");
-        dialog.set_response_appearance("reboot", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("reboot"));
-
-        let chat = chat_view.clone();
-        let state_clone = state.clone();
-
-        dialog.connect_response(None, move |_dlg, response| {
-            if response != "reboot" {
-                let msg = t("cmd.upgrade.reboot_later");
-                chat.add_message("system", &msg);
-                return;
-            }
-            let rt = state_clone.borrow().rt.clone();
-            rt.spawn(async {
-                let _ = aios_core::upgrade::reboot().await;
-            });
-        });
-
-        dialog.present();
-    }
-
-    /// Run the self-test suite on the current channel.
-    fn run_selftest(
-        _state: &Rc<RefCell<AiosApp>>,
-        chat_view: &ChatView,
-        filter: &str,
-    ) {
-        use aios_core::selftest::SelfTestRunner;
-        use aios_core::selftest::runner::TestContext;
-
-        let chat = chat_view.clone();
-        chat.add_message("system", "Starting AiOS self-test...");
-
-        let runner = SelfTestRunner::new();
-
-        // Build context factory — each test gets a fresh context.
-        let chat_for_ctx = chat_view.clone();
-        let ctx_factory = move || -> TestContext {
-            let c = chat_for_ctx.clone();
-            TestContext {
-                display: Box::new(move |role, content| {
-                    c.add_message(role, content);
-                }),
-                // Panel support: not wired yet (would need the UiPanelTool callback).
-                // For now, interactive tests will show "skipped".
-                show_panel: None,
-                channel_kind: aios_core::channel::ChannelKind::Desktop,
-            }
-        };
-
-        let results = match filter.trim() {
-            "" => runner.run_all(ctx_factory),
-            "quick" => runner.run_quick(ctx_factory),
-            tag => runner.run_tagged(tag, ctx_factory),
-        };
-
-        let report = SelfTestRunner::format_report(&results);
-        chat.add_message("system", &report);
-    }
-
-    /// Close the topmost modal/transient dialog window.
-    ///
-    /// Iterates all windows registered with the GTK application and looks
-    /// for visible windows that are not the main `ApplicationWindow`.
-    /// Closes the last one found (topmost) and returns `true` if a window
-    /// was closed.
-    fn close_topmost_dialog() -> bool {
-        // Get the running GtkApplication via gio::Application::default().
-        let gio_app = match gtk4::gio::Application::default() {
-            Some(a) => a,
-            None => return false,
-        };
-        let gtk_app = match gio_app.downcast::<gtk4::Application>() {
-            Ok(a) => a,
-            Err(_) => return false,
-        };
-
-        // Iterate windows registered with the application.
-        // The list is ordered; the last matching window is the topmost.
-        let mut candidate: Option<gtk4::Window> = None;
-
-        for win in gtk_app.windows() {
-            // Skip the main application window.
-            if win.downcast_ref::<adw::ApplicationWindow>().is_some() {
-                continue;
-            }
-            if win.is_visible() {
-                candidate = Some(win);
-            }
-        }
-
-        if let Some(win) = candidate {
-            win.close();
-            true
-        } else {
-            false
-        }
-    }
-
     /// Apply a theme setting via libadwaita's StyleManager.
-    fn apply_theme(theme: &str) {
-        let style_manager = adw::StyleManager::default();
-        match theme {
-            "dark" => style_manager.set_color_scheme(adw::ColorScheme::ForceDark),
-            "light" => style_manager.set_color_scheme(adw::ColorScheme::ForceLight),
-            "auto" | "system" => style_manager.set_color_scheme(adw::ColorScheme::Default),
-            _ => {
-                warn!("Unknown theme: {theme}, defaulting to dark");
-                style_manager.set_color_scheme(adw::ColorScheme::ForceDark);
-            }
-        }
-        info!("Theme applied: {theme}");
+    pub(crate) fn apply_theme(theme: &str) {
+        command_handler::apply_theme(theme);
     }
 
-    /// Send a user message to the LLM on the Tokio runtime.
-    fn send_to_llm(
-        state: &Rc<RefCell<AiosApp>>,
-        chat_view: &ChatView,
-        _prompt: &PromptInput,
-        text: String,
+    /// Get list of available providers (those with API keys configured).
+    fn available_providers(config: &ConfigManager) -> Vec<String> {
+        let mut providers = Vec::new();
+        if !config.get_str("llm.claude_api_key", "").is_empty() {
+            providers.push("Claude".to_string());
+        }
+        let openai_key = config.get_str("llm.openai_api_key", "");
+        if !openai_key.is_empty() && openai_key != "your-api-key-here" {
+            providers.push("ChatGPT".to_string());
+        }
+        providers
+    }
+
+    /// Wire UiPanelTool and tool executor into the LLM manager.
+    fn wire_tool_executor(
+        llm: &mut LlmManager,
+        window: &adw::ApplicationWindow,
+        queue: SharedQueue,
     ) {
-        // Stop any active TTS when the user sends a new message
-        stop_tts();
-
-        // Show thinking placeholder immediately
-        let thinking_handle = chat_view.add_thinking();
-
-        let s = state.borrow();
-        let llm = s.llm.clone();
-        let rt = s.rt.clone();
-
-        // Record user message in conversation history.
-        drop(s);
-        state
-            .borrow_mut()
-            .conversation
-            .push(aios_core::types::Message::user(&text));
-
-        // Use mpsc channel: tokio task sends result, GTK polls via idle_add.
-        let (tx, rx) = std::sync::mpsc::channel::<LlmResult>();
-        let history = state.borrow().conversation.clone();
-
-        // Spawn LLM call on Tokio (no GTK types captured — all Send-safe).
-        rt.spawn(async move {
-            let mut llm_guard = llm.lock().await;
-            let mut history = history;
-
-            if history
-                .last()
-                .is_some_and(|m| m.role == aios_core::types::Role::User)
-            {
-                history.pop();
+        let ui_panel_tool = Self::create_ui_panel_tool(window);
+        let tool_registry = Arc::new(std::sync::Mutex::new(ToolRegistry::new()));
+        {
+            let mut tr = tool_registry.lock().unwrap();
+            tr.load_builtins();
+            tr.register_queue_tools(queue);
+            let _ = tr.unregister("ui_panel");
+            let _ = tr.register(Box::new(UiPanelToolWrapper(ui_panel_tool)));
+        }
+        let tr_for_executor = tool_registry.clone();
+        llm.set_tool_executor(Arc::new(move |name, args, channel| {
+            let registry = tr_for_executor.lock().unwrap();
+            let result = registry.execute_on_channel(&name, args, &channel);
+            if result.success {
+                result.output
+            } else {
+                format!("Tool error: {}", result.output)
             }
+        }));
+    }
 
-            let result = llm_guard
-                .chat(&text, Some(&mut history), &[], None)
-                .await;
-            drop(llm_guard);
+    /// Start the Signal listener if enabled.
+    fn start_signal_listener(
+        config: &ConfigManager,
+        signal_enabled: bool,
+        signal_phone: &str,
+        runtime: &Arc<aios_core::channel::AppRuntime>,
+    ) -> Option<Arc<aios_signal::SignalSender>> {
+        if !signal_enabled || signal_phone.is_empty() {
+            return None;
+        }
 
-            match result {
-                Ok(response) => {
-                    let content = response.content.unwrap_or_else(|| {
-                        "I received your message but have no response text.".to_string()
-                    });
-                    let _ = tx.send(LlmResult::Success {
-                        content,
-                        updated_history: history,
-                    });
-                }
-                Err(e) => {
-                    let _ = tx.send(LlmResult::Error(format!("{e}")));
+        let contacts_str = config.get_str("channels.signal.allowed_contacts", "");
+        let allowed: Vec<String> = contacts_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let listener =
+            aios_signal::SignalListener::new(signal_phone.to_string(), allowed);
+        let sig_tx = runtime.message_sender();
+        listener.start(sig_tx);
+        runtime.switcher.register_channel(
+            aios_core::channel::ChannelKind::Signal,
+            aios_core::channel::ChannelContext::signal(),
+        );
+        info!("Signal channel started for {signal_phone}");
+        Some(Arc::new(aios_signal::SignalSender::new(
+            signal_phone.to_string(),
+        )))
+    }
+
+    /// Wire channel switcher to the overlay widget.
+    fn wire_channel_overlay(
+        runtime: &Arc<aios_core::channel::AppRuntime>,
+        channel_overlay: &ChannelOverlay,
+    ) {
+        let (overlay_tx, overlay_rx) =
+            std::sync::mpsc::channel::<aios_core::channel::ChannelKind>();
+
+        runtime.switcher.on_switch(Arc::new(move |_old, new| {
+            let _ = overlay_tx.send(new);
+        }));
+
+        let overlay_for_poll = channel_overlay.clone();
+        glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            while let Ok(new_kind) = overlay_rx.try_recv() {
+                if new_kind == aios_core::channel::ChannelKind::Desktop {
+                    overlay_for_poll.hide();
+                } else {
+                    overlay_for_poll.show(new_kind);
                 }
             }
+            glib::ControlFlow::Continue
         });
 
-        // Poll for LLM response. Once it arrives, start TTS and wait for
-        // voice to begin before removing the thinking placeholder.
-        let chat_view_ref = chat_view.clone();
-        let state_ref = state.clone();
-        let tts_started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        // Phase 1: wait for LLM response
-        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-            match rx.try_recv() {
-                Ok(LlmResult::Success { content, updated_history }) => {
-                    // Response arrived — start TTS with signal
-                    let tts_flag = tts_started.clone();
-                    speak_if_enabled_with_signal(
-                        &content,
-                        &state_ref.borrow().config,
-                        Some(tts_flag.clone()),
-                    );
-
-                    // Update conversation history
-                    let mut s = state_ref.borrow_mut();
-                    s.conversation = updated_history;
-                    s.conversation
-                        .push(aios_core::types::Message::assistant(&content));
-                    drop(s);
-
-                    // Phase 2: wait for TTS to start, then swap thinking → real message
-                    let cv = chat_view_ref.clone();
-                    let handle = thinking_handle.clone();
-                    let content_for_display = content.clone();
-                    glib::timeout_add_local(
-                        std::time::Duration::from_millis(30),
-                        move || {
-                            if tts_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                                cv.remove_thinking(&handle);
-                                cv.add_message("assistant", &content_for_display);
-                                glib::ControlFlow::Break
-                            } else {
-                                glib::ControlFlow::Continue
-                            }
-                        },
-                    );
-
-                    glib::ControlFlow::Break
-                }
-                Ok(LlmResult::Error(err)) => {
-                    chat_view_ref.remove_thinking(&thinking_handle);
-                    chat_view_ref.add_message("system", &format!("Error: {err}"));
-                    glib::ControlFlow::Break
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    chat_view_ref.remove_thinking(&thinking_handle);
-                    glib::ControlFlow::Break
-                }
-            }
+        let switcher_for_btn = runtime.switcher.clone();
+        channel_overlay.on_switch_back(move || {
+            let _ = switcher_for_btn.switch_to(aios_core::channel::ChannelKind::Desktop);
         });
     }
-}
 
-/// Recursively copy all files from `src` directory into `dst` directory.
-/// Creates `dst` and any intermediate directories as needed.
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if src_path.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)?;
+    /// Show a warning if no API key is configured for the active provider.
+    fn warn_if_no_api_key(config: &ConfigManager, chat_view: &ChatView) {
+        let provider = config.get_str("llm.provider", "claude");
+        let has_key = match provider.as_str() {
+            "claude" => !config.get_str("llm.claude_api_key", "").is_empty(),
+            "openai" => !config.get_str("llm.openai_api_key", "").is_empty(),
+            _ => false,
+        };
+        if !has_key {
+            chat_view.add_level_message(
+                aios_core::types::MessageLevel::Warning,
+                &t("app.no_api_key_warning"),
+            );
         }
     }
-    Ok(())
 }
 
-/// Internal result type for async upgrade version check.
-enum UpgradeCheckResult {
-    UpToDate,
-    Available(aios_core::upgrade::ReleaseInfo),
-    Error(String),
-}
+// ---------------------------------------------------------------------------
+// LlmState trait implementation for AiosApp
+// ---------------------------------------------------------------------------
 
-/// Internal result type for async upgrade install (download + verify + install).
-enum UpgradeInstallResult {
-    Success,
-    Error(String),
-}
+impl llm_handler::LlmState for AiosApp {
+    fn llm(&self) -> Arc<tokio::sync::Mutex<LlmManager>> {
+        self.llm.clone()
+    }
 
-/// Internal result type for async LLM communication.
-enum LlmResult {
-    Success {
-        content: String,
-        updated_history: Vec<aios_core::types::Message>,
-    },
-    Error(String),
+    fn rt(&self) -> tokio::runtime::Handle {
+        self.rt.clone()
+    }
+
+    fn conversation(&self) -> Vec<aios_core::types::Message> {
+        self.conversation.clone()
+    }
+
+    fn push_conversation(&mut self, msg: aios_core::types::Message) {
+        self.conversation.push(msg);
+    }
+
+    fn replace_conversation(&mut self, msgs: Vec<aios_core::types::Message>) {
+        self.conversation = msgs;
+    }
+
+    fn queue(&self) -> Option<SharedQueue> {
+        self.queue.clone()
+    }
+
+    fn config_snapshot(&self) -> ConfigManager {
+        first_boot_flow::load_config()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3318,28 +558,15 @@ enum LlmResult {
 
 /// Wraps an `Arc<UiPanelTool>` as a `Tool` so it can be registered in the
 /// [`ToolRegistry`].
-///
-/// This allows us to register a pre-configured `UiPanelTool` (with the GTK
-/// panel callback already set) into the registry used by the LLM executor.
-struct UiPanelToolWrapper(Arc<UiPanelTool>);
+pub(crate) struct UiPanelToolWrapper(pub(crate) Arc<UiPanelTool>);
 
 impl aios_tools::Tool for UiPanelToolWrapper {
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-
-    fn description(&self) -> &str {
-        self.0.description()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        self.0.parameters()
-    }
-
+    fn name(&self) -> &str { self.0.name() }
+    fn description(&self) -> &str { self.0.description() }
+    fn parameters(&self) -> serde_json::Value { self.0.parameters() }
     fn execute(&self, args: serde_json::Value) -> aios_core::types::ToolResult {
         self.0.execute(args)
     }
-
     fn execute_on_channel(
         &self,
         args: serde_json::Value,

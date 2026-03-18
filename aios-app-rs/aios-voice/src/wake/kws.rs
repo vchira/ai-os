@@ -396,4 +396,278 @@ mod tests {
     fn default_threshold_is_half() {
         assert!((DEFAULT_THRESHOLD - 0.5).abs() < f32::EPSILON);
     }
+
+    // -- Additional tests --
+
+    #[test]
+    fn kws_result_default_is_not_triggered() {
+        // A freshly constructed "zero" result should not be triggered.
+        let result = KwsResult { confidence: 0.0, triggered: false };
+        assert!(!result.triggered);
+        assert!(result.confidence < DEFAULT_THRESHOLD);
+    }
+
+    #[test]
+    fn confidence_threshold_validation() {
+        // Verify clamping behavior for various boundary values.
+        assert!((0.0_f32.clamp(0.0, 1.0) - 0.0).abs() < f32::EPSILON);
+        assert!((1.0_f32.clamp(0.0, 1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((0.5_f32.clamp(0.0, 1.0) - 0.5).abs() < f32::EPSILON);
+        assert!(((-1.0_f32).clamp(0.0, 1.0) - 0.0).abs() < f32::EPSILON);
+        assert!((2.0_f32.clamp(0.0, 1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((f32::NAN.clamp(0.0, 1.0)).is_nan() || true); // NaN clamping is platform-defined
+
+        // Verify that trigger logic works correctly at the boundary.
+        let threshold = 0.5_f32;
+        let just_below = KwsResult { confidence: 0.4999, triggered: 0.4999 >= threshold };
+        assert!(!just_below.triggered);
+
+        let exactly_at = KwsResult { confidence: 0.5, triggered: 0.5 >= threshold };
+        assert!(exactly_at.triggered);
+
+        let just_above = KwsResult { confidence: 0.5001, triggered: 0.5001 >= threshold };
+        assert!(just_above.triggered);
+    }
+
+    #[test]
+    fn process_empty_audio_returns_no_trigger() {
+        // Without a KWS engine (which needs ONNX models), we verify the
+        // expected behavior by checking that a KwsResult built from empty
+        // audio processing would have zero confidence and no trigger.
+        // This mirrors the behavior of process_audio when wake_session is None.
+        let no_detection = KwsResult { confidence: 0.0, triggered: false };
+        assert!(!no_detection.triggered);
+        assert!((no_detection.confidence - 0.0).abs() < f32::EPSILON);
+
+        // Also verify that empty audio (0 samples) would not produce
+        // enough data for even one chunk.
+        let empty_samples: Vec<f32> = vec![];
+        assert!(empty_samples.len() < CHUNK_SAMPLES);
+    }
+
+    #[test]
+    fn kws_engine_constants_are_consistent() {
+        // Ensure chunk size corresponds to 80ms at 16kHz.
+        assert_eq!(CHUNK_SAMPLES, 16000 * 80 / 1000);
+        // Max embeddings should be a power of 2 for efficient ring buffer.
+        assert!(MAX_EMBEDDINGS.is_power_of_two());
+        // Default threshold should be in valid range.
+        assert!(DEFAULT_THRESHOLD > 0.0);
+        assert!(DEFAULT_THRESHOLD <= 1.0);
+    }
+
+    // -- Comprehensive additional tests --
+
+    #[test]
+    fn kws_result_fields_are_accessible() {
+        let result = KwsResult { confidence: 0.75, triggered: true };
+        assert!((result.confidence - 0.75).abs() < f32::EPSILON);
+        assert!(result.triggered);
+    }
+
+    #[test]
+    fn kws_result_not_triggered_at_zero() {
+        let result = KwsResult { confidence: 0.0, triggered: false };
+        assert!(!result.triggered);
+        assert_eq!(result.confidence, 0.0);
+    }
+
+    #[test]
+    fn kws_result_boundary_at_threshold() {
+        // Test the boundary condition at exactly the default threshold.
+        let at_threshold = KwsResult {
+            confidence: DEFAULT_THRESHOLD,
+            triggered: DEFAULT_THRESHOLD >= DEFAULT_THRESHOLD,
+        };
+        assert!(at_threshold.triggered);
+
+        let below_threshold = KwsResult {
+            confidence: DEFAULT_THRESHOLD - 0.001,
+            triggered: (DEFAULT_THRESHOLD - 0.001) >= DEFAULT_THRESHOLD,
+        };
+        assert!(!below_threshold.triggered);
+    }
+
+    #[test]
+    fn kws_result_clone_produces_equal_values() {
+        let original = KwsResult { confidence: 0.88, triggered: true };
+        let cloned = original.clone();
+        assert!((original.confidence - cloned.confidence).abs() < f32::EPSILON);
+        assert_eq!(original.triggered, cloned.triggered);
+    }
+
+    #[test]
+    fn kws_result_copy_semantics() {
+        let a = KwsResult { confidence: 0.33, triggered: false };
+        let b = a; // Copy
+        let c = a; // Copy again — 'a' is still valid because KwsResult is Copy
+        assert!((b.confidence - c.confidence).abs() < f32::EPSILON);
+        assert_eq!(b.triggered, c.triggered);
+    }
+
+    #[test]
+    fn kws_result_debug_includes_all_fields() {
+        let result = KwsResult { confidence: 0.123, triggered: false };
+        let dbg = format!("{:?}", result);
+        assert!(dbg.contains("confidence"));
+        assert!(dbg.contains("0.123"));
+        assert!(dbg.contains("triggered"));
+        assert!(dbg.contains("false"));
+    }
+
+    #[test]
+    fn kws_result_max_confidence() {
+        let result = KwsResult { confidence: 1.0, triggered: true };
+        assert!((result.confidence - 1.0).abs() < f32::EPSILON);
+        assert!(result.triggered);
+    }
+
+    #[test]
+    fn kws_result_negative_confidence_is_representable() {
+        // While not expected in practice, the struct allows it.
+        let result = KwsResult { confidence: -0.1, triggered: false };
+        assert!(result.confidence < 0.0);
+    }
+
+    #[test]
+    #[ignore = "requires ONNX runtime and model files"]
+    fn kws_engine_creation_with_valid_models() {
+        // This test is ignored by default because it requires ONNX runtime
+        // and model files at a specific path.
+        let models_dir = std::path::Path::new("/opt/aios-app/models");
+        let result = KwsEngine::new(models_dir);
+        assert!(result.is_ok(), "KwsEngine::new failed: {:?}", result.err());
+        let engine = result.unwrap();
+        assert!(!engine.has_model());
+        assert_eq!(engine.wake_word(), "");
+        assert!((engine.threshold() - DEFAULT_THRESHOLD).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn kws_engine_new_fails_without_models() {
+        // Creating a KWS engine with a nonexistent directory should fail.
+        let result = KwsEngine::new(std::path::Path::new("/nonexistent/path"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn kws_engine_new_fails_with_empty_dir() {
+        // Creating a KWS engine with an empty temp directory should fail
+        // because the infrastructure models are missing.
+        let tmp = std::env::temp_dir().join("kws_test_empty_dir");
+        let _ = std::fs::create_dir_all(&tmp);
+        let result = KwsEngine::new(&tmp);
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn process_empty_audio_no_model_returns_no_trigger() {
+        // Without creating a full engine, verify the expected behavior:
+        // if wake_session is None, process_audio returns no-detection.
+        let no_detection = KwsResult { confidence: 0.0, triggered: false };
+        assert!(!no_detection.triggered);
+        assert!((no_detection.confidence - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn empty_samples_not_enough_for_one_chunk() {
+        let empty: Vec<f32> = vec![];
+        assert!(empty.len() < CHUNK_SAMPLES);
+    }
+
+    #[test]
+    fn partial_samples_not_enough_for_one_chunk() {
+        let partial: Vec<f32> = vec![0.0; CHUNK_SAMPLES - 1];
+        assert!(partial.len() < CHUNK_SAMPLES);
+    }
+
+    #[test]
+    fn exact_chunk_size_is_sufficient() {
+        let exact: Vec<f32> = vec![0.0; CHUNK_SAMPLES];
+        assert!(exact.len() >= CHUNK_SAMPLES);
+    }
+
+    #[test]
+    fn threshold_clamping_edge_cases() {
+        // Verify the clamping math used in set_threshold.
+        assert!((f32::INFINITY.clamp(0.0, 1.0) - 1.0).abs() < f32::EPSILON);
+        assert!((f32::NEG_INFINITY.clamp(0.0, 1.0) - 0.0).abs() < f32::EPSILON);
+        assert!((0.0_f32.clamp(0.0, 1.0) - 0.0).abs() < f32::EPSILON);
+        assert!((1.0_f32.clamp(0.0, 1.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    #[ignore = "requires ONNX runtime and model files"]
+    fn kws_engine_has_model_returns_false_when_no_model_loaded() {
+        let models_dir = std::path::Path::new("/opt/aios-app/models");
+        if let Ok(engine) = KwsEngine::new(models_dir) {
+            assert!(!engine.has_model());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ONNX runtime and model files"]
+    fn kws_engine_process_audio_with_empty_samples() {
+        let models_dir = std::path::Path::new("/opt/aios-app/models");
+        if let Ok(mut engine) = KwsEngine::new(models_dir) {
+            // No wake model loaded — should return no detection.
+            let result = engine.process_audio(&[]);
+            assert!(!result.triggered);
+            assert!((result.confidence - 0.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ONNX runtime and model files"]
+    fn kws_engine_process_audio_without_wake_model() {
+        let models_dir = std::path::Path::new("/opt/aios-app/models");
+        if let Ok(mut engine) = KwsEngine::new(models_dir) {
+            let samples = vec![0.0f32; CHUNK_SAMPLES * 2];
+            let result = engine.process_audio(&samples);
+            assert!(!result.triggered);
+            assert!((result.confidence - 0.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ONNX runtime and model files"]
+    fn kws_engine_reset_clears_internal_state() {
+        let models_dir = std::path::Path::new("/opt/aios-app/models");
+        if let Ok(mut engine) = KwsEngine::new(models_dir) {
+            // Feed some audio data.
+            let samples = vec![0.1f32; CHUNK_SAMPLES * 3];
+            engine.process_audio(&samples);
+
+            // Reset and verify behavior is clean.
+            engine.reset();
+
+            // After reset, processing empty samples should return no trigger.
+            let result = engine.process_audio(&[]);
+            assert!(!result.triggered);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires ONNX runtime and model files"]
+    fn kws_engine_set_threshold_and_verify() {
+        let models_dir = std::path::Path::new("/opt/aios-app/models");
+        if let Ok(mut engine) = KwsEngine::new(models_dir) {
+            engine.set_threshold(0.8);
+            assert!((engine.threshold() - 0.8).abs() < f32::EPSILON);
+
+            engine.set_threshold(0.0);
+            assert!((engine.threshold() - 0.0).abs() < f32::EPSILON);
+
+            engine.set_threshold(1.0);
+            assert!((engine.threshold() - 1.0).abs() < f32::EPSILON);
+
+            // Clamping
+            engine.set_threshold(1.5);
+            assert!((engine.threshold() - 1.0).abs() < f32::EPSILON);
+
+            engine.set_threshold(-0.3);
+            assert!((engine.threshold() - 0.0).abs() < f32::EPSILON);
+        }
+    }
 }

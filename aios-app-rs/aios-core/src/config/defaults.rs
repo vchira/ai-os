@@ -30,7 +30,7 @@ pub const DEFAULTS_JSON: &str = r#"{
         "tts_voice": "en_US-amy-medium",
         "tts_gender": "female",
         "tts_rate": 1.0,
-        "wake_word": "hey assistant",
+        "wake_word": "ok computer",
         "wake_enabled": true,
         "wake_word_source": "pretrained",
         "wake_threshold": 0.5
@@ -76,5 +76,80 @@ mod tests {
         assert_eq!(v["system"]["keyboard_layout"], "us");
         assert_eq!(v["system"]["update_url"], "https://api.github.com/repos/aios-dev/aios/releases/latest");
         assert_eq!(v["tools"]["store_url"], "https://store.aios.dev/api/v1");
+    }
+
+    #[test]
+    fn wake_word_default_is_ok_computer() {
+        let v = defaults();
+        assert_eq!(v["voice"]["wake_word"], "ok computer");
+    }
+
+    #[test]
+    fn wake_enabled_by_default() {
+        let v = defaults();
+        assert_eq!(v["voice"]["wake_enabled"], true);
+    }
+
+    #[test]
+    fn stt_enabled_by_default() {
+        let v = defaults();
+        assert_eq!(v["voice"]["stt_enabled"], true);
+    }
+
+    #[test]
+    fn tts_enabled_by_default() {
+        let v = defaults();
+        assert_eq!(v["voice"]["tts_enabled"], true);
+    }
+
+    #[test]
+    fn wake_word_source_is_pretrained() {
+        let v = defaults();
+        assert_eq!(v["voice"]["wake_word_source"], "pretrained");
+    }
+
+    #[test]
+    fn wake_threshold_default() {
+        let v = defaults();
+        assert_eq!(v["voice"]["wake_threshold"], 0.5);
+    }
+
+    #[test]
+    fn assistant_name_default() {
+        let v = defaults();
+        assert_eq!(v["assistant"]["name"], "Assistant");
+    }
+
+    #[test]
+    fn language_default_is_en() {
+        let v = defaults();
+        assert_eq!(v["assistant"]["language"], "en");
+    }
+
+    #[test]
+    fn machine_name_default() {
+        let v = defaults();
+        assert_eq!(v["system"]["machine_name"], "assistant");
+    }
+
+    #[test]
+    fn all_required_keys_present() {
+        let v = defaults();
+        // Voice
+        assert!(v["voice"]["stt_enabled"].is_boolean());
+        assert!(v["voice"]["tts_enabled"].is_boolean());
+        assert!(v["voice"]["wake_enabled"].is_boolean());
+        assert!(v["voice"]["wake_word"].is_string());
+        assert!(v["voice"]["wake_word_source"].is_string());
+        assert!(v["voice"]["wake_threshold"].is_number());
+        // LLM
+        assert!(v["llm"]["provider"].is_string());
+        assert!(v["llm"]["effort"].is_string());
+        assert!(v["llm"]["quality_mode"].is_string());
+        // UI
+        assert!(v["ui"]["theme"].is_string());
+        // System
+        assert!(v["system"]["keyboard_layout"].is_string());
+        assert!(v["system"]["machine_name"].is_string());
     }
 }

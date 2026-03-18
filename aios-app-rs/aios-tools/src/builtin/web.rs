@@ -483,4 +483,123 @@ mod tests {
         let r = tool.execute(serde_json::json!({ "action": "hack" }));
         assert!(!r.success);
     }
+
+    #[test]
+    fn tool_name_is_web() {
+        let tool = WebTool::new();
+        assert_eq!(tool.name(), "web");
+    }
+
+    #[test]
+    fn tool_category_is_network() {
+        let tool = WebTool::new();
+        assert_eq!(tool.category(), "network");
+    }
+
+    #[test]
+    fn fetch_url_empty_url_returns_error() {
+        let tool = WebTool::new();
+        let r = tool.execute(serde_json::json!({
+            "action": "fetch_url",
+            "url": ""
+        }));
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("url"));
+    }
+
+    #[test]
+    fn search_web_empty_query_returns_error() {
+        let tool = WebTool::new();
+        let r = tool.execute(serde_json::json!({
+            "action": "search_web",
+            "query": ""
+        }));
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("query"));
+    }
+
+    #[test]
+    fn download_file_empty_url_returns_error() {
+        let tool = WebTool::new();
+        let r = tool.execute(serde_json::json!({
+            "action": "download_file",
+            "url": ""
+        }));
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("url"));
+    }
+
+    #[test]
+    fn urlencoding_preserves_alphanumeric() {
+        assert_eq!(urlencoding("abc123"), "abc123");
+    }
+
+    #[test]
+    fn urlencoding_encodes_special_chars() {
+        assert_eq!(urlencoding("hello world!"), "hello+world%21");
+        assert_eq!(urlencoding("a/b"), "a%2Fb");
+        assert_eq!(urlencoding("key=value"), "key%3Dvalue");
+    }
+
+    #[test]
+    fn urlencoding_preserves_tilde_dash_dot() {
+        assert_eq!(urlencoding("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn default_trait_creates_tool() {
+        let tool = WebTool::default();
+        assert_eq!(tool.name(), "web");
+    }
+
+    #[test]
+    fn tool_description_is_non_empty() {
+        let tool = WebTool::new();
+        assert!(!tool.description().is_empty());
+    }
+
+    #[test]
+    fn tool_parameters_schema_has_action() {
+        let tool = WebTool::new();
+        let params = tool.parameters();
+        let props = params["properties"].as_object().unwrap();
+        assert!(props.contains_key("action"));
+        assert!(props.contains_key("url"));
+        assert!(props.contains_key("query"));
+        assert!(props.contains_key("destination"));
+    }
+
+    #[test]
+    fn search_web_with_query_returns_output() {
+        // This test validates that search_web with a valid query at least
+        // does not panic and returns a result. The actual HTTP call may
+        // fail in CI without network, but the code path exercises correctly.
+        let tool = WebTool::new();
+        let r = tool.execute(serde_json::json!({
+            "action": "search_web",
+            "query": "rust programming"
+        }));
+        // Either succeeds with results or fails with a network error — both are valid.
+        // What matters is no panic and a proper ToolResult is returned.
+        assert!(!r.output.is_empty() || r.error.is_some());
+    }
+
+    #[test]
+    fn fetch_url_with_invalid_url_returns_error() {
+        let tool = WebTool::new();
+        let r = tool.execute(serde_json::json!({
+            "action": "fetch_url",
+            "url": "not-a-valid-url"
+        }));
+        // Should fail (either network error or parse error).
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn empty_action_falls_through() {
+        let tool = WebTool::new();
+        let r = tool.execute(serde_json::json!({}));
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("Unknown action"));
+    }
 }

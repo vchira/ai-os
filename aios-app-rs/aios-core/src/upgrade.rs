@@ -318,4 +318,149 @@ mod tests {
         let file = std::fs::read_to_string("../../VERSION").unwrap_or_default();
         assert_eq!(CURRENT_VERSION.trim(), file.trim());
     }
+
+    // ========================================================================
+    // Additional comprehensive tests
+    // ========================================================================
+
+    #[test]
+    fn current_version_has_three_components() {
+        let ver = Version::parse(CURRENT_VERSION.trim()).unwrap();
+        // semver always has major.minor.patch
+        // Just verify they are accessible (they always are with semver::Version)
+        let _major = ver.major;
+        let _minor = ver.minor;
+        let _patch = ver.patch;
+    }
+
+    #[test]
+    fn current_version_not_empty() {
+        assert!(!CURRENT_VERSION.trim().is_empty());
+    }
+
+    #[test]
+    fn current_version_does_not_start_with_v() {
+        // The VERSION file should be plain semver, not "v1.0.0"
+        assert!(
+            !CURRENT_VERSION.trim().starts_with('v'),
+            "CURRENT_VERSION should not start with 'v': {}",
+            CURRENT_VERSION
+        );
+    }
+
+    #[test]
+    fn version_file_exists_and_readable() {
+        let content = std::fs::read_to_string("../../VERSION");
+        assert!(content.is_ok(), "VERSION file should exist at ../../VERSION");
+        let content = content.unwrap();
+        assert!(!content.trim().is_empty(), "VERSION file should not be empty");
+    }
+
+    #[test]
+    fn version_file_is_valid_semver() {
+        let file = std::fs::read_to_string("../../VERSION").unwrap();
+        Version::parse(file.trim()).expect("VERSION file must contain valid semver");
+    }
+
+    #[test]
+    fn release_info_clone() {
+        let info = ReleaseInfo {
+            version: "2.0.0".to_string(),
+            changelog: "Bug fixes".to_string(),
+            binary_url: "https://example.com/aios".to_string(),
+            sha256: "abc123".to_string(),
+        };
+        let cloned = info.clone();
+        assert_eq!(info.version, cloned.version);
+        assert_eq!(info.changelog, cloned.changelog);
+        assert_eq!(info.binary_url, cloned.binary_url);
+        assert_eq!(info.sha256, cloned.sha256);
+    }
+
+    #[test]
+    fn release_info_debug() {
+        let info = ReleaseInfo {
+            version: "1.0.0".to_string(),
+            changelog: "Initial".to_string(),
+            binary_url: "https://example.com/aios".to_string(),
+            sha256: "deadbeef".to_string(),
+        };
+        let debug = format!("{info:?}");
+        assert!(debug.contains("ReleaseInfo"));
+        assert!(debug.contains("1.0.0"));
+        assert!(debug.contains("deadbeef"));
+    }
+
+    #[test]
+    fn binary_path_is_usr_bin_aios() {
+        assert_eq!(BINARY_PATH, "/usr/bin/aios");
+    }
+
+    #[test]
+    fn current_version_parses_without_trim_issues() {
+        // Ensure there's no hidden whitespace that breaks parsing
+        let trimmed = CURRENT_VERSION.trim();
+        let padded = format!("  {}  ", trimmed);
+        Version::parse(padded.trim()).expect("trimmed version should still parse");
+    }
+
+    // ========================================================================
+    // Further edge-case tests
+    // ========================================================================
+
+    #[test]
+    fn version_file_is_single_line() {
+        let content = std::fs::read_to_string("../../VERSION").unwrap();
+        let non_empty_lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(
+            non_empty_lines.len(),
+            1,
+            "VERSION file should contain exactly one non-empty line, found {}",
+            non_empty_lines.len()
+        );
+    }
+
+    #[test]
+    fn current_version_major_is_reasonable() {
+        let v = Version::parse(CURRENT_VERSION.trim()).unwrap();
+        // AiOS is currently at version 1.x — major should be 0, 1, or 2
+        assert!(
+            v.major <= 10,
+            "major version {} seems unreasonably large",
+            v.major
+        );
+    }
+
+    #[test]
+    fn release_info_with_empty_fields() {
+        let info = ReleaseInfo {
+            version: String::new(),
+            changelog: String::new(),
+            binary_url: String::new(),
+            sha256: String::new(),
+        };
+        assert!(info.version.is_empty());
+        assert!(info.changelog.is_empty());
+        assert!(info.binary_url.is_empty());
+        assert!(info.sha256.is_empty());
+    }
+
+    #[test]
+    fn binary_tmp_path_is_on_same_filesystem() {
+        // BINARY_TMP should be in /usr/bin/ for atomic rename
+        assert!(
+            BINARY_TMP.starts_with("/usr/bin/"),
+            "BINARY_TMP should be in /usr/bin/ for atomic rename, got: {}",
+            BINARY_TMP
+        );
+    }
+
+    #[test]
+    fn current_version_env_equals_compile_time_constant() {
+        // env!("AIOS_VERSION") is set at compile time by build.rs from ../../VERSION.
+        // This test just confirms the constant is accessible and non-empty.
+        let v = CURRENT_VERSION;
+        assert!(!v.is_empty());
+        assert!(v.contains('.'), "version should contain dots: {v}");
+    }
 }

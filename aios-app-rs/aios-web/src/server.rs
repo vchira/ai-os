@@ -382,3 +382,242 @@ async fn handle_ws(socket: WebSocket, state: Arc<WebServerState>) {
     }
     info!("WebSocket connection closed");
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // WebServer::new creates instance
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn web_server_new_creates_instance() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let server = WebServer::new(8080, tx, None, None, None);
+        assert_eq!(server.port, 8080);
+        assert_eq!(server.bind_addr, "0.0.0.0");
+    }
+
+    #[test]
+    fn web_server_new_with_auth_token() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let server = WebServer::new(
+            80,
+            tx,
+            Some("my-secret-token".to_string()),
+            None,
+            None,
+        );
+        assert_eq!(server.state.auth_token, Some("my-secret-token".to_string()));
+    }
+
+    #[test]
+    fn web_server_new_with_welcome_message() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let server = WebServer::new(
+            80,
+            tx,
+            None,
+            None,
+            Some("Welcome to AiOS!".to_string()),
+        );
+        assert_eq!(
+            server.state.welcome_message,
+            Some("Welcome to AiOS!".to_string()),
+        );
+    }
+
+    #[test]
+    fn web_server_new_default_no_auth_token() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let server = WebServer::new(80, tx, None, None, None);
+        assert!(server.state.auth_token.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // response_tx is clonable
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn response_tx_is_clonable() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let server = WebServer::new(80, tx, None, None, None);
+
+        // Clone the response_tx — this is how AI responses are sent.
+        let tx_clone = server.response_tx.clone();
+
+        // Send via clone.
+        let _ = tx_clone.send("test message".to_string());
+        // Subscribe to receive.
+        let mut rx = server.response_tx.subscribe();
+
+        // Send another message via the original.
+        let _ = server.response_tx.send("second message".to_string());
+
+        // The receiver should get the second message.
+        let received = rx.try_recv();
+        assert!(received.is_ok());
+        assert_eq!(received.unwrap(), "second message");
+    }
+
+    #[test]
+    fn response_tx_clone_sends_to_all_subscribers() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let server = WebServer::new(80, tx, None, None, None);
+
+        let mut rx1 = server.response_tx.subscribe();
+        let mut rx2 = server.response_tx.subscribe();
+
+        let _ = server.response_tx.send("broadcast".to_string());
+
+        assert_eq!(rx1.try_recv().unwrap(), "broadcast");
+        assert_eq!(rx2.try_recv().unwrap(), "broadcast");
+    }
+
+    // -----------------------------------------------------------------------
+    // send_to_clients serializes ServerMessage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn send_to_clients_serializes_message() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let server = WebServer::new(80, tx, None, None, None);
+        let mut rx = server.response_tx.subscribe();
+
+        let msg = crate::protocol::ServerMessage::System {
+            content: "test system message".to_string(),
+        };
+        server.send_to_clients(&msg);
+
+        let received = rx.try_recv().unwrap();
+        assert!(received.contains("\"type\":\"system\""));
+        assert!(received.contains("test system message"));
+    }
+
+    #[test]
+    fn send_to_clients_chat_message() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let server = WebServer::new(80, tx, None, None, None);
+        let mut rx = server.response_tx.subscribe();
+
+        let msg = crate::protocol::ServerMessage::Message {
+            role: "assistant".to_string(),
+            content: "Hello!".to_string(),
+            level: None,
+        };
+        server.send_to_clients(&msg);
+
+        let received = rx.try_recv().unwrap();
+        assert!(received.contains("\"type\":\"message\""));
+        assert!(received.contains("\"role\":\"assistant\""));
+        assert!(received.contains("\"content\":\"Hello!\""));
+    }
+
+    // -----------------------------------------------------------------------
+    // check_auth function
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn check_auth_no_token_configured_allows_access() {
+        let (tx, _) = mpsc::unbounded_channel();
+        let state = WebServerState {
+            message_tx: tx,
+            response_tx: broadcast::channel(16).0,
+            active_ws: Mutex::new(false),
+            pending_panels: Arc::new(Mutex::new(HashMap::new())),
+            auth_token: None,
+            switcher: None,
+            welcome_message: None,
+        };
+        let query = AuthQuery { token: None };
+        assert!(check_auth(&state, &query));
+    }
+
+    #[test]
+    fn check_auth_correct_token_allows_access() {
+        let (tx, _) = mpsc::unbounded_channel();
+        let state = WebServerState {
+            message_tx: tx,
+            response_tx: broadcast::channel(16).0,
+            active_ws: Mutex::new(false),
+            pending_panels: Arc::new(Mutex::new(HashMap::new())),
+            auth_token: Some("secret123".to_string()),
+            switcher: None,
+            welcome_message: None,
+        };
+        let query = AuthQuery {
+            token: Some("secret123".to_string()),
+        };
+        assert!(check_auth(&state, &query));
+    }
+
+    #[test]
+    fn check_auth_wrong_token_denies_access() {
+        let (tx, _) = mpsc::unbounded_channel();
+        let state = WebServerState {
+            message_tx: tx,
+            response_tx: broadcast::channel(16).0,
+            active_ws: Mutex::new(false),
+            pending_panels: Arc::new(Mutex::new(HashMap::new())),
+            auth_token: Some("secret123".to_string()),
+            switcher: None,
+            welcome_message: None,
+        };
+        let query = AuthQuery {
+            token: Some("wrong-token".to_string()),
+        };
+        assert!(!check_auth(&state, &query));
+    }
+
+    #[test]
+    fn check_auth_missing_token_when_required_denies_access() {
+        let (tx, _) = mpsc::unbounded_channel();
+        let state = WebServerState {
+            message_tx: tx,
+            response_tx: broadcast::channel(16).0,
+            active_ws: Mutex::new(false),
+            pending_panels: Arc::new(Mutex::new(HashMap::new())),
+            auth_token: Some("secret123".to_string()),
+            switcher: None,
+            welcome_message: None,
+        };
+        let query = AuthQuery { token: None };
+        assert!(!check_auth(&state, &query));
+    }
+
+    // -----------------------------------------------------------------------
+    // PanelResponse struct
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn panel_response_fields() {
+        let mut values = serde_json::Map::new();
+        values.insert("name".to_string(), serde_json::json!("Alice"));
+
+        let response = PanelResponse {
+            id: "panel-1".to_string(),
+            values: values.clone(),
+            cancelled: false,
+        };
+
+        assert_eq!(response.id, "panel-1");
+        assert!(!response.cancelled);
+        assert_eq!(response.values.get("name").unwrap(), "Alice");
+    }
+
+    #[test]
+    fn panel_response_cancelled() {
+        let response = PanelResponse {
+            id: "panel-2".to_string(),
+            values: serde_json::Map::new(),
+            cancelled: true,
+        };
+        assert!(response.cancelled);
+        assert!(response.values.is_empty());
+    }
+}

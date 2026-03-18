@@ -551,13 +551,7 @@ fn test_upgrade_command(ctx: &mut TestContext) -> TestResult {
 fn test_hostname_validation(ctx: &mut TestContext) -> TestResult {
     let name = "hostname: validation";
 
-    fn is_valid_hostname(name: &str) -> bool {
-        !name.is_empty()
-            && name.len() <= 63
-            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-            && !name.starts_with('-')
-            && !name.ends_with('-')
-    }
+    use crate::hostname::is_valid_hostname;
 
     let res = (|| -> Result<String, String> {
         if !is_valid_hostname("assistant") {

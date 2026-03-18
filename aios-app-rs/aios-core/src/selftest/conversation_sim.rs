@@ -49,6 +49,8 @@ pub enum DialogStep {
 /// What we expect from a slash command.
 #[derive(Debug, Clone)]
 pub enum ExpectedResult {
+    /// Any result at all (just verify no panic). Matches all CommandResult variants.
+    AnyResult,
     /// Any Response variant (don't check content).
     AnyResponse,
     /// Response containing a specific substring.
@@ -172,6 +174,7 @@ pub fn run_dialog(dialog: &Dialog) -> DialogResult {
                 let result = handler.execute(command);
 
                 let ok = match (expect, &result) {
+                    (ExpectedResult::AnyResult, _) => true,
                     (ExpectedResult::AnyResponse, CommandResult::Response(_)) => true,
                     (ExpectedResult::ResponseContains(s), CommandResult::Response(text)) => {
                         text.contains(s.as_str())
@@ -575,7 +578,7 @@ pub fn standard_dialogs() -> Vec<Dialog> {
         description: "Configure wake word via commands".into(),
         channel: ChannelKind::Desktop,
         steps: vec![
-            DialogStep::SlashCommand { command: "/wake".into(), expect: ExpectedResult::ResponseContains("assistant".into()) },
+            DialogStep::SlashCommand { command: "/wake".into(), expect: ExpectedResult::ResponseContains("computer".into()) },
             DialogStep::SlashCommand { command: "/wake ok computer".into(), expect: ExpectedResult::ResponseContains("ok computer".into()) },
             DialogStep::Assert(Assertion::ConfigValue { key: "voice.wake_word".into(), expected: "ok computer".into() }),
             DialogStep::SlashCommand { command: "/wake off".into(), expect: ExpectedResult::ResponseContains("disabled".into()) },
@@ -1385,5 +1388,324 @@ mod tests {
         let report = format_dialog_report(&results);
         assert!(report.contains("1/2 passed"));
         assert!(report.contains("1 dialog(s) FAILED"));
+    }
+
+    // =======================================================================
+    // Conversation simulation tests — first-boot, multi-turn, tool usage,
+    // channel switching, /clear, /wake, all slash commands, stress
+    // =======================================================================
+
+    /// Simulate a complete first-boot setup flow.
+    #[test]
+    fn sim_first_boot_setup_flow() {
+        let dialog = Dialog {
+            name: "first_boot_setup".into(),
+            description: "Complete first-boot: welcome -> provider -> key -> password -> confirm -> complete".into(),
+            channel: ChannelKind::Desktop,
+            steps: vec![
+                // AI welcome
+                DialogStep::AiResponse("Welcome to AiOS! Let's get you set up.".into()),
+                // Provider selection
+                DialogStep::UserMessage("Claude".into()),
+                DialogStep::SlashCommand {
+                    command: "/provider claude".into(),
+                    expect: ExpectedResult::ResponseContains("claude".into()),
+                },
+                DialogStep::Assert(Assertion::ConfigValue {
+                    key: "llm.provider".into(),
+                    expected: "claude".into(),
+                }),
+                // API key entry
+                DialogStep::UserMessage("My API key is sk-ant-setup-test".into()),
+                DialogStep::SlashCommand {
+                    command: "/key claude sk-ant-setup-test".into(),
+                    expect: ExpectedResult::ResponseContains("Claude".into()),
+                },
+                DialogStep::Assert(Assertion::ConfigValue {
+                    key: "llm.claude_api_key".into(),
+                    expected: "sk-ant-setup-test".into(),
+                }),
+                // Password phase (mocked, just verify flow continues)
+                DialogStep::AiResponse("Great! Now let's secure your data with a master password.".into()),
+                DialogStep::UserMessage("[password entered]".into()),
+                DialogStep::AiResponse("Password confirmed!".into()),
+                // Setup complete
+                DialogStep::AiResponse("Setup is complete! You can start chatting now.".into()),
+                DialogStep::Assert(Assertion::MinMessageCount(8)),
+            ],
+        };
+        let result = run_dialog(&dialog);
+        assert!(result.passed, "First-boot setup failed: {:?}", result.error);
+        assert_eq!(result.steps_run, dialog.steps.len());
+    }
+
+    /// Simulate a multi-turn conversation with context.
+    #[test]
+    fn sim_multi_turn_conversation() {
+        let dialog = Dialog {
+            name: "multi_turn_conversation".into(),
+            description: "User asks -> AI responds -> user follows up -> AI responds with context".into(),
+            channel: ChannelKind::Desktop,
+            steps: vec![
+                DialogStep::UserMessage("What is Rust?".into()),
+                DialogStep::AiResponse("Rust is a systems programming language focused on safety and performance.".into()),
+                DialogStep::UserMessage("What about its async support?".into()),
+                DialogStep::AiResponse("Rust has async/await with runtimes like tokio. Building on what I said, it combines safety with high-performance async I/O.".into()),
+                DialogStep::UserMessage("Can you show me an example?".into()),
+                DialogStep::ToolCall {
+                    tool: "execute_code".into(),
+                    args: serde_json::json!({"language": "rust", "code": "async fn main() { println!(\"hello async\"); }"}),
+                },
+                DialogStep::Assert(Assertion::LastToolSuccess),
+                DialogStep::AiResponse("Here's a simple async Rust example.".into()),
+                DialogStep::UserMessage("Thanks! Now search the web for more tutorials.".into()),
+                DialogStep::ToolCall {
+                    tool: "web".into(),
+                    args: serde_json::json!({"action": "search", "query": "Rust async tutorial"}),
+                },
+                DialogStep::Assert(Assertion::LastToolSuccess),
+                DialogStep::AiResponse("I found several tutorials on Rust async programming.".into()),
+                DialogStep::Assert(Assertion::MinMessageCount(10)),
+            ],
+        };
+        let result = run_dialog(&dialog);
+        assert!(result.passed, "Multi-turn conversation failed: {:?}", result.error);
+    }
+
+    /// Simulate tool usage: remember and recall.
+    #[test]
+    fn sim_tool_memory_remember_recall() {
+        let dialog = Dialog {
+            name: "tool_memory_remember_recall".into(),
+            description: "User asks to remember -> memory tool -> user asks to recall -> memory returns value".into(),
+            channel: ChannelKind::Desktop,
+            steps: vec![
+                DialogStep::UserMessage("Remember that my favorite color is blue".into()),
+                DialogStep::ToolCall {
+                    tool: "memory".into(),
+                    args: serde_json::json!({"action": "memorize", "key": "favorite_color", "value": "blue"}),
+                },
+                DialogStep::Assert(Assertion::LastToolSuccess),
+                DialogStep::AiResponse("Got it! I'll remember that your favorite color is blue.".into()),
+                DialogStep::UserMessage("What's my favorite color?".into()),
+                DialogStep::ToolCall {
+                    tool: "memory".into(),
+                    args: serde_json::json!({"action": "recall", "key": "favorite_color"}),
+                },
+                DialogStep::Assert(Assertion::LastToolSuccess),
+                DialogStep::AiResponse("Your favorite color is blue!".into()),
+                // List all keys
+                DialogStep::UserMessage("What do you remember about me?".into()),
+                DialogStep::ToolCall {
+                    tool: "memory".into(),
+                    args: serde_json::json!({"action": "list"}),
+                },
+                DialogStep::Assert(Assertion::LastToolSuccess),
+                DialogStep::AiResponse("Here's what I remember: favorite_color".into()),
+                // Forget
+                DialogStep::UserMessage("Forget my favorite color".into()),
+                DialogStep::ToolCall {
+                    tool: "memory".into(),
+                    args: serde_json::json!({"action": "forget", "key": "favorite_color"}),
+                },
+                DialogStep::Assert(Assertion::LastToolSuccess),
+                DialogStep::AiResponse("Done, I've forgotten your favorite color.".into()),
+            ],
+        };
+        let result = run_dialog(&dialog);
+        assert!(result.passed, "Memory tool simulation failed: {:?}", result.error);
+    }
+
+    /// Simulate channel switching: desktop -> web -> verify both in queue.
+    #[test]
+    fn sim_channel_switching() {
+        let dialog = Dialog {
+            name: "channel_switching_sim".into(),
+            description: "Message from desktop -> message from web -> verify both channels".into(),
+            channel: ChannelKind::Desktop,
+            steps: vec![
+                DialogStep::Assert(Assertion::ActiveChannel(ChannelKind::Desktop)),
+                DialogStep::UserMessage("Hello from desktop".into()),
+                DialogStep::AiResponse("Hi! You're on the desktop.".into()),
+                // Switch to web
+                DialogStep::SwitchChannel(ChannelKind::Web),
+                DialogStep::Assert(Assertion::ActiveChannel(ChannelKind::Web)),
+                DialogStep::UserMessage("Hello from the web browser".into()),
+                DialogStep::AiResponse("I see you've switched to the web client.".into()),
+                // Switch to signal
+                DialogStep::SwitchChannel(ChannelKind::Signal),
+                DialogStep::Assert(Assertion::ActiveChannel(ChannelKind::Signal)),
+                DialogStep::UserMessage("Hello from Signal".into()),
+                DialogStep::AiResponse("Now you're on Signal.".into()),
+                // Back to desktop
+                DialogStep::SwitchChannel(ChannelKind::Desktop),
+                DialogStep::Assert(Assertion::ActiveChannel(ChannelKind::Desktop)),
+                DialogStep::UserMessage("Back on desktop".into()),
+                DialogStep::AiResponse("Welcome back to the desktop.".into()),
+                // Verify message count
+                DialogStep::Assert(Assertion::MinMessageCount(8)),
+            ],
+        };
+        let result = run_dialog(&dialog);
+        assert!(result.passed, "Channel switching simulation failed: {:?}", result.error);
+    }
+
+    /// Simulate /clear command flow.
+    #[test]
+    fn sim_clear_command_flow() {
+        let dialog = Dialog {
+            name: "clear_command_flow".into(),
+            description: "Push messages -> /clear -> verify display boundary -> new messages visible".into(),
+            channel: ChannelKind::Desktop,
+            steps: vec![
+                DialogStep::UserMessage("Old message 1".into()),
+                DialogStep::AiResponse("Old response 1".into()),
+                DialogStep::UserMessage("Old message 2".into()),
+                DialogStep::AiResponse("Old response 2".into()),
+                DialogStep::Assert(Assertion::MinMessageCount(4)),
+                // Clear command
+                DialogStep::SlashCommand {
+                    command: "/clear".into(),
+                    expect: ExpectedResult::Clear,
+                },
+                // New messages after clear
+                DialogStep::UserMessage("New message after clear".into()),
+                DialogStep::AiResponse("This is a fresh conversation.".into()),
+                DialogStep::Assert(Assertion::MinMessageCount(6)),
+            ],
+        };
+        let result = run_dialog(&dialog);
+        assert!(result.passed, "/clear flow failed: {:?}", result.error);
+    }
+
+    /// Simulate /wake command flow.
+    #[test]
+    fn sim_wake_command_flow() {
+        let dialog = Dialog {
+            name: "wake_command_flow".into(),
+            description: "/wake list -> /wake jarvis -> /wake threshold 0.3 -> /wake off -> /wake on".into(),
+            channel: ChannelKind::Desktop,
+            steps: vec![
+                // Check current wake word
+                DialogStep::SlashCommand {
+                    command: "/wake".into(),
+                    expect: ExpectedResult::ResponseContains("computer".into()),
+                },
+                // List available wake words
+                DialogStep::SlashCommand {
+                    command: "/wake list".into(),
+                    expect: ExpectedResult::AnyResponse,
+                },
+                // Set wake word to jarvis
+                DialogStep::SlashCommand {
+                    command: "/wake jarvis".into(),
+                    expect: ExpectedResult::ResponseContains("jarvis".into()),
+                },
+                DialogStep::Assert(Assertion::ConfigValue {
+                    key: "voice.wake_word".into(),
+                    expected: "jarvis".into(),
+                }),
+                // Set threshold
+                DialogStep::SlashCommand {
+                    command: "/wake threshold 0.3".into(),
+                    expect: ExpectedResult::AnyResponse,
+                },
+                // Disable wake word
+                DialogStep::SlashCommand {
+                    command: "/wake off".into(),
+                    expect: ExpectedResult::ResponseContains("disabled".into()),
+                },
+                // Re-enable wake word
+                DialogStep::SlashCommand {
+                    command: "/wake on".into(),
+                    expect: ExpectedResult::ResponseContains("enabled".into()),
+                },
+            ],
+        };
+        let result = run_dialog(&dialog);
+        assert!(result.passed, "/wake flow failed: {:?}", result.error);
+    }
+
+    /// Simulate all slash commands: iterate over command_list(), execute each.
+    #[test]
+    fn sim_all_slash_commands_no_panic() {
+        use crate::config::commands::command_list;
+
+        // Commands that return non-Response variants and need special expectations.
+        let special_commands: std::collections::HashMap<&str, ExpectedResult> = [
+            ("/clear", ExpectedResult::Clear),
+            ("/selftest", ExpectedResult::SelfTest),
+            ("/sysinfo", ExpectedResult::SysInfo),
+            ("/close", ExpectedResult::ClosePanel),
+            ("/update", ExpectedResult::Update),
+            ("/upgrade", ExpectedResult::AnyResult),
+            ("/configure", ExpectedResult::AnyResult),
+            // These return Panel or Response depending on args.
+            ("/keyboard", ExpectedResult::AnyResult),
+            ("/theme", ExpectedResult::AnyResult),
+            ("/resolution", ExpectedResult::AnyResult),
+            ("/voice", ExpectedResult::AnyResult),
+            ("/wake", ExpectedResult::AnyResult),
+        ]
+        .into_iter()
+        .collect();
+
+        let cmds = command_list();
+        let mut steps = Vec::new();
+
+        for info in &cmds {
+            let cmd = info.command;
+            let expect = special_commands
+                .get(cmd)
+                .cloned()
+                .unwrap_or(ExpectedResult::AnyResponse);
+            steps.push(DialogStep::SlashCommand {
+                command: cmd.to_string(),
+                expect,
+            });
+        }
+
+        let dialog = Dialog {
+            name: "all_slash_commands".into(),
+            description: "Execute every registered slash command".into(),
+            channel: ChannelKind::Desktop,
+            steps,
+        };
+        let result = run_dialog(&dialog);
+        assert!(result.passed, "All-slash-commands failed: {:?}", result.error);
+        assert!(
+            result.steps_run >= cmds.len(),
+            "Expected to run at least {} steps, ran {}",
+            cmds.len(),
+            result.steps_run
+        );
+    }
+
+    /// Stress test: 500 rapid messages from alternating channels.
+    #[test]
+    fn sim_stress_500_alternating_channels() {
+        let channels = [ChannelKind::Desktop, ChannelKind::Web, ChannelKind::Signal];
+        let mut steps = Vec::new();
+
+        for i in 0..500 {
+            let channel = channels[i % channels.len()];
+            // Switch channel
+            steps.push(DialogStep::SwitchChannel(channel));
+            // Send message
+            steps.push(DialogStep::UserMessage(format!("Stress msg {i} on {channel}")));
+        }
+
+        // Final assertions
+        steps.push(DialogStep::Assert(Assertion::MinMessageCount(500)));
+
+        let dialog = Dialog {
+            name: "stress_500_alternating".into(),
+            description: "500 rapid messages from alternating channels".into(),
+            channel: ChannelKind::Desktop,
+            steps,
+        };
+        let result = run_dialog(&dialog);
+        assert!(result.passed, "500-message stress test failed: {:?}", result.error);
+        assert_eq!(result.steps_run, result.total_steps);
     }
 }

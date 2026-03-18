@@ -391,4 +391,226 @@ mod tests {
         assert!(detector.matches_wake_word("h\u{00e9} aios do something"));
         assert!(!detector.matches_wake_word("hey aios")); // 'e' != 'é'
     }
+
+    // -- Additional edge-case tests --
+
+    #[test]
+    fn matches_exact_phrase_standalone() {
+        // Test that exact phrases with no surrounding words match.
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(detector.matches_wake_word("hey assistant"));
+
+        let config = WakeWordConfig {
+            wake_phrase: "ok computer".into(),
+            ..Default::default()
+        };
+        let detector = WakeWordDetector::new(config);
+        assert!(detector.matches_wake_word("ok computer"));
+    }
+
+    #[test]
+    fn matches_partial_phrase_embedded_in_sentence() {
+        // The wake phrase keywords should be found even when embedded
+        // among other words.
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(detector.matches_wake_word("well hey there assistant can you help"));
+        assert!(detector.matches_wake_word("so I said hey and the assistant replied"));
+    }
+
+    #[test]
+    fn does_not_match_unrelated() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(!detector.matches_wake_word("play some music"));
+        assert!(!detector.matches_wake_word("what is the weather"));
+        assert!(!detector.matches_wake_word("open the browser"));
+        assert!(!detector.matches_wake_word("alexa set a timer"));
+        assert!(!detector.matches_wake_word("ok google search for pizza"));
+    }
+
+    #[test]
+    fn case_insensitive_matching_various() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(detector.matches_wake_word("HEY ASSISTANT"));
+        assert!(detector.matches_wake_word("Hey Assistant"));
+        assert!(detector.matches_wake_word("hEy AsSiStAnT"));
+        assert!(detector.matches_wake_word("hey ASSISTANT how are you"));
+
+        // Custom phrase with mixed case.
+        let config = WakeWordConfig {
+            wake_phrase: "Ok Jarvis".into(),
+            ..Default::default()
+        };
+        let detector = WakeWordDetector::new(config);
+        assert!(detector.matches_wake_word("OK JARVIS"));
+        assert!(detector.matches_wake_word("ok jarvis"));
+        assert!(detector.matches_wake_word("Ok Jarvis"));
+        assert!(detector.matches_wake_word("oK jArViS do something"));
+    }
+
+    // -- Comprehensive additional tests --
+
+    #[test]
+    fn matches_wake_word_with_very_long_text() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        // 10,000 words of filler followed by the wake word.
+        let filler = "word ".repeat(10_000);
+        let text = format!("{filler}hey assistant do something");
+        assert!(detector.matches_wake_word(&text));
+    }
+
+    #[test]
+    fn matches_wake_word_with_very_long_text_no_match() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        let filler = "word ".repeat(10_000);
+        assert!(!detector.matches_wake_word(&filler));
+    }
+
+    #[test]
+    fn matches_wake_word_whitespace_only() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(!detector.matches_wake_word("   \t\n  "));
+    }
+
+    #[test]
+    fn matches_wake_word_tabs_and_newlines() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(detector.matches_wake_word("hey\tassistant"));
+        assert!(detector.matches_wake_word("hey\nassistant"));
+    }
+
+    #[test]
+    fn matches_wake_word_multiple_spaces_between_keywords() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(detector.matches_wake_word("hey     assistant"));
+    }
+
+    #[test]
+    fn matches_wake_word_only_first_keyword() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(!detector.matches_wake_word("hey"));
+        assert!(!detector.matches_wake_word("hey something else entirely"));
+    }
+
+    #[test]
+    fn matches_wake_word_only_second_keyword() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(!detector.matches_wake_word("assistant"));
+        assert!(!detector.matches_wake_word("the assistant is here"));
+    }
+
+    #[test]
+    fn matches_wake_word_with_numbers_in_text() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(detector.matches_wake_word("hey 123 assistant"));
+    }
+
+    #[test]
+    fn custom_multi_word_wake_phrase_four_words() {
+        let config = WakeWordConfig {
+            wake_phrase: "hello there my friend".into(),
+            ..Default::default()
+        };
+        let detector = WakeWordDetector::new(config);
+        assert!(detector.matches_wake_word("hello there my friend how are you"));
+        assert!(!detector.matches_wake_word("hello there my")); // missing "friend"
+        assert!(!detector.matches_wake_word("friend my there hello")); // reversed
+    }
+
+    #[test]
+    fn wake_word_event_clone() {
+        let event = WakeWordEvent::SpeechCaptured(vec![1.0, 2.0, 3.0]);
+        let cloned = event.clone();
+        match cloned {
+            WakeWordEvent::SpeechCaptured(samples) => {
+                assert_eq!(samples.len(), 3);
+                assert!((samples[0] - 1.0).abs() < f32::EPSILON);
+            }
+            _ => panic!("Expected SpeechCaptured variant"),
+        }
+    }
+
+    #[test]
+    fn wake_word_event_debug() {
+        let event = WakeWordEvent::Detected;
+        let dbg = format!("{:?}", event);
+        assert!(dbg.contains("Detected"));
+
+        let event = WakeWordEvent::Timeout;
+        let dbg = format!("{:?}", event);
+        assert!(dbg.contains("Timeout"));
+    }
+
+    #[test]
+    fn detector_keywords_are_lowercase() {
+        let config = WakeWordConfig {
+            wake_phrase: "HEY ASSISTANT".into(),
+            ..Default::default()
+        };
+        let detector = WakeWordDetector::new(config);
+        // Even though the phrase was uppercase, matching should be case-insensitive.
+        assert!(detector.matches_wake_word("hey assistant"));
+        assert!(detector.matches_wake_word("HEY ASSISTANT"));
+    }
+
+    #[test]
+    fn matches_with_special_characters_in_text() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        assert!(detector.matches_wake_word("@hey #assistant!"));
+        assert!(detector.matches_wake_word("$hey$ %assistant%"));
+        assert!(detector.matches_wake_word("(hey) [assistant]"));
+    }
+
+    #[test]
+    fn config_clone() {
+        let config = WakeWordConfig {
+            wake_phrase: "test".into(),
+            energy_threshold: 0.05,
+            post_wake_delay_ms: 100,
+            max_capture_ms: 5000,
+            silence_timeout_ms: 500,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.wake_phrase, "test");
+        assert!((cloned.energy_threshold - 0.05).abs() < f32::EPSILON);
+        assert_eq!(cloned.post_wake_delay_ms, 100);
+        assert_eq!(cloned.max_capture_ms, 5000);
+        assert_eq!(cloned.silence_timeout_ms, 500);
+    }
+
+    #[test]
+    fn config_debug() {
+        let config = WakeWordConfig::default();
+        let dbg = format!("{:?}", config);
+        assert!(dbg.contains("hey assistant"));
+        assert!(dbg.contains("0.02"));
+    }
+
+    #[test]
+    fn matches_all_pretrained_style_phrases() {
+        // For each pretrained-style phrase, verify matching works.
+        let phrases = [
+            "hey assistant", "hey jarvis", "computer", "ok computer",
+            "hey friday", "jarvis", "ok jarvis", "skynet", "terminator",
+            "hey house", "ok home", "home assistant", "yo homie",
+        ];
+        for phrase in &phrases {
+            let config = WakeWordConfig {
+                wake_phrase: phrase.to_string(),
+                ..Default::default()
+            };
+            let detector = WakeWordDetector::new(config);
+            assert!(
+                detector.matches_wake_word(phrase),
+                "Failed to match exact phrase: '{}'",
+                phrase,
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_reversed_partial() {
+        let detector = WakeWordDetector::new(WakeWordConfig::default());
+        // "assistant" first, "hey" never appears after it
+        assert!(!detector.matches_wake_word("assistant what hey"));
+    }
 }

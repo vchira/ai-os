@@ -512,4 +512,193 @@ mod tests {
         let r = tool.execute(serde_json::json!({ "action": "destroy" }));
         assert!(!r.success);
     }
+
+    // -- New comprehensive tests --
+
+    #[test]
+    fn run_ls_command() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({
+            "action": "run_command",
+            "command": "ls /"
+        }));
+        assert!(r.success, "ls / failed: {:?}", r.error);
+        // Root directory should contain common entries.
+        assert!(r.output.contains("usr") || r.output.contains("etc") || r.output.contains("bin"));
+    }
+
+    #[test]
+    fn run_echo_command() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({
+            "action": "run_command",
+            "command": "echo 'test output 12345'"
+        }));
+        assert!(r.success, "echo failed: {:?}", r.error);
+        assert!(r.output.contains("test output 12345"));
+    }
+
+    #[test]
+    fn invalid_action_fails() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({ "action": "format_disk" }));
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("Unknown action"));
+    }
+
+    #[test]
+    fn system_info_returns_data() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({ "action": "get_system_info" }));
+        assert!(r.success);
+        // Should contain at least architecture or cpu info.
+        assert!(!r.output.is_empty());
+        // Structured data should be present.
+        assert!(r.data.is_some());
+    }
+
+    #[test]
+    fn get_datetime_returns_local_and_utc() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({ "action": "get_datetime" }));
+        assert!(r.success);
+        assert!(r.output.contains("Local:"));
+        assert!(r.output.contains("UTC:"));
+        assert!(r.output.contains("Timezone:"));
+        // Structured data should have timezone.
+        let data = r.data.unwrap();
+        assert!(data["timezone"].is_string());
+    }
+
+    #[test]
+    fn list_processes_returns_output() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({ "action": "list_processes" }));
+        assert!(r.success, "list_processes failed: {:?}", r.error);
+        // ps output should have a header line.
+        assert!(r.output.contains("PID") || r.output.contains("USER") || !r.output.is_empty());
+    }
+
+    #[test]
+    fn run_command_exit_code_nonzero() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({
+            "action": "run_command",
+            "command": "false"
+        }));
+        // `false` returns exit code 1.
+        assert!(!r.success);
+        let data = r.data.unwrap();
+        assert_ne!(data["returncode"], 0);
+    }
+
+    #[test]
+    fn run_command_captures_stderr() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({
+            "action": "run_command",
+            "command": "echo error_text >&2"
+        }));
+        // The command itself succeeds (exit 0) but outputs to stderr.
+        assert!(r.success);
+        assert!(r.output.contains("error_text"));
+    }
+
+    #[test]
+    fn safety_blocks_fork_bomb() {
+        assert!(check_command_safety(":(){ :|:& };:").is_err());
+    }
+
+    #[test]
+    fn safety_blocks_chmod_777_root() {
+        assert!(check_command_safety("chmod 777 /").is_err());
+        assert!(check_command_safety("chmod -R 777 /etc").is_err());
+    }
+
+    #[test]
+    fn safety_allows_normal_chmod() {
+        // chmod on a regular file (not /) should be allowed.
+        assert!(check_command_safety("chmod 644 myfile.txt").is_ok());
+    }
+
+    #[test]
+    fn empty_action_falls_through() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({}));
+        assert!(!r.success);
+    }
+
+    #[test]
+    fn tool_name_and_category() {
+        let tool = SystemTool;
+        assert_eq!(tool.name(), "system");
+        assert_eq!(tool.category(), "system");
+    }
+
+    #[test]
+    fn run_command_with_echo_hello() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({
+            "action": "run_command",
+            "command": "echo hello"
+        }));
+        assert!(r.success);
+        assert_eq!(r.output.trim(), "hello");
+        // Structured data should include returncode and sandbox type.
+        let data = r.data.unwrap();
+        assert_eq!(data["returncode"], 0);
+    }
+
+    #[test]
+    fn run_command_empty_command_returns_error() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({
+            "action": "run_command",
+            "command": ""
+        }));
+        assert!(!r.success);
+        assert!(r.error.as_deref().unwrap().contains("command"));
+    }
+
+    #[test]
+    fn info_action_returns_system_info() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({ "action": "get_system_info" }));
+        assert!(r.success);
+        assert!(!r.output.is_empty());
+        // Should contain hostname or platform or cpu info.
+        let data = r.data.unwrap();
+        // At minimum, architecture should be present on any Linux system.
+        assert!(data.get("architecture").is_some() || data.get("platform").is_some());
+    }
+
+    #[test]
+    fn list_processes_returns_process_output() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({ "action": "list_processes" }));
+        assert!(r.success);
+        // ps aux output should have column headers.
+        assert!(!r.output.is_empty());
+    }
+
+    #[test]
+    fn run_command_with_pipe() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({
+            "action": "run_command",
+            "command": "echo 'line1\nline2\nline3' | wc -l"
+        }));
+        assert!(r.success);
+    }
+
+    #[test]
+    fn run_command_with_env_var() {
+        let tool = SystemTool;
+        let r = tool.execute(serde_json::json!({
+            "action": "run_command",
+            "command": "echo $HOME"
+        }));
+        assert!(r.success);
+        assert!(!r.output.trim().is_empty());
+    }
 }
