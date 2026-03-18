@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>About — AiOS</title>
+  <meta name="description" content="About AiOS — the vision, technology, and team behind the AI-native Linux distribution.">
+  <meta property="og:title" content="About — AiOS">
+  <meta property="og:description" content="The vision, technology, and team behind AiOS.">
+  <meta property="og:type" content="website">
+  <link rel="icon" type="image/svg+xml" href="img/logo.svg">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <nav class="nav">
+    <div class="container">
+      <a href="/" class="nav-logo">
+        <img src="img/logo.svg" alt="AiOS logo" width="120" height="40">
+      </a>
+      <ul class="nav-links">
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="docs/">Docs</a></li>
+        <li><a href="about.html" aria-current="page">About</a></li>
+        <li><a href="https://github.com/swit-work/ai-os" target="_blank" rel="noopener">GitHub</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <section class="page-content">
+    <div class="container">
+      <h1>About AiOS</h1>
+      <p class="page-subtitle">An AI-native Linux distribution where the AI is the interface</p>
+
+      <h2>The Vision</h2>
+      <p>
+        Most operating systems treat AI as an application — a chatbot window sitting alongside
+        file managers and terminals. AiOS takes the opposite approach: the AI <em>is</em> the
+        primary interface between humans and the machine.
+      </p>
+      <p>
+        You speak or type what you want. The AI understands your intent, decides what needs to
+        happen, and uses tools to execute it. Files, processes, network, hardware — everything
+        is accessible through conversation. The traditional desktop chrome fades into the
+        background; the AI brings forward exactly what you need, when you need it.
+      </p>
+      <p>
+        AiOS is not a voice assistant bolted onto Linux. It is a distribution designed from the
+        ground up so that every component — the compositor, the audio stack, the security model,
+        the tool system — serves the AI-first interaction model.
+      </p>
+
+      <h2>How It Works</h2>
+      <p>
+        AiOS is built on a proven foundation with modern components chosen for reliability and
+        minimal resource usage:
+      </p>
+      <ul>
+        <li><strong>Base:</strong> Debian Bookworm (12) — broad hardware support, stable package ecosystem</li>
+        <li><strong>Display:</strong> Wayland via labwc — a lightweight wlroots-based compositor built from source</li>
+        <li><strong>Application:</strong> Rust with GTK4 and libadwaita — a single native binary, no runtime dependencies</li>
+        <li><strong>Voice STT:</strong> whisper.cpp — local speech-to-text inference, multiple model sizes for different hardware</li>
+        <li><strong>Voice TTS:</strong> Piper (primary) and espeak-ng (fallback) — all voice processing stays on-device</li>
+        <li><strong>LLM Providers:</strong> Claude and OpenAI APIs — switchable at runtime through a provider trait</li>
+        <li><strong>Audio:</strong> PipeWire — modern Linux audio with low latency</li>
+        <li><strong>Networking:</strong> Avahi mDNS — the web interface is reachable as <code>http://aios.local</code></li>
+      </ul>
+      <p>
+        The Rust application is organized as a workspace of focused crates: core types and
+        configuration, LLM provider management, tool definitions and sandboxing, voice engine
+        backends, GTK desktop UI, web channel server, and Signal messenger integration.
+      </p>
+
+      <h2>License</h2>
+      <p>
+        AiOS is licensed under the
+        <strong>Business Source License 1.1 (BSL 1.1)</strong>.
+      </p>
+      <p>
+        You can read, study, modify, and build AiOS freely. Production use for commercial
+        purposes requires a license from swIT.work GmbH. After the change date (5 years from
+        each release), the code automatically converts to the Apache License 2.0.
+      </p>
+      <p>
+        The full license text is in the
+        <a href="https://github.com/swit-work/ai-os/blob/main/LICENSE" target="_blank" rel="noopener">LICENSE</a>
+        file in the repository.
+      </p>
+
+      <h2>swIT.work GmbH</h2>
+      <p>
+        AiOS is developed by <strong>swIT.work GmbH</strong>, an Austrian technology company
+        focused on AI-native systems and developer tooling. We believe the next generation of
+        operating systems will be built around AI as the primary interaction layer, and AiOS is
+        our contribution to making that vision real.
+      </p>
+
+      <h2>Get Involved</h2>
+      <p>
+        AiOS is developed in the open. Contributions are welcome:
+      </p>
+      <ul>
+        <li>
+          <strong>Report issues:</strong>
+          <a href="https://github.com/swit-work/ai-os/issues" target="_blank" rel="noopener">GitHub Issues</a>
+          — bug reports, feature requests, questions
+        </li>
+        <li>
+          <strong>Contribute code:</strong>
+          <a href="https://github.com/swit-work/ai-os/pulls" target="_blank" rel="noopener">Pull Requests</a>
+          — fixes, features, documentation improvements
+        </li>
+        <li>
+          <strong>Browse the source:</strong>
+          <a href="https://github.com/swit-work/ai-os" target="_blank" rel="noopener">github.com/swit-work/ai-os</a>
+        </li>
+      </ul>
+    </div>
+  </section>
+
+  <footer class="footer">
+    <div class="container">
+      <span class="footer-text">&copy; 2026 swIT.work GmbH &middot; BSL 1.1</span>
+      <ul class="footer-links">
+        <li><a href="releases.html">Releases</a></li>
+        <li><a href="about.html">About</a></li>
+        <li><a href="https://github.com/swit-work/ai-os" target="_blank" rel="noopener">GitHub</a></li>
+      </ul>
+    </div>
+  </footer>
+
+</body>
+</html>
