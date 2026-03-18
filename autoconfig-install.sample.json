@@ -1,0 +1,31 @@
+{
+  "_description": "AiOS autoconfig for HARD DRIVE installation (wipes target disk)",
+  "_usage": "Copy to autoconfig-install.json and fill in your values. The build system bakes this into the ISO.",
+
+  "provider": {
+    "primary": "claude",
+    "claude_api_key": "sk-ant-api03-YOUR_KEY_HERE",
+    "openai_api_key": "sk-YOUR_KEY_HERE"
+  },
+
+  "system": {
+    "keyboard": "us",
+    "language": "en",
+    "timezone": "America/New_York",
+    "hostname": "assistant",
+    "master_password": "changeme"
+  },
+
+  "install": {
+    "enabled": true,
+    "target_disk": "auto",
+    "confirm": false
+  },
+
+  "assistant": {
+    "name": "Assistant",
+    "effort": "auto"
+  },
+
+  "debug": false
+}

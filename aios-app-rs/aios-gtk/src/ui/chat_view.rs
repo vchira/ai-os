@@ -389,11 +389,22 @@ impl ChatView {
     fn scroll_to_bottom(&self) {
         if let Some(sw) = self.scroll_window.borrow().as_ref() {
             let adj = sw.vadjustment();
-            // Use idle_add to ensure the layout has been computed before scrolling.
-            let adj_clone = adj.clone();
+            // Immediate scroll (works if layout is already computed).
+            adj.set_value(adj.upper() - adj.page_size());
+            // Also schedule a scroll after the idle phase (layout recomputation).
+            let adj2 = adj.clone();
             gtk4::glib::idle_add_local_once(move || {
-                adj_clone.set_value(adj_clone.upper() - adj_clone.page_size());
+                adj2.set_value(adj2.upper() - adj2.page_size());
             });
+            // And another after a short delay to catch late layout updates
+            // (e.g., images loading, label rewrapping).
+            let adj3 = adj.clone();
+            gtk4::glib::timeout_add_local_once(
+                std::time::Duration::from_millis(100),
+                move || {
+                    adj3.set_value(adj3.upper() - adj3.page_size());
+                },
+            );
         }
     }
 }

@@ -53,7 +53,7 @@ VBoxManage modifyvm "${VM_NAME}" \
     --memory 4096 \
     --vram 128 \
     --ioapic on \
-    --firmware efi
+    --firmware bios
 
 # Storage: SATA controller with disk + ISO
 VBoxManage storagectl "${VM_NAME}" --name "SATA" --add sata --controller IntelAhci --portcount 2
@@ -66,8 +66,10 @@ VBoxManage storageattach "${VM_NAME}" --storagectl "SATA" --port 1 --device 0 \
 # Press F12 at boot to get the boot menu and select DVD for install
 VBoxManage modifyvm "${VM_NAME}" --boot1 disk --boot2 dvd --boot3 none --boot4 none
 
-# Graphics
+# Graphics — VMSVGA with 3D acceleration provides a proper GPU with
+# virtio-gpu DRM backend that wlroots/labwc can use
 VBoxManage modifyvm "${VM_NAME}" --graphicscontroller vmsvga
+VBoxManage modifyvm "${VM_NAME}" --accelerate-3d on
 
 # Network: NAT with port forwarding for web channel
 VBoxManage modifyvm "${VM_NAME}" --nic1 nat

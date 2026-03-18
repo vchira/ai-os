@@ -224,74 +224,203 @@ fn stop_tts() {
     });
 }
 
-/// Speak text using espeak-ng if TTS is enabled.
+/// Strip markup and code blocks from text, returning clean plain text.
+fn strip_for_tts(raw: &str) -> (String, u32) {
+    let mut text = String::new();
+    let mut in_code = false;
+    let mut code_block_count = 0u32;
+    for line in raw.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code = !in_code;
+            if !in_code {
+                code_block_count += 1;
+            }
+            continue;
+        }
+        if !in_code {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    let plain = aios_core::types::to_plain(&text);
+    (plain.trim().to_string(), code_block_count)
+}
+
+/// For short responses, return plain text directly.
+/// For long responses, return None — caller should use LLM summary.
+fn prepare_tts_text_short(raw: &str) -> Option<String> {
+    let (plain, code_blocks) = strip_for_tts(raw);
+    if plain.is_empty() {
+        return Some(String::new());
+    }
+
+    let suffix = if code_blocks > 0 {
+        format!(
+            " I also included {} code {}.",
+            code_blocks,
+            if code_blocks == 1 { "block" } else { "blocks" }
+        )
+    } else {
+        String::new()
+    };
+
+    // Short enough to read directly
+    if plain.len() <= 300 {
+        return Some(format!("{plain}{suffix}"));
+    }
+
+    // Long — needs LLM summary
+    None
+}
+
+/// Summarize a long response using Claude Haiku (fast, cheap).
+/// Falls back to sentence truncation if API call fails.
+fn summarize_for_tts(raw: &str, api_key: &str) -> String {
+    let (plain, code_blocks) = strip_for_tts(raw);
+
+    let code_mention = if code_blocks > 0 {
+        format!(" I also included {code_blocks} code {}.", if code_blocks == 1 { "block" } else { "blocks" })
+    } else {
+        String::new()
+    };
+
+    // Try Haiku summarization
+    if !api_key.is_empty() {
+        let body = serde_json::json!({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": format!(
+                    "Summarize the following AI assistant response in exactly ONE short spoken sentence (max 30 words). \
+                     No markdown, no special characters, no asterisks, no hashtags — just plain spoken English. \
+                     End with: The detailed answer is in the chat.\n\n---\n{}",
+                    &plain[..plain.len().min(2000)]
+                )
+            }]
+        });
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build();
+
+        if let Ok(client) = client {
+            let resp = client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .body(body.to_string())
+                .send();
+
+            if let Ok(resp) = resp {
+                if let Ok(json) = resp.json::<serde_json::Value>() {
+                    if let Some(text) = json["content"][0]["text"].as_str() {
+                        let summary = text.trim().to_string();
+                        if !summary.is_empty() {
+                            tracing::debug!("TTS summary from Haiku: {summary}");
+                            return format!("{summary}{code_mention}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: truncate at sentence boundary
+    let boundary = plain[..plain.len().min(300)]
+        .rfind(|c: char| c == '.' || c == '!' || c == '?')
+        .map(|i| i + 1)
+        .unwrap_or(plain.len().min(300));
+    format!(
+        "{} The detailed answer is in the chat.{code_mention}",
+        &plain[..boundary].trim(),
+    )
+}
+
+/// Speak text using TTS if enabled.
 ///
 /// Runs in a background thread so it doesn't block the GTK main loop.
+/// For long responses, uses Claude Haiku to generate a one-sentence summary.
 fn speak_if_enabled(text: &str, config: &ConfigManager) {
     let tts_enabled = config.get_bool("voice.tts_enabled", true);
     if !tts_enabled {
         return;
     }
-    let text = text.to_string();
+
+    // Short responses: speak directly (no LLM call needed)
+    if let Some(short) = prepare_tts_text_short(text) {
+        if short.is_empty() {
+            return;
+        }
+        let speak_text = short;
+        std::thread::spawn(move || {
+            do_tts(&speak_text);
+        });
+        return;
+    }
+
+    // Long responses: summarize with Haiku in background thread
+    let raw = text.to_string();
+    let api_key = config.get_str("llm.claude_api_key", "");
     std::thread::spawn(move || {
-        // Truncate very long responses for TTS (read first ~500 chars)
-        let speak_text = if text.len() > 500 {
-            format!("{}... and more.", &text[..text.floor_char_boundary(500)])
-        } else {
-            text
-        };
+        let speak_text = summarize_for_tts(&raw, &api_key);
+        do_tts(&speak_text);
+    });
+}
 
-        // Try Piper first (high-quality, natural sounding voice)
-        let piper_model = "/home/aios/.aios/models/piper/en_US-amy-medium.onnx";
-        if std::path::Path::new(piper_model).exists() {
-            let mut child = match std::process::Command::new("piper")
-                .args(["--model", piper_model, "--output_raw"])
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(_) => {
-                    // Piper not available, fall through to espeak
-                    let _ = std::process::Command::new("espeak-ng")
-                        .args(["-v", "en", "-s", "170"])
-                        .arg(&speak_text)
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                    return;
-                }
-            };
-
-            // Write text to piper's stdin
-            if let Some(mut stdin) = child.stdin.take() {
-                use std::io::Write;
-                let _ = stdin.write_all(speak_text.as_bytes());
-                drop(stdin); // Close stdin to signal EOF
-            }
-
-            // Pipe piper's raw audio output to aplay
-            if let Some(stdout) = child.stdout.take() {
-                let _ = std::process::Command::new("aplay")
-                    .args(["-r", "22050", "-f", "S16_LE", "-t", "raw", "-c", "1"])
-                    .stdin(stdout)
+/// Actually perform TTS (called from background thread).
+fn do_tts(speak_text: &str) {
+    // Try Piper first (high-quality, natural sounding voice)
+    let piper_model = "/home/aios/.aios/models/piper/en_US-amy-medium.onnx";
+    if std::path::Path::new(piper_model).exists() {
+        let mut child = match std::process::Command::new("piper")
+            .args(["--model", piper_model, "--output_raw"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => {
+                // Piper not available, fall through to espeak
+                let _ = std::process::Command::new("espeak-ng")
+                    .args(["-v", "en", "-s", "170"])
+                    .arg(speak_text)
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
+                return;
             }
-            let _ = child.wait();
-            return;
+        };
+
+        // Write text to piper's stdin
+        if let Some(mut stdin) = child.stdin.take() {
+            use std::io::Write;
+            let _ = stdin.write_all(speak_text.as_bytes());
+            drop(stdin); // Close stdin to signal EOF
         }
 
-        // Fallback: espeak-ng (robotic but always available)
-        let _ = std::process::Command::new("espeak-ng")
-            .args(["-v", "en", "-s", "170"])
-            .arg(&speak_text)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    });
+        // Pipe piper's raw audio output to aplay
+        if let Some(stdout) = child.stdout.take() {
+            let _ = std::process::Command::new("aplay")
+                .args(["-r", "22050", "-f", "S16_LE", "-t", "raw", "-c", "1"])
+                .stdin(stdout)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = child.wait();
+        return;
+    }
+
+    // Fallback: espeak-ng (robotic but always available)
+    let _ = std::process::Command::new("espeak-ng")
+        .args(["-v", "en", "-s", "170"])
+        .arg(speak_text)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
 }
 
 /// Application-level state shared across signal handlers.
@@ -316,6 +445,12 @@ impl AiosApp {
         let vault = Vault::new(vault_path);
 
         if !vault.exists() {
+            // Check for autoconfig — if found, apply it and skip the wizard.
+            if let Some(auto) = aios_core::config::autoconfig::load_autoconfig() {
+                info!("Autoconfig found — applying unattended setup");
+                Self::apply_autoconfig(app, rt, auto);
+                return;
+            }
             info!("No vault found — launching first-boot setup conversation");
             Self::run_first_boot_setup(app, rt);
             return;
@@ -857,6 +992,146 @@ impl AiosApp {
             // Send to LLM asynchronously.
             Self::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
         });
+    }
+
+    /// Apply autoconfig — show status, create vault, store keys, configure system, then boot normally.
+    fn apply_autoconfig(
+        app: &adw::Application,
+        rt: tokio::runtime::Handle,
+        auto: aios_core::config::autoconfig::AutoConfig,
+    ) {
+        use aios_core::secure::{SecretEntry, SecretKind, Vault};
+        use aios_core::types::MessageLevel;
+
+        // Build the UI so we can show status messages.
+        let chat_view = ChatView::new();
+        let prompt_input = PromptInput::new();
+        let channel_overlay = ChannelOverlay::new();
+
+        let mut config = ConfigManager::new().unwrap_or_else(|e| {
+            warn!("Config load failed: {e}");
+            ConfigManager::with_path(std::path::PathBuf::from("/tmp/.aios/config.json")).unwrap()
+        });
+
+        aios_core::i18n::init();
+        aios_core::i18n::set_language(&auto.system.language);
+
+        let window = main_window::build_main_window(
+            app, &chat_view, &prompt_input, &channel_overlay, &["AiOS"],
+        );
+        prompt_input.widget().set_visible(false);
+
+        // Show boot status.
+        let boot_status = {
+            use aios_core::types::{BootStatus, StatusLine};
+            let mut status = BootStatus::new();
+            status.add(StatusLine::new("Desktop", true, "GTK4/libadwaita"));
+            status.add(StatusLine::new("LLM Provider", true, &auto.provider.primary));
+            status.add(StatusLine::new("Keyboard", true, &auto.system.keyboard));
+            status
+        };
+        chat_view.add_level_message(MessageLevel::Info, &boot_status.format());
+
+        // Show autoconfig detection message with masked values.
+        let mask = |s: &str| -> String {
+            if s.is_empty() { "(empty)".to_string() }
+            else if s.len() <= 8 { "****".to_string() }
+            else { format!("{}****{}", &s[..4], &s[s.len()-4..]) }
+        };
+
+        let autoconfig_msg = format!(
+            "**Autoconfig detected** — applying unattended configuration:\n\n\
+             **Provider:** {}\n\
+             **Claude API Key:** {}\n\
+             **OpenAI API Key:** {}\n\
+             **Keyboard:** {}\n\
+             **Language:** {}\n\
+             **Timezone:** {}\n\
+             **Hostname:** {}\n\
+             **Password:** ****\n\
+             **Install to disk:** {}\n\
+             **Assistant name:** {}",
+            auto.provider.primary,
+            mask(&auto.provider.claude_api_key),
+            mask(&auto.provider.openai_api_key),
+            auto.system.keyboard,
+            auto.system.language,
+            if auto.system.timezone.is_empty() { "auto" } else { &auto.system.timezone },
+            auto.system.hostname,
+            if auto.install.enabled { "yes" } else { "no (live mode)" },
+            auto.assistant.name,
+        );
+        chat_view.add_level_message(MessageLevel::Info, &autoconfig_msg);
+
+        // 1. Create vault.
+        let vault_path = ConfigManager::default_config_dir().join("vault.enc");
+        let mut vault = Vault::new(vault_path);
+        if let Err(e) = vault.create(&auto.system.master_password) {
+            error!("Autoconfig: failed to create vault: {e}");
+            chat_view.add_level_message(
+                MessageLevel::Error,
+                &format!("Autoconfig failed: {e}\nFalling back to interactive setup."),
+            );
+            window.present();
+            return;
+        }
+
+        // 2. Store API keys.
+        if !auto.provider.claude_api_key.is_empty() {
+            let entry = SecretEntry {
+                kind: SecretKind::ApiKey,
+                value: auto.provider.claude_api_key.clone(),
+                label: "Claude API Key".to_string(),
+                created: chrono::Utc::now(),
+                last_accessed: None,
+            };
+            let _ = vault.set("claude_api_key", entry);
+        }
+        if !auto.provider.openai_api_key.is_empty() {
+            let entry = SecretEntry {
+                kind: SecretKind::ApiKey,
+                value: auto.provider.openai_api_key.clone(),
+                label: "OpenAI API Key".to_string(),
+                created: chrono::Utc::now(),
+                last_accessed: None,
+            };
+            let _ = vault.set("openai_api_key", entry);
+        }
+
+        // 3. Write config.
+        let _ = config.set("llm.claude_api_key", serde_json::json!(auto.provider.claude_api_key));
+        let _ = config.set("llm.openai_api_key", serde_json::json!(auto.provider.openai_api_key));
+        let _ = config.set("assistant.name", serde_json::json!(auto.assistant.name));
+        let _ = config.set("assistant.language", serde_json::json!(auto.system.language));
+        let _ = config.set("llm.effort", serde_json::json!(auto.assistant.effort));
+
+        // 4. Show success message.
+        chat_view.add_level_message(
+            MessageLevel::Success,
+            &format!(
+                "**Autoconfig applied successfully!**\n\n\
+                 Vault created, API keys stored, system configured.\n\
+                 Provider: **{}** | Keyboard: **{}** | Mode: **{}**",
+                auto.provider.primary,
+                auto.system.keyboard,
+                if auto.install.enabled { "hard drive install" } else { "live ISO" },
+            ),
+        );
+
+        info!("Autoconfig applied — transitioning to normal mode");
+
+        // 5. Transition to normal chat mode.
+        let app_clone = app.clone();
+        let chat_view_clone = chat_view.clone();
+        let prompt_clone = prompt_input.clone();
+        let window_clone = window.clone();
+        gtk4::glib::idle_add_local_once(move || {
+            Self::transition_to_normal_mode(
+                &app_clone, rt, &chat_view_clone, &prompt_clone, &window_clone,
+            );
+        });
+
+        window.present();
     }
 
     /// Normal application startup — builds the UI and wires up signals.

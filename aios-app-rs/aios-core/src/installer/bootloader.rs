@@ -36,7 +36,7 @@ pub fn install_grub(
     }
 
     for (src, dst) in &bind_mounts {
-        std::fs::create_dir_all(dst).ok();
+        super::sudo_mkdir(dst).ok();
         let output = std::process::Command::new("sudo")
             .args(["mount", "--bind", src, dst])
             .output()

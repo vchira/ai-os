@@ -18,6 +18,9 @@ aios-app-rs/target/
 
 # Environment / secrets
 .env
+autoconfig.json
+autoconfig-*.json
+!autoconfig-*.sample.json
 
 # AiOS runtime data (local to each machine)
 .aios/

@@ -16,8 +16,15 @@ pub const INSTALL_MOUNT_POINT: &str = "/mnt/aios-install";
 /// # Note
 /// Requires root — all mount operations run via `sudo`.
 pub fn mount(device: &str, mount_point: &str, fstype: Option<&str>) -> Result<(), String> {
-    std::fs::create_dir_all(mount_point)
+    // Create mount point via sudo (parent dirs like /mnt are root-owned)
+    let mkdir_out = std::process::Command::new("sudo")
+        .args(["mkdir", "-p", mount_point])
+        .output()
         .map_err(|e| format!("Failed to create mount point {mount_point}: {e}"))?;
+    if !mkdir_out.status.success() {
+        let stderr = String::from_utf8_lossy(&mkdir_out.stderr);
+        return Err(format!("Failed to create mount point {mount_point}: {stderr}"));
+    }
 
     let mut args = vec!["mount"];
     if let Some(fs) = fstype {
@@ -108,8 +115,14 @@ pub fn copy_filesystem(
     // Step 3: If UEFI, mount EFI partition
     if let Some(efi_dev) = efi_device {
         let efi_mount = format!("{target}/boot/efi");
-        std::fs::create_dir_all(&efi_mount)
+        let mkdir_out = std::process::Command::new("sudo")
+            .args(["mkdir", "-p", &efi_mount])
+            .output()
             .map_err(|e| format!("Failed to create EFI mount point: {e}"))?;
+        if !mkdir_out.status.success() {
+            let stderr = String::from_utf8_lossy(&mkdir_out.stderr);
+            return Err(format!("Failed to create EFI mount point: {stderr}"));
+        }
         progress("Mounting EFI partition...");
         mount(efi_dev, &efi_mount, Some("vfat"))?;
     }

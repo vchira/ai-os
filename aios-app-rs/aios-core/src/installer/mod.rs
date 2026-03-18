@@ -19,6 +19,50 @@ pub use partition::{
     is_uefi, plan_partitions,
 };
 
+/// Write a file via `sudo tee` (needed for root-owned target filesystems).
+pub fn sudo_write(path: &str, content: &str) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("sudo")
+        .args(["tee", path])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to write {path}: {e}"))?;
+    if let Some(ref mut stdin) = child.stdin {
+        stdin.write_all(content.as_bytes())
+            .map_err(|e| format!("Failed to write {path}: {e}"))?;
+    }
+    let output = child.wait_with_output()
+        .map_err(|e| format!("Failed to write {path}: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to write {path}: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Create a directory via `sudo mkdir -p`.
+pub fn sudo_mkdir(path: &str) -> Result<(), String> {
+    let output = std::process::Command::new("sudo")
+        .args(["mkdir", "-p", path])
+        .output()
+        .map_err(|e| format!("Failed to create directory {path}: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to create directory {path}: {stderr}"));
+    }
+    Ok(())
+}
+
+/// Remove a file via `sudo rm -f`.
+pub fn sudo_rm(path: &str) -> Result<(), String> {
+    let _ = std::process::Command::new("sudo")
+        .args(["rm", "-f", path])
+        .output();
+    Ok(())
+}
+
 /// Returns `true` if the system is running from a live ISO (overlay/squashfs/tmpfs root).
 ///
 /// Queries the filesystem type of `/` via `findmnt`. Live ISOs typically use
@@ -214,8 +258,7 @@ fn create_vault_on_target(mount_point: &str, config: &InstallConfig) -> Result<(
     use crate::secure::{SecretEntry, SecretKind, Vault};
 
     let vault_dir = format!("{mount_point}/home/aios/.aios");
-    std::fs::create_dir_all(&vault_dir)
-        .map_err(|e| format!("Failed to create vault directory: {e}"))?;
+    sudo_mkdir(&vault_dir)?;
 
     let vault_path = std::path::PathBuf::from(format!("{vault_dir}/vault.enc"));
     let mut vault = Vault::new(vault_path);

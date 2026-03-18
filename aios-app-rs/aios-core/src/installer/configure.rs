@@ -5,6 +5,7 @@
 //! mount point or run `chroot` commands.
 
 use super::partition::PartitionResult;
+use super::{sudo_rm, sudo_write};
 
 /// Write `/etc/fstab` on the installed system.
 ///
@@ -21,8 +22,7 @@ pub fn write_fstab(
     );
 
     let fstab_path = format!("{mount_point}/etc/fstab");
-    std::fs::write(&fstab_path, &content)
-        .map_err(|e| format!("Failed to write {fstab_path}: {e}"))?;
+    sudo_write(&fstab_path, &content)?;
 
     Ok(())
 }
@@ -77,8 +77,10 @@ pub fn configure_system(
 ) -> Result<(), String> {
     // 1. Set hostname
     progress("Setting hostname...");
-    std::fs::write(format!("{mount_point}/etc/hostname"), format!("{hostname}\n"))
-        .map_err(|e| format!("Failed to write hostname: {e}"))?;
+    sudo_write(
+        &format!("{mount_point}/etc/hostname"),
+        &format!("{hostname}\n"),
+    )?;
 
     // 2. Set /etc/hosts
     progress("Configuring hosts file...");
@@ -91,8 +93,7 @@ pub fn configure_system(
          ff02::1\tip6-allnodes\n\
          ff02::2\tip6-allrouters\n"
     );
-    std::fs::write(format!("{mount_point}/etc/hosts"), &hosts)
-        .map_err(|e| format!("Failed to write hosts: {e}"))?;
+    sudo_write(&format!("{mount_point}/etc/hosts"), &hosts)?;
 
     // 3. Set locale
     progress("Configuring locale...");
@@ -106,15 +107,14 @@ pub fn configure_system(
 
     // Write default locale
     let default_locale = format!("LANG={language}.UTF-8\n");
-    // Try common locale codes: language_COUNTRY.UTF-8
-    // We use just the language code and let locale-gen figure out the right variant.
-    let locale_path = format!("{mount_point}/etc/default/locale");
-    std::fs::write(&locale_path, &default_locale).ok();
+    let _ = sudo_write(
+        &format!("{mount_point}/etc/default/locale"),
+        &default_locale,
+    );
 
     // 4. Set timezone
     progress("Setting timezone...");
-    let localtime_path = format!("{mount_point}/etc/localtime");
-    let _ = std::fs::remove_file(&localtime_path);
+    let _ = sudo_rm(&format!("{mount_point}/etc/localtime"));
     let _ = std::process::Command::new("sudo")
         .args([
             "chroot", mount_point,
@@ -124,14 +124,20 @@ pub fn configure_system(
         ])
         .output();
 
-    std::fs::write(format!("{mount_point}/etc/timezone"), format!("{timezone}\n")).ok();
+    let _ = sudo_write(
+        &format!("{mount_point}/etc/timezone"),
+        &format!("{timezone}\n"),
+    );
 
     // 5. Set keyboard layout
     progress("Setting keyboard layout...");
     let kb_config = format!(
         "XKBMODEL=\"pc105\"\nXKBLAYOUT=\"{keyboard}\"\nXKBVARIANT=\"\"\nXKBOPTIONS=\"\"\n"
     );
-    std::fs::write(format!("{mount_point}/etc/default/keyboard"), &kb_config).ok();
+    let _ = sudo_write(
+        &format!("{mount_point}/etc/default/keyboard"),
+        &kb_config,
+    );
 
     // 6. Set user password (aios user)
     progress("Setting user password...");

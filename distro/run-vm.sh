@@ -54,14 +54,15 @@ pkill -f "qemu-system-x86_64.*aios-live" 2>/dev/null || true
 sleep 0.5
 
 # ─── Audio backend ────────────────────────────────────────────
-# QEMU inherits our environment, so PipeWire/PulseAudio just works.
+# Use PulseAudio backend (works with both PulseAudio and PipeWire via pipewire-pulse).
+# PA backend has more reliable mic input support than the native PipeWire backend.
 AUDIO_ARGS=""
-if [ -S "/run/user/$(id -u)/pipewire-0" ]; then
-    echo "[*] Audio: PipeWire (mic + speaker)"
-    AUDIO_ARGS="-audiodev pipewire,id=audio0,in.stream-name=aios-mic,out.stream-name=aios-speaker -device intel-hda -device hda-duplex,audiodev=audio0"
-elif [ -S "/run/user/$(id -u)/pulse/native" ]; then
+if [ -S "/run/user/$(id -u)/pulse/native" ]; then
     echo "[*] Audio: PulseAudio (mic + speaker)"
     AUDIO_ARGS="-audiodev pa,id=audio0,server=/run/user/$(id -u)/pulse/native -device intel-hda -device hda-duplex,audiodev=audio0"
+elif [ -S "/run/user/$(id -u)/pipewire-0" ]; then
+    echo "[*] Audio: PipeWire (mic + speaker)"
+    AUDIO_ARGS="-audiodev pipewire,id=audio0 -device intel-hda -device hda-duplex,audiodev=audio0"
 else
     echo "[*] Audio: none (no PipeWire or PulseAudio detected)"
     AUDIO_ARGS="-device intel-hda -device hda-duplex"
@@ -115,6 +116,29 @@ qemu-system-x86_64 \
     -daemonize
 
 echo "[*] VM started"
+
+# ─── Link host default mic to QEMU input ─────────────────────
+# Uses whatever the system default source is (Bluetooth, USB, built-in — doesn't matter).
+(
+    sleep 5  # wait for QEMU to register with PipeWire
+    VM_INPUT=$(pw-link -i 2>/dev/null | grep "aios-live:input\|qemu.*input" | head -1)
+    if [ -n "${VM_INPUT}" ]; then
+        # Get the default source name from WirePlumber
+        DEFAULT_NODE=$(wpctl inspect @DEFAULT_SOURCE@ 2>/dev/null | grep "node.name" | head -1 | sed 's/.*= "\(.*\)"/\1/')
+        if [ -n "${DEFAULT_NODE}" ]; then
+            # Find a capture port from the default source
+            DEFAULT_PORT=$(pw-link -o 2>/dev/null | grep "${DEFAULT_NODE}:capture" | head -1)
+            if [ -n "${DEFAULT_PORT}" ]; then
+                # Remove any existing links to QEMU input first
+                for src in $(pw-link -l 2>/dev/null | grep -B1 "${VM_INPUT}" | grep "|<-" | sed 's/.*|<- //'); do
+                    pw-link -d "${src}" "${VM_INPUT}" 2>/dev/null || true
+                done
+                pw-link "${DEFAULT_PORT}" "${VM_INPUT}" 2>/dev/null || true
+                echo "[*] Mic linked: ${DEFAULT_PORT} -> ${VM_INPUT}"
+            fi
+        fi
+    fi
+) &
 
 # ─── Connect viewer ──────────────────────────────────────────
 sleep 10

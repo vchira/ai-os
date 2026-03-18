@@ -1,0 +1,316 @@
+/* AiOS User Guide — Custom Theme
+ * Dark-themed styling matching AiOS aesthetics
+ * Dark background, blue accents
+ */
+
+/* ===== Root variables ===== */
+:root {
+    --aios-bg-primary: #0d1117;
+    --aios-bg-secondary: #161b22;
+    --aios-bg-tertiary: #1c2128;
+    --aios-border: #30363d;
+    --aios-text: #e6edf3;
+    --aios-text-muted: #8b949e;
+    --aios-accent: #58a6ff;
+    --aios-accent-hover: #79c0ff;
+    --aios-accent-dim: #1f6feb;
+    --aios-success: #3fb950;
+    --aios-warning: #d29922;
+    --aios-error: #f85149;
+    --aios-code-bg: #0d1117;
+    --aios-inline-code-bg: #1c2128;
+}
+
+/* ===== Override Coal theme defaults ===== */
+.coal {
+    --bg: var(--aios-bg-primary);
+    --fg: var(--aios-text);
+    --sidebar-bg: var(--aios-bg-secondary);
+    --sidebar-fg: var(--aios-text);
+    --sidebar-active: var(--aios-accent);
+    --links: var(--aios-accent);
+}
+
+/* ===== Body and content ===== */
+.coal .content {
+    max-width: 850px;
+}
+
+/* ===== Headings ===== */
+.coal h1, .coal h2, .coal h3, .coal h4 {
+    color: var(--aios-text);
+    border-bottom-color: var(--aios-border);
+}
+
+.coal h1 {
+    font-size: 2em;
+    letter-spacing: -0.02em;
+    margin-bottom: 0.6em;
+    padding-bottom: 0.3em;
+    border-bottom: 2px solid var(--aios-accent-dim);
+}
+
+.coal h2 {
+    font-size: 1.5em;
+    margin-top: 1.8em;
+    padding-bottom: 0.25em;
+    border-bottom: 1px solid var(--aios-border);
+}
+
+.coal h3 {
+    font-size: 1.2em;
+    color: var(--aios-accent);
+}
+
+/* ===== Links ===== */
+.coal a {
+    color: var(--aios-accent);
+    text-decoration: none;
+    transition: color 0.15s ease;
+}
+
+.coal a:hover {
+    color: var(--aios-accent-hover);
+    text-decoration: underline;
+}
+
+/* ===== Code blocks ===== */
+.coal code {
+    background-color: var(--aios-inline-code-bg);
+    border: 1px solid var(--aios-border);
+    border-radius: 4px;
+    padding: 0.15em 0.4em;
+    font-size: 0.9em;
+    color: var(--aios-accent-hover);
+}
+
+.coal pre {
+    background-color: var(--aios-code-bg) !important;
+    border: 1px solid var(--aios-border);
+    border-radius: 6px;
+    padding: 1em;
+    overflow-x: auto;
+}
+
+.coal pre > code {
+    background-color: transparent;
+    border: none;
+    padding: 0;
+    color: var(--aios-text);
+}
+
+/* ===== Tables ===== */
+.coal table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+}
+
+.coal table th {
+    background-color: var(--aios-bg-tertiary);
+    color: var(--aios-accent);
+    font-weight: 600;
+    text-align: left;
+    padding: 0.7em 1em;
+    border: 1px solid var(--aios-border);
+}
+
+.coal table td {
+    padding: 0.6em 1em;
+    border: 1px solid var(--aios-border);
+}
+
+.coal table tr:nth-child(even) {
+    background-color: var(--aios-bg-secondary);
+}
+
+.coal table tr:hover {
+    background-color: var(--aios-bg-tertiary);
+}
+
+/* ===== Blockquotes ===== */
+.coal blockquote {
+    border-left: 4px solid var(--aios-accent-dim);
+    background-color: var(--aios-bg-secondary);
+    padding: 0.8em 1.2em;
+    margin: 1em 0;
+    border-radius: 0 6px 6px 0;
+    color: var(--aios-text-muted);
+}
+
+.coal blockquote p {
+    margin: 0.3em 0;
+}
+
+.coal blockquote strong {
+    color: var(--aios-warning);
+}
+
+/* ===== Sidebar ===== */
+.coal .sidebar {
+    background-color: var(--aios-bg-secondary);
+    border-right: 1px solid var(--aios-border);
+}
+
+.coal .sidebar .sidebar-scrollbox {
+    padding: 10px 15px;
+}
+
+.coal .sidebar a {
+    color: var(--aios-text-muted);
+    transition: color 0.15s ease;
+}
+
+.coal .sidebar a:hover {
+    color: var(--aios-text);
+}
+
+.coal .sidebar a.active {
+    color: var(--aios-accent);
+    font-weight: 600;
+}
+
+.coal .sidebar .chapter li.chapter-item {
+    margin-top: 0.3em;
+}
+
+/* Section headers in sidebar */
+.coal .sidebar .chapter li.part-title {
+    color: var(--aios-accent);
+    font-weight: 700;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-top: 1.2em;
+    padding: 0.3em 0;
+    border-bottom: 1px solid var(--aios-border);
+}
+
+/* ===== Navigation buttons ===== */
+.coal .nav-chapters {
+    color: var(--aios-text-muted);
+    transition: color 0.15s ease;
+}
+
+.coal .nav-chapters:hover {
+    color: var(--aios-accent);
+}
+
+/* ===== Search ===== */
+.coal #searchbar {
+    background-color: var(--aios-bg-secondary);
+    border: 1px solid var(--aios-border);
+    color: var(--aios-text);
+    border-radius: 6px;
+    padding: 0.5em 0.8em;
+}
+
+.coal #searchbar:focus {
+    border-color: var(--aios-accent);
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+}
+
+.coal .search-results .search-results-title {
+    color: var(--aios-accent);
+}
+
+.coal .searchresults-outer .search-results a {
+    color: var(--aios-accent);
+}
+
+/* ===== Lists ===== */
+.coal ul, .coal ol {
+    padding-left: 1.5em;
+}
+
+.coal li {
+    margin-bottom: 0.3em;
+    line-height: 1.6;
+}
+
+/* ===== Horizontal rules ===== */
+.coal hr {
+    border: none;
+    border-top: 1px solid var(--aios-border);
+    margin: 2em 0;
+}
+
+/* ===== Strong and emphasis ===== */
+.coal strong {
+    color: var(--aios-text);
+    font-weight: 600;
+}
+
+.coal em {
+    color: var(--aios-text-muted);
+    font-style: italic;
+}
+
+/* ===== Menu bar ===== */
+.coal .menu-bar {
+    background-color: var(--aios-bg-secondary);
+    border-bottom: 1px solid var(--aios-border);
+}
+
+.coal .menu-bar i {
+    color: var(--aios-text-muted);
+}
+
+.coal .menu-bar i:hover {
+    color: var(--aios-accent);
+}
+
+/* ===== Scrollbar ===== */
+.coal ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+.coal ::-webkit-scrollbar-track {
+    background: var(--aios-bg-primary);
+}
+
+.coal ::-webkit-scrollbar-thumb {
+    background: var(--aios-border);
+    border-radius: 4px;
+}
+
+.coal ::-webkit-scrollbar-thumb:hover {
+    background: var(--aios-text-muted);
+}
+
+/* ===== Warning/important blocks ===== */
+.coal blockquote p:first-child strong:first-child {
+    display: inline-block;
+    margin-bottom: 0.2em;
+}
+
+/* Style blockquotes that start with "Warning:" */
+.coal blockquote p:first-child:has(strong:first-child) {
+    margin-top: 0;
+}
+
+/* ===== Print styles ===== */
+@media print {
+    .coal {
+        --bg: #ffffff;
+        --fg: #000000;
+    }
+
+    .coal code {
+        background-color: #f0f0f0;
+        border-color: #cccccc;
+        color: #000000;
+    }
+
+    .coal pre {
+        background-color: #f0f0f0 !important;
+        border-color: #cccccc;
+    }
+
+    .coal table th {
+        background-color: #e0e0e0;
+        color: #000000;
+    }
+}

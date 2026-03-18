@@ -1,5 +1,6 @@
 //! Configuration management — persistent JSON settings and slash commands.
 
+pub mod autoconfig;
 pub mod commands;
 pub mod defaults;
 

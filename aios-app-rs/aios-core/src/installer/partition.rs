@@ -32,6 +32,8 @@ pub struct PlannedPartition {
 /// The purpose of a planned partition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartitionRole {
+    /// BIOS Boot Partition (1 MB, unformatted — required for GRUB on BIOS+GPT).
+    BiosBoot,
     /// EFI System Partition (only on UEFI systems).
     Efi,
     /// Linux swap.
@@ -43,6 +45,7 @@ pub enum PartitionRole {
 impl std::fmt::Display for PartitionRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::BiosBoot => write!(f, "BIOS Boot Partition"),
             Self::Efi => write!(f, "EFI System Partition"),
             Self::Swap => write!(f, "Swap"),
             Self::Root => write!(f, "Root"),
@@ -66,6 +69,9 @@ pub struct PartitionResult {
     /// UUID of swap partition (for fstab).
     pub swap_uuid: String,
 }
+
+/// BIOS Boot Partition size: 1 MB (required for GRUB on BIOS+GPT).
+const BIOS_BOOT_SIZE: u64 = 1 * 1024 * 1024;
 
 /// EFI partition size: 512 MB.
 const EFI_SIZE: u64 = 512 * 1024 * 1024;
@@ -97,10 +103,10 @@ pub fn plan_partitions(device: &str, total_bytes: u64) -> Result<PartitionPlan, 
 
 /// Inner implementation that accepts UEFI and RAM as parameters for testability.
 fn plan_partitions_inner(device: &str, total_bytes: u64, uefi: bool, ram_bytes: u64) -> Result<PartitionPlan, String> {
-    let efi_size = if uefi { EFI_SIZE } else { 0 };
+    let boot_size = if uefi { EFI_SIZE } else { BIOS_BOOT_SIZE };
     let swap_size = ram_bytes.min(MAX_SWAP);
 
-    let overhead = efi_size + swap_size;
+    let overhead = boot_size + swap_size;
     if total_bytes <= overhead {
         return Err("Not enough space for installation (need at least 10 GB)".into());
     }
@@ -122,6 +128,14 @@ fn plan_partitions_inner(device: &str, total_bytes: u64, uefi: bool, ram_bytes: 
             size_bytes: EFI_SIZE,
             size_human: format_size(EFI_SIZE),
             filesystem: "vfat",
+        });
+    } else {
+        // BIOS+GPT requires a BIOS Boot Partition for GRUB to embed its core.img.
+        partitions.push(PlannedPartition {
+            role: PartitionRole::BiosBoot,
+            size_bytes: BIOS_BOOT_SIZE,
+            size_human: format_size(BIOS_BOOT_SIZE),
+            filesystem: "none",
         });
     }
 
@@ -217,6 +231,17 @@ pub fn execute_partition_plan(
     for planned in &plan.partitions {
         part_num += 1;
         match planned.role {
+            PartitionRole::BiosBoot => {
+                progress("Creating BIOS boot partition...");
+                let size_mb = planned.size_bytes / (1024 * 1024);
+                run_cmd("sudo", &[
+                    "sgdisk",
+                    &format!("--new={part_num}:0:+{size_mb}M"),
+                    &format!("--typecode={part_num}:EF02"),
+                    dev,
+                ])?;
+                // No formatting — GRUB writes directly to this partition.
+            }
             PartitionRole::Efi => {
                 progress("Creating EFI system partition...");
                 let size_mb = planned.size_bytes / (1024 * 1024);
@@ -351,14 +376,17 @@ mod tests {
         .expect("Should succeed for 500GB BIOS drive");
 
         assert!(!plan.is_uefi);
-        assert_eq!(plan.partitions.len(), 2);
+        assert_eq!(plan.partitions.len(), 3);
 
-        assert_eq!(plan.partitions[0].role, PartitionRole::Swap);
-        assert_eq!(plan.partitions[0].size_bytes, 4_000_000_000);
+        assert_eq!(plan.partitions[0].role, PartitionRole::BiosBoot);
+        assert_eq!(plan.partitions[0].size_bytes, BIOS_BOOT_SIZE);
 
-        assert_eq!(plan.partitions[1].role, PartitionRole::Root);
-        let expected_root = 500_000_000_000 - 4_000_000_000;
-        assert_eq!(plan.partitions[1].size_bytes, expected_root);
+        assert_eq!(plan.partitions[1].role, PartitionRole::Swap);
+        assert_eq!(plan.partitions[1].size_bytes, 4_000_000_000);
+
+        assert_eq!(plan.partitions[2].role, PartitionRole::Root);
+        let expected_root = 500_000_000_000 - BIOS_BOOT_SIZE - 4_000_000_000;
+        assert_eq!(plan.partitions[2].size_bytes, expected_root);
     }
 
     #[test]
@@ -410,8 +438,9 @@ mod tests {
         )
         .unwrap();
 
-        // Swap should be capped at 8 GB
-        assert_eq!(plan.partitions[0].size_bytes, MAX_SWAP);
+        // Swap should be capped at 8 GB (index 1 on BIOS: BiosBoot, Swap, Root)
+        let swap = plan.partitions.iter().find(|p| p.role == PartitionRole::Swap).unwrap();
+        assert_eq!(swap.size_bytes, MAX_SWAP);
     }
 
     #[test]

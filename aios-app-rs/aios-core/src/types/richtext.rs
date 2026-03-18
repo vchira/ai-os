@@ -21,6 +21,9 @@ static RE_UNDERLINE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"__(.+?)__")
 static RE_STRIKE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"~~(.+?)~~").unwrap());
 static RE_ITALIC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*([^*]+?)\*").unwrap());
 static RE_NUM: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)\.\s+(.+)$").unwrap());
+static RE_INLINE_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`]+?)`").unwrap());
+static RE_LINK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").unwrap());
+static RE_HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(#{1,3})\s+(.+)$").unwrap());
 
 // ---------------------------------------------------------------------------
 // Internal: inline formatting
@@ -58,30 +61,53 @@ fn escape_pango(text: &str) -> String {
 /// Convert rich text markup to Pango markup (for GTK).
 pub fn to_pango(text: &str) -> String {
     let re_num = &*RE_NUM;
+    let re_heading = &*RE_HEADING;
     let mut lines: Vec<String> = Vec::new();
 
     for line in text.lines() {
         let escaped = escape_pango(line);
         let trimmed = escaped.trim_start();
 
-        if let Some(rest) = trimmed.strip_prefix("- ") {
-            let formatted = format_inline(rest, "<b>$1</b>", "<i>$1</i>", "<u>$1</u>", "<s>$1</s>");
+        // Headings: # H1, ## H2, ### H3
+        if let Some(caps) = re_heading.captures(trimmed) {
+            let level = caps[1].len();
+            let content = &caps[2];
+            let formatted = format_inline_pango(content);
+            let size = match level {
+                1 => "x-large",
+                2 => "large",
+                _ => "medium",
+            };
+            lines.push(format!("<span size='{size}'><b>{formatted}</b></span>"));
+        } else if let Some(rest) = trimmed.strip_prefix("- ") {
+            let formatted = format_inline_pango(rest);
             lines.push(format!("\u{2022} {formatted}"));
         } else if let Some(caps) = re_num.captures(trimmed) {
             let num = &caps[1];
             let rest = &caps[2];
-            let formatted = format_inline(rest, "<b>$1</b>", "<i>$1</i>", "<u>$1</u>", "<s>$1</s>");
+            let formatted = format_inline_pango(rest);
             lines.push(format!("{num}. {formatted}"));
         } else {
-            lines.push(format_inline(&escaped, "<b>$1</b>", "<i>$1</i>", "<u>$1</u>", "<s>$1</s>"));
+            lines.push(format_inline_pango(&escaped));
         }
     }
     lines.join("\n")
 }
 
+/// Apply all inline Pango formatting: bold, italic, underline, strikethrough, code, links.
+fn format_inline_pango(text: &str) -> String {
+    // Links first (before other formatting eats the brackets)
+    let result = RE_LINK.replace_all(text, "<span color='#4a9eff'><u>$1</u></span>").into_owned();
+    // Inline code
+    let result = RE_INLINE_CODE.replace_all(&result, "<tt>$1</tt>").into_owned();
+    // Then standard inline formatting
+    format_inline(&result, "<b>$1</b>", "<i>$1</i>", "<u>$1</u>", "<s>$1</s>")
+}
+
 /// Convert rich text markup to HTML (for Web).
 pub fn to_html(text: &str) -> String {
     let re_num = &*RE_NUM;
+    let re_heading = &*RE_HEADING;
     let mut lines: Vec<String> = Vec::new();
     let mut in_ul = false;
     let mut in_ol = false;
@@ -89,26 +115,42 @@ pub fn to_html(text: &str) -> String {
     for line in text.lines() {
         let trimmed = line.trim_start();
 
-        if let Some(rest) = trimmed.strip_prefix("- ") {
+        // Close lists before non-list items
+        if !trimmed.starts_with("- ") && !re_num.is_match(trimmed) {
+            if in_ul { lines.push("</ul>".into()); in_ul = false; }
+            if in_ol { lines.push("</ol>".into()); in_ol = false; }
+        }
+
+        if let Some(caps) = re_heading.captures(trimmed) {
+            let level = caps[1].len();
+            let content = &caps[2];
+            let f = format_inline_html(content);
+            lines.push(format!("<h{level}>{f}</h{level}>"));
+        } else if let Some(rest) = trimmed.strip_prefix("- ") {
             if in_ol { lines.push("</ol>".into()); in_ol = false; }
             if !in_ul { lines.push("<ul>".into()); in_ul = true; }
-            let f = format_inline(rest, "<strong>$1</strong>", "<em>$1</em>", "<u>$1</u>", "<del>$1</del>");
+            let f = format_inline_html(rest);
             lines.push(format!("<li>{f}</li>"));
         } else if let Some(caps) = re_num.captures(trimmed) {
             if in_ul { lines.push("</ul>".into()); in_ul = false; }
             if !in_ol { lines.push("<ol>".into()); in_ol = true; }
             let rest = &caps[2];
-            let f = format_inline(rest, "<strong>$1</strong>", "<em>$1</em>", "<u>$1</u>", "<del>$1</del>");
+            let f = format_inline_html(rest);
             lines.push(format!("<li>{f}</li>"));
         } else {
-            if in_ul { lines.push("</ul>".into()); in_ul = false; }
-            if in_ol { lines.push("</ol>".into()); in_ol = false; }
-            lines.push(format_inline(line, "<strong>$1</strong>", "<em>$1</em>", "<u>$1</u>", "<del>$1</del>"));
+            lines.push(format_inline_html(line));
         }
     }
     if in_ul { lines.push("</ul>".into()); }
     if in_ol { lines.push("</ol>".into()); }
     lines.join("\n")
+}
+
+/// Apply all inline HTML formatting: bold, italic, underline, strikethrough, code, links.
+fn format_inline_html(text: &str) -> String {
+    let result = RE_LINK.replace_all(text, r#"<a href="$2">$1</a>"#).into_owned();
+    let result = RE_INLINE_CODE.replace_all(&result, "<code>$1</code>").into_owned();
+    format_inline(&result, "<strong>$1</strong>", "<em>$1</em>", "<u>$1</u>", "<del>$1</del>")
 }
 
 /// Strip all markup, returning plain text (for Signal/Voice).

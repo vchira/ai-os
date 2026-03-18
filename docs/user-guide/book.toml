@@ -1,0 +1,18 @@
+[book]
+title = "AiOS User Guide"
+authors = ["AiOS Project"]
+description = "Complete user documentation for AiOS — the AI-native Linux distribution"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "coal"
+preferred-dark-theme = "coal"
+git-repository-url = "https://github.com/AiOS-Project/ai-os"
+additional-css = ["src/theme/custom.css"]
+
+[output.html.search]
+enable = true

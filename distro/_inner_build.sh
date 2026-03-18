@@ -26,35 +26,38 @@ if [ ! -d cache/bootstrap ] && [ -f /cache/bootstrap.tar ]; then
     tar xf /cache/bootstrap.tar -C cache/ 2>/dev/null || true
 fi
 
-# Restore cached external downloads (whisper model, piper, voices)
+# Restore cached externals into includes.chroot/ — live-build copies these
+# into the chroot BEFORE hooks run, so hooks can skip building/downloading.
 if [ -d /cache/external ]; then
-    echo "[*] Restoring cached external downloads..."
-    if [ -f /cache/external/ggml-tiny.bin ]; then
-        mkdir -p chroot/home/aios/.aios/models/whisper
-        cp /cache/external/ggml-tiny.bin chroot/home/aios/.aios/models/whisper/ 2>/dev/null || true
-    fi
-    if [ -f /cache/external/piper.tar ]; then
-        mkdir -p chroot/opt
-        tar xf /cache/external/piper.tar -C chroot/opt 2>/dev/null || true
-        ln -sf /opt/piper/piper chroot/usr/bin/piper 2>/dev/null || true
-    fi
-    if [ -f /cache/external/piper-voices.tar ]; then
-        mkdir -p chroot/home/aios/.aios/models
-        tar xf /cache/external/piper-voices.tar -C chroot/home/aios/.aios/models 2>/dev/null || true
-    fi
+    echo "[*] Restoring cached externals into includes.chroot/..."
+    mkdir -p config/includes.chroot
     if [ -f /cache/external/labwc ]; then
-        mkdir -p chroot/usr/bin
-        cp /cache/external/labwc chroot/usr/bin/labwc 2>/dev/null || true
-        chmod +x chroot/usr/bin/labwc 2>/dev/null || true
+        mkdir -p config/includes.chroot/usr/bin
+        cp /cache/external/labwc config/includes.chroot/usr/bin/labwc
+        chmod +x config/includes.chroot/usr/bin/labwc
         if [ -f /cache/external/labwc-share.tar ]; then
-            mkdir -p chroot/usr/share
-            tar xf /cache/external/labwc-share.tar -C chroot/usr/share 2>/dev/null || true
+            mkdir -p config/includes.chroot/usr/share
+            tar xf /cache/external/labwc-share.tar -C config/includes.chroot/usr/share 2>/dev/null || true
         fi
     fi
     if [ -f /cache/external/whisper-cpp-cli ]; then
-        mkdir -p chroot/usr/bin
-        cp /cache/external/whisper-cpp-cli chroot/usr/bin/whisper-cpp-cli 2>/dev/null || true
-        chmod +x chroot/usr/bin/whisper-cpp-cli 2>/dev/null || true
+        mkdir -p config/includes.chroot/usr/bin
+        cp /cache/external/whisper-cpp-cli config/includes.chroot/usr/bin/whisper-cpp-cli
+        chmod +x config/includes.chroot/usr/bin/whisper-cpp-cli
+    fi
+    if [ -f /cache/external/ggml-tiny.bin ]; then
+        mkdir -p config/includes.chroot/home/aios/.aios/models/whisper
+        cp /cache/external/ggml-tiny.bin config/includes.chroot/home/aios/.aios/models/whisper/
+    fi
+    if [ -f /cache/external/piper.tar ]; then
+        mkdir -p config/includes.chroot/opt
+        tar xf /cache/external/piper.tar -C config/includes.chroot/opt 2>/dev/null || true
+        mkdir -p config/includes.chroot/usr/bin
+        ln -sf /opt/piper/piper config/includes.chroot/usr/bin/piper
+    fi
+    if [ -f /cache/external/piper-voices.tar ]; then
+        mkdir -p config/includes.chroot/home/aios/.aios/models
+        tar xf /cache/external/piper-voices.tar -C config/includes.chroot/home/aios/.aios/models 2>/dev/null || true
     fi
 fi
 
@@ -93,7 +96,7 @@ if [ ! -f config/common ]; then
         --cache true \
         --linux-flavours "amd64" \
         --backports false \
-        --bootappend-live "boot=live components username=aios"
+        --bootappend-live "boot=live components username=aios noeject"
 fi
 
 # ─── Package Lists ──────────────────────────────────────────
@@ -202,22 +205,30 @@ echo "[AiOS] labwc installed successfully"
 EOF
 chmod +x config/hooks/live/0050-build-labwc.hook.chroot
 
-# Pre-compute values from .env OUTSIDE the chroot hook (where /work is accessible)
+# Pre-compute values from autoconfig.json (preferred) or .env (legacy)
 _KB_LAYOUT="us"
 _CLAUDE_KEY=""
 _OPENAI_KEY=""
 _AIOS_VERSION="${AIOS_VERSION:-dev}"
-if [ -f /work/.env ]; then
+_HAS_AUTOCONFIG="false"
+
+if [ -f /work/autoconfig.json ]; then
+    echo "[*] Reading from autoconfig.json..."
+    _KB_LAYOUT=$(python3 -c "import json; c=json.load(open('/work/autoconfig.json')); print(c.get('system',{}).get('keyboard','us'))" 2>/dev/null || echo "us")
+    _CLAUDE_KEY=$(python3 -c "import json; c=json.load(open('/work/autoconfig.json')); print(c.get('provider',{}).get('claude_api_key',''))" 2>/dev/null || true)
+    _OPENAI_KEY=$(python3 -c "import json; c=json.load(open('/work/autoconfig.json')); print(c.get('provider',{}).get('openai_api_key',''))" 2>/dev/null || true)
+    _HAS_AUTOCONFIG="true"
+elif [ -f /work/.env ]; then
+    echo "[*] Reading from .env (legacy)..."
     _KB_LAYOUT=$(grep -oP 'KEYBOARD_LAYOUT\s*=\s*\K\S+' /work/.env 2>/dev/null || echo "us")
     _CLAUDE_KEY=$(grep -oP 'CLAUDE_API_KEY\s*=\s*\K\S+' /work/.env 2>/dev/null || true)
     _OPENAI_KEY=$(grep -oP 'OPENAI_API_KEY\s*=\s*\K\S+' /work/.env 2>/dev/null || true)
     [ "$_OPENAI_KEY" = "your-api-key-here" ] && _OPENAI_KEY=""
 fi
 [ -z "$_KB_LAYOUT" ] && _KB_LAYOUT="us"
-echo "[*] Build config: keyboard=${_KB_LAYOUT} version=${_AIOS_VERSION} claude_key=$([ -n "$_CLAUDE_KEY" ] && echo 'set' || echo 'empty')"
+echo "[*] Build config: keyboard=${_KB_LAYOUT} version=${_AIOS_VERSION} autoconfig=${_HAS_AUTOCONFIG} claude_key=$([ -n "$_CLAUDE_KEY" ] && echo 'set' || echo 'empty')"
 
 # Write build config where the chroot can read it
-# Use /opt/aios-app/ instead of /tmp/ — live-build cleans /tmp before hooks run
 mkdir -p config/includes.chroot/opt/aios-app
 cat > config/includes.chroot/opt/aios-app/build-config << BUILDCFG
 KB_LAYOUT=${_KB_LAYOUT}
@@ -225,6 +236,12 @@ CLAUDE_KEY=${_CLAUDE_KEY}
 OPENAI_KEY=${_OPENAI_KEY}
 AIOS_VERSION=${_AIOS_VERSION}
 BUILDCFG
+
+# Copy autoconfig.json into ISO if it exists (for unattended setup)
+if [ -f /work/autoconfig.json ]; then
+    cp /work/autoconfig.json config/includes.chroot/opt/aios-app/autoconfig.json
+    echo "[*] Autoconfig baked into ISO"
+fi
 
 # Hook 2: Setup AiOS system
 cat > config/hooks/live/0100-setup-aios.hook.chroot << 'EOF'
@@ -777,6 +794,22 @@ WantedBy=multi-user.target
 HCSEOF
 systemctl enable aios-hostname-check.service
 
+# ── VM graphics driver auto-detection ──
+# Load VM GPU modules early via modules-load.d (runs before any display manager).
+# On real hardware these modules simply won't exist and are silently skipped.
+mkdir -p /etc/modules-load.d
+cat > /etc/modules-load.d/aios-vm-gpu.conf << 'MODEOF'
+# VM GPU drivers — each is silently skipped if not applicable
+vboxvideo
+vmwgfx
+virtio-gpu
+MODEOF
+
+# Ensure video group has DRM access
+cat > /etc/udev/rules.d/70-aios-drm.rules << 'UDEVEOF'
+SUBSYSTEM=="drm", GROUP="video", MODE="0660"
+UDEVEOF
+
 # ── Install whisper.cpp for STT (build from source) ──
 echo "[AiOS] Building whisper.cpp from source..."
 WHISPER_VERSION="1.7.4"
@@ -824,7 +857,9 @@ fi
 echo "[AiOS] Installing Piper TTS..."
 PIPER_VERSION="2023.11.14-2"
 PIPER_URL="https://github.com/rhasspy/piper/releases/download/${PIPER_VERSION}/piper_linux_x86_64.tar.gz"
-if curl -fsSL "${PIPER_URL}" -o /tmp/piper.tar.gz 2>/dev/null; then
+if [ -f /opt/piper/piper ]; then
+    echo "[AiOS] Piper TTS already installed — skipping download"
+elif curl -fsSL "${PIPER_URL}" -o /tmp/piper.tar.gz 2>/dev/null; then
     tar xzf /tmp/piper.tar.gz -C /opt/
     ln -sf /opt/piper/piper /usr/bin/piper
     rm -f /tmp/piper.tar.gz
@@ -888,10 +923,32 @@ cat > /etc/greetd/config.toml << 'GREETEOF'
 vt = 7
 
 [default_session]
-command = "labwc"
+command = "/usr/bin/aios-start-compositor"
 user = "aios"
 GREETEOF
 systemctl enable greetd
+systemctl mask getty@tty1
+
+# Compositor launcher — detects GPU and configures labwc accordingly
+cat > /usr/bin/aios-start-compositor << 'COMPEOF'
+#!/bin/bash
+export LIBSEAT_BACKEND=logind
+
+# If no render node exists (VirtualBox vboxvideo), use pixman renderer
+if [ -e /dev/dri/card0 ] && ! ls /dev/dri/renderD* >/dev/null 2>&1; then
+    export WLR_RENDERER=pixman
+    export WLR_DRM_NO_MODIFIERS=1
+fi
+
+# No DRM device at all
+if [ ! -e /dev/dri/card0 ]; then
+    export WLR_RENDERER=pixman
+    export LIBGL_ALWAYS_SOFTWARE=1
+fi
+
+exec labwc 2>/tmp/labwc-error.log
+COMPEOF
+chmod +x /usr/bin/aios-start-compositor
 
 # ── labwc config for aios user ──
 mkdir -p /home/aios/.config/labwc
@@ -1011,6 +1068,20 @@ cat > /home/aios/.config/labwc/rc.xml << RCEOF
 </labwc_config>
 RCEOF
 
+# ALSA config: use PipeWire for playback, direct ALSA for capture.
+# PipeWire 0.3.65 has a bug where it holds the HDA capture device
+# but doesn't return data to clients.
+cat > /home/aios/.asoundrc << 'ALSA_EOF'
+pcm.!default {
+    type asym
+    playback.pcm "pipewire"
+    capture.pcm "plughw:0,0"
+}
+pcm.pipewire {
+    type pipewire
+}
+ALSA_EOF
+
 chown -R aios:aios /home/aios
 
 # ── Enable PipeWire ──
@@ -1038,6 +1109,19 @@ if [ -f /work/aios-app-rs/target/release/aios ]; then
 else
     echo "ERROR: Rust binary not found. Build with: cd aios-app-rs && cargo build --release"
     exit 1
+fi
+
+# Build and include user documentation (mdBook HTML)
+if [ -f /work/docs/user-guide/book.toml ]; then
+    if command -v mdbook >/dev/null 2>&1; then
+        echo "[*] Building user documentation..."
+        mdbook build /work/docs/user-guide 2>/dev/null
+    fi
+    if [ -d /work/docs/user-guide/book ]; then
+        mkdir -p config/includes.chroot/usr/share/aios/docs
+        cp -r /work/docs/user-guide/book/* config/includes.chroot/usr/share/aios/docs/
+        echo "[*] User documentation included in ISO"
+    fi
 fi
 
 # Session script with full logging

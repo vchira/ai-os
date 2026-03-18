@@ -1114,9 +1114,10 @@ impl SetupConversation {
                                 this.state.borrow_mut().install_to_drive = true;
                                 this.show_reboot_dialog();
                             } else {
-                                // Error.
+                                // Error — show message and recovery options.
                                 chat.add_message("system",
                                     &format!("{} {msg}", t("setup.install_progress.failed")));
+                                this.show_install_error_dialog(&msg);
                             }
                             return gtk::glib::ControlFlow::Break;
                         }
@@ -1169,6 +1170,44 @@ impl SetupConversation {
     }
 
     /// Show the modal reboot dialog after successful installation.
+    fn show_install_error_dialog(&self, error: &str) {
+        use libadwaita as adw;
+        use adw::prelude::*;
+
+        let widget = self.chat_view.widget();
+        let window = widget.root()
+            .and_then(|r| r.downcast::<adw::ApplicationWindow>().ok());
+        let win_ref: Option<&gtk::Window> = window.as_ref().map(|w| w.upcast_ref::<gtk::Window>());
+
+        let dialog = adw::MessageDialog::new(
+            win_ref,
+            Some("Installation Failed"),
+            Some(error),
+        );
+        dialog.add_response("retry", "Retry Installation");
+        dialog.add_response("continue", "Continue to Chat");
+        dialog.add_response("reboot", "Reboot");
+        dialog.set_default_response(Some("retry"));
+        dialog.set_close_response("continue");
+
+        let this = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            match response {
+                "retry" => {
+                    this.show_install_progress();
+                }
+                "reboot" => {
+                    let _ = std::process::Command::new("sudo").args(["reboot"]).status();
+                }
+                _ => {
+                    // Continue to chat — skip installation, proceed with setup
+                    this.advance(SetupStep::NameAssistant);
+                }
+            }
+        });
+        dialog.present();
+    }
+
     fn show_reboot_dialog(&self) {
         use libadwaita as adw;
         use adw::prelude::*;

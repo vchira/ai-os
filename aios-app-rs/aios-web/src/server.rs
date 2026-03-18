@@ -182,6 +182,11 @@ impl WebServer {
             let app = Router::new()
                 .route("/", get(serve_index))
                 .route("/ws", get(ws_upgrade))
+                .nest_service(
+                    "/docs",
+                    tower_http::services::ServeDir::new("/usr/share/aios/docs")
+                        .append_index_html_on_directories(true),
+                )
                 .with_state(state);
 
             info!("Web server starting on {primary_addr}");

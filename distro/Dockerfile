@@ -10,6 +10,7 @@ RUN apt-get update -qq && \
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable && \
     apt-get clean
 ENV PATH="/root/.cargo/bin:${PATH}"
+RUN cargo install mdbook 2>/dev/null || true
 
 # ─── Pre-download all ISO packages into a cache dir ───────────
 # This layer is cached by Docker. Only rebuilds when packages.list changes.
