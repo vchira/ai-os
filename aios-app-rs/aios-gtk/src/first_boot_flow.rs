@@ -459,6 +459,10 @@ pub(crate) fn apply_autoconfig(
     let chat_view_clone = chat_view.clone();
     let prompt_clone = prompt_input.clone();
     let window_clone = window.clone();
+    // Present window first so the user sees boot status immediately,
+    // then run transition in idle to wire up the prompt and tools.
+    window.present();
+
     gtk4::glib::idle_add_local_once(move || {
         transition_to_normal_mode(
             &app_clone,
@@ -469,9 +473,9 @@ pub(crate) fn apply_autoconfig(
             Some(vu_meter_autoconfig),
             queue,
         );
+        // Force layout recompute after showing prompt.
+        window_clone.queue_draw();
     });
-
-    window.present();
 }
 
 // ---------------------------------------------------------------------------
@@ -545,9 +549,14 @@ pub(crate) fn transition_to_normal_mode(
     // Show the transition message.
     chat_view.add_message("system", &t("setup.transition"));
 
-    // Show the settings button and prompt input.
+    // Show the settings button, info button, and prompt input.
     main_window::set_settings_button_visible(window, true);
     prompt_input.widget().set_visible(true);
+    // Force a full layout recompute — without this, the prompt may not
+    // appear after the autoconfig path because the window was presented
+    // before the idle callback that runs transition_to_normal_mode.
+    window.queue_draw();
+    info!("Settings button and prompt input set to visible");
 
     // Update the provider dropdown.
     main_window::update_provider_dropdown(window, &configured_providers);
