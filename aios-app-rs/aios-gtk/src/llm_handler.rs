@@ -24,6 +24,46 @@ pub(crate) enum LlmResult {
     Error(String),
 }
 
+/// Parse a raw LLM API error into a user-friendly message.
+fn format_llm_error(raw: &str) -> String {
+    // Try to parse as JSON to extract structured error info.
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(raw) {
+        if let Some(msg) = json.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+            let code = json.get("error").and_then(|e| e.get("code")).and_then(|c| c.as_u64()).unwrap_or(0);
+            return match code {
+                429 => format!("Rate limit exceeded. Your API quota is exhausted.\nWait a moment or switch providers with /provider.\n\nDetails: {}", &msg[..msg.len().min(200)]),
+                401 => "Authentication failed. Your API key may be invalid or expired.\nUse /key to set a new key.".to_string(),
+                403 => "Access denied. Your API key doesn't have permission for this model.\nCheck your subscription plan.".to_string(),
+                404 => format!("Model not found. The configured model may not exist.\nUse /model to change it.\n\nDetails: {}", &msg[..msg.len().min(150)]),
+                500..=599 => "The AI provider is experiencing issues. Try again in a moment.".to_string(),
+                _ => format!("AI error (code {code}): {}", &msg[..msg.len().min(200)]),
+            };
+        }
+    }
+
+    // Check for common patterns in raw text.
+    let lower = raw.to_lowercase();
+    if lower.contains("429") || lower.contains("rate limit") || lower.contains("quota") {
+        return format!("Rate limit exceeded. Wait a moment or switch providers with /provider.\n\nDetails: {}", &raw[..raw.len().min(200)]);
+    }
+    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid.*key") {
+        return "Authentication failed. Check your API key with /key.".to_string();
+    }
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return "Request timed out. The AI provider may be slow. Try again.".to_string();
+    }
+    if lower.contains("connection") || lower.contains("network") {
+        return "Network error. Check your internet connection.".to_string();
+    }
+
+    // Fallback: truncate the raw error.
+    if raw.len() > 300 {
+        format!("AI error: {}...", &raw[..300])
+    } else {
+        format!("AI error: {raw}")
+    }
+}
+
 /// Minimal interface that `send_to_llm` needs from the application state.
 ///
 /// Using a trait avoids coupling this module to the concrete `AiosApp` struct.
@@ -200,7 +240,11 @@ pub(crate) fn send_to_llm<S: LlmState + 'static>(
             }
             Ok(LlmResult::Error(err)) => {
                 chat_view_ref.remove_thinking(&thinking_handle);
-                chat_view_ref.add_message("system", &format!("Error: {err}"));
+                let friendly = format_llm_error(&err);
+                chat_view_ref.add_level_message(
+                    aios_core::types::MessageLevel::Warning,
+                    &friendly,
+                );
                 glib::ControlFlow::Break
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
@@ -312,7 +356,11 @@ pub(crate) fn handle_remote_llm_message<S: LlmState + 'static>(
                 glib::ControlFlow::Break
             }
             Ok(LlmResult::Error(err)) => {
-                chat_for_resp.add_message("system", &format!("Error: {err}"));
+                let friendly = format_llm_error(&err);
+                chat_for_resp.add_level_message(
+                    aios_core::types::MessageLevel::Warning,
+                    &friendly,
+                );
                 glib::ControlFlow::Break
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
