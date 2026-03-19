@@ -103,44 +103,41 @@ if [ "${BUILD_FLAG}" = "skip" ] && [ -f "${ISO}" ]; then
 elif [ "${BUILD_FLAG}" = "skip" ] && [ ! -f "${ISO}" ]; then
     die "BUILD=skip but no test ISO at ${ISO}\nRun without BUILD=skip first to build it."
 else
-    # Build a test-specific ISO that never touches distro/build/
+    # Build a test ISO using --autoconfig parameter.
+    # This never creates/modifies autoconfig.json in the repo root.
     log "Building test ISO with test autoconfig..."
-    log "This is isolated from your dev build — distro/build/ is untouched."
+    log "Uses --autoconfig flag — your dev build and autoconfig.json are untouched."
 
     mkdir -p "${TEST_BUILD_DIR}"
 
-    # Copy test autoconfig into place temporarily
-    cp "${PROJECT_DIR}/autoconfig-test.json" "${PROJECT_DIR}/autoconfig.json"
+    TEST_AUTOCONFIG="${PROJECT_DIR}/autoconfig-test.json"
+    if [ ! -f "${TEST_AUTOCONFIG}" ]; then
+        die "Test autoconfig not found: ${TEST_AUTOCONFIG}"
+    fi
 
-    # Build the ISO using the standard build script.
-    # The ISO output goes to distro/build/ — we'll move it to our test dir.
     if [ "${BUILD_FLAG}" = "deep" ]; then
         log "Deep clean build..."
         "${PROJECT_DIR}/clean.sh" 2>&1 | tail -3
     fi
 
-    # Run the build (without booting)
-    # start.sh always boots — use distro/build.sh directly
+    # Build via build.sh with --autoconfig parameter (no file hijacking)
     cd "${PROJECT_DIR}/distro"
-    bash build.sh --no-bump 2>&1 | tail -10
+    bash build.sh --autoconfig "${TEST_AUTOCONFIG}" --no-bump 2>&1 | tail -10
     BUILD_EXIT=$?
     cd "${PROJECT_DIR}"
-
-    # Remove autoconfig so it doesn't interfere with user's dev builds
-    rm -f "${PROJECT_DIR}/autoconfig.json"
 
     if [ ${BUILD_EXIT} -ne 0 ]; then
         die "Test ISO build failed (exit ${BUILD_EXIT})"
     fi
 
-    # Move the built ISO to the test directory
+    # Copy the built ISO to the test directory
     BUILT_ISO="${PROJECT_DIR}/distro/build/live-image-amd64.hybrid.iso"
     if [ ! -f "${BUILT_ISO}" ]; then
         die "Build completed but ISO not found at ${BUILT_ISO}"
     fi
 
     cp "${BUILT_ISO}" "${ISO}"
-    log "Test ISO copied to ${ISO} ($(du -h "${ISO}" | cut -f1))"
+    log "Test ISO: ${ISO} ($(du -h "${ISO}" | cut -f1))"
 fi
 
 log "Using test ISO: ${ISO}"

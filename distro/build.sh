@@ -5,18 +5,34 @@
 # Prerequisites: docker
 #
 # Usage:
-#   ./build.sh              # incremental build (full ISO)
-#   ./build.sh --code-rebuild       # rebuild Rust binary only + repack ISO (~1 min)
-#   ./build.sh --clean      # full clean rebuild
-#   ./build.sh --debug      # build with debug logging enabled at boot
+#   ./build.sh                                    # incremental build (full ISO)
+#   ./build.sh --clean                            # full clean rebuild
+#   ./build.sh --code-rebuild                     # rebuild Rust binary only + repack ISO (~1 min)
+#   ./build.sh --autoconfig path/to/config.json   # build with a specific autoconfig baked in
+#   ./build.sh --autoconfig autoconfig-test.json --no-bump   # test build
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 REPO_DIR="${SCRIPT_DIR}/.."
-ARG="${1:-}"
 IMAGE="aios-builder"
+
+# ─── Parse arguments ──────────────────────────────────────────
+ARG=""
+AUTOCONFIG_PATH=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --autoconfig)
+            AUTOCONFIG_PATH="$2"
+            shift 2
+            ;;
+        *)
+            ARG="$1"
+            shift
+            ;;
+    esac
+done
 
 # ─── Version management ──────────────────────────────────────
 # VERSION file format: MAJOR.MINOR.PATCH[-CHANNEL.N]
@@ -249,10 +265,25 @@ fi
 
 # ─── Full ISO build ─────────────────────────────────────────
 echo "[*] Building AiOS v${AIOS_VERSION}..."
+
+# Optional: mount an external autoconfig file into the container.
+# This avoids creating/deleting files in the repo root.
+AUTOCONFIG_MOUNT=""
+if [ -n "${AUTOCONFIG_PATH}" ]; then
+    AUTOCONFIG_REAL="$(cd "$(dirname "${AUTOCONFIG_PATH}")" && pwd)/$(basename "${AUTOCONFIG_PATH}")"
+    if [ ! -f "${AUTOCONFIG_REAL}" ]; then
+        echo "ERROR: Autoconfig file not found: ${AUTOCONFIG_PATH}"
+        exit 1
+    fi
+    echo "[*] Using autoconfig: ${AUTOCONFIG_REAL}"
+    AUTOCONFIG_MOUNT="-v ${AUTOCONFIG_REAL}:/work/autoconfig.json:ro"
+fi
+
 docker run --rm --privileged \
     -v "${REPO_DIR}:/work" \
     -v "${CACHE_VOL}:/cache" \
     -e "AIOS_VERSION=${AIOS_VERSION}" \
+    ${AUTOCONFIG_MOUNT} \
     "${IMAGE}" bash /work/distro/_inner_build.sh
 
 # Check result

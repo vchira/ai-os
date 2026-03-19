@@ -19,41 +19,43 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Parse args: extract flags
 USE_VBOX=false
 ARG=""
-for arg in "$@"; do
-    case "${arg}" in
-        --vbox) USE_VBOX=true ;;
-        *) ARG="${arg}" ;;
+AUTOCONFIG_ARG=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --vbox) USE_VBOX=true; shift ;;
+        --autoconfig) AUTOCONFIG_ARG="--autoconfig $2"; shift 2 ;;
+        *) ARG="$1"; shift ;;
     esac
 done
 
 if [ "${ARG}" = "--nuke" ]; then
     echo "[*] NUKE: deleting everything and rebuilding from scratch..."
     "${SCRIPT_DIR}/clean.sh" --nuke
-    "${SCRIPT_DIR}/distro/build.sh" --clean
+    "${SCRIPT_DIR}/distro/build.sh" ${AUTOCONFIG_ARG} --clean
 elif [ "${ARG}" = "--deep" ]; then
     echo "[*] Deep clean: purging all caches and rebuilding..."
     "${SCRIPT_DIR}/clean.sh" --deep
-    "${SCRIPT_DIR}/distro/build.sh" --clean
+    "${SCRIPT_DIR}/distro/build.sh" ${AUTOCONFIG_ARG} --clean
 elif [ "${ARG}" = "--clean" ]; then
     echo "[*] Clean build (keeping caches)..."
     "${SCRIPT_DIR}/clean.sh"
-    "${SCRIPT_DIR}/distro/build.sh" --clean
+    "${SCRIPT_DIR}/distro/build.sh" ${AUTOCONFIG_ARG} --clean
 elif [ "${ARG}" = "--code-rebuild" ]; then
     echo "[*] Rebuilding Rust code only (fast rebuild)..."
-    "${SCRIPT_DIR}/distro/build.sh" --code-rebuild
+    "${SCRIPT_DIR}/distro/build.sh" ${AUTOCONFIG_ARG} --code-rebuild
 elif [ "${ARG}" = "--bump-major" ]; then
     echo "[*] Major version bump + clean build..."
     "${SCRIPT_DIR}/clean.sh"
-    "${SCRIPT_DIR}/distro/build.sh" --bump-major
+    "${SCRIPT_DIR}/distro/build.sh" ${AUTOCONFIG_ARG} --bump-major
 elif [ "${ARG}" = "--bump-minor" ]; then
     echo "[*] Minor version bump + clean build..."
     "${SCRIPT_DIR}/clean.sh"
-    "${SCRIPT_DIR}/distro/build.sh" --bump-minor
+    "${SCRIPT_DIR}/distro/build.sh" ${AUTOCONFIG_ARG} --bump-minor
 else
     ISO=$(find "${SCRIPT_DIR}/distro/build" -maxdepth 1 -name "*.iso" -type f 2>/dev/null || true)
     if [ -z "${ISO}" ]; then
         echo "[*] No ISO found — building AiOS..."
-        "${SCRIPT_DIR}/distro/build.sh"
+        "${SCRIPT_DIR}/distro/build.sh" ${AUTOCONFIG_ARG}
     fi
 fi
 
