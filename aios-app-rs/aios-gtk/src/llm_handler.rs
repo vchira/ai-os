@@ -242,7 +242,7 @@ pub(crate) fn send_to_llm<S: LlmState + 'static>(
                 chat_view_ref.remove_thinking(&thinking_handle);
                 let friendly = format_llm_error(&err);
                 chat_view_ref.add_level_message(
-                    aios_core::types::MessageLevel::Warning,
+                    aios_core::types::MessageLevel::Error,
                     &friendly,
                 );
                 glib::ControlFlow::Break
@@ -358,7 +358,7 @@ pub(crate) fn handle_remote_llm_message<S: LlmState + 'static>(
             Ok(LlmResult::Error(err)) => {
                 let friendly = format_llm_error(&err);
                 chat_for_resp.add_level_message(
-                    aios_core::types::MessageLevel::Warning,
+                    aios_core::types::MessageLevel::Error,
                     &friendly,
                 );
                 glib::ControlFlow::Break
