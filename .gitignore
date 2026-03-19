@@ -32,3 +32,6 @@ Thumbs.db
 # Website generated docs
 website/docs/
 tests/qemu/build/
+autoconfig-live.json
+autoconfig-install.json
+autoconfig.json
