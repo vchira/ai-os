@@ -689,13 +689,19 @@ pub(crate) fn setup_voice(
         let kws_engine_ref = kws_engine.clone();
         let kws_dir = kws_models_dir.clone();
         std::thread::spawn(move || {
-            match aios_voice::KwsEngine::new(&kws_dir) {
-                Ok(engine) => {
-                    info!("KWS engine initialized (background)");
+            info!("KWS background init starting, models_dir={}", kws_dir.display());
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                aios_voice::KwsEngine::new(&kws_dir)
+            })) {
+                Ok(Ok(engine)) => {
+                    info!("KWS engine initialized (background) OK");
                     *kws_engine_ref.lock().unwrap() = Some(engine);
                 }
-                Err(e) => {
-                    info!("KWS engine not available: {e} -- using fallback");
+                Ok(Err(e)) => {
+                    warn!("KWS engine not available: {e} -- using Whisper fallback");
+                }
+                Err(panic) => {
+                    warn!("KWS engine panicked during init: {:?}", panic);
                 }
             }
         });
