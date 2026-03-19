@@ -119,6 +119,14 @@ pub(crate) fn start_voice_listener(
             let level = ((rms / 0.1) * 100.0).min(100.0) as u32;
             audio_level.store(level, Ordering::Relaxed);
 
+            // Debug: log audio level periodically (every ~3 seconds)
+            static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let frame = FRAME_COUNT.fetch_add(1, Ordering::Relaxed);
+            if frame % 100 == 0 {
+                debug!("Audio: {} samples, rms={:.4}, level={}, wake_on={}",
+                    samples.len(), rms, level, wake_enabled.load(Ordering::Relaxed));
+            }
+
             let wake_on = wake_enabled.load(Ordering::Relaxed);
             let has_kws_model = kws_engine
                 .lock()
