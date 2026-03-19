@@ -326,6 +326,10 @@ pub(crate) fn apply_autoconfig(
     // after the transition to normal mode. Hiding + showing in an idle
     // callback causes GTK layout issues where the widget never reappears.
 
+    // Start web server.
+    let runtime = aios_core::channel::AppRuntime::new();
+    let _web_server = AiosApp::start_web_server(&mut config, &runtime, None);
+
     // Build and show boot status.
     let boot_status_text = boot_status::build_boot_status(&config);
     chat_view.add_level_message(MessageLevel::Info, &boot_status_text);

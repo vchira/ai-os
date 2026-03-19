@@ -1093,8 +1093,10 @@ cat > /home/aios/.config/labwc/rc.xml << RCEOF
   </core>
   <theme>
     <name>AiOS</name>
-    <cornerRadius>0</cornerRadius>
+    <cornerRadius>6</cornerRadius>
     <font name="sans" size="11"/>
+    <!-- Title bar buttons: close only (no minimize/maximize) -->
+    <windowButton>close</windowButton>
   </theme>
   <keyboard>
     <default layout="${KB_LAYOUT}"/>
@@ -1133,8 +1135,8 @@ cat > /home/aios/.config/labwc/rc.xml << RCEOF
   <windowRules>
     <!-- AiOS main window: no decoration (it IS the desktop), skip taskbar -->
     <windowRule identifier="dev.aios.app" serverDecoration="no" skipTaskbar="yes" />
-    <!-- System Prompt terminal: normal window, skip taskbar -->
-    <windowRule title="System Prompt" skipTaskbar="yes" />
+    <!-- System Prompt terminal: server-side decorations (title bar + close button) -->
+    <windowRule title="System Prompt" serverDecoration="yes" />
   </windowRules>
 </labwc_config>
 RCEOF
