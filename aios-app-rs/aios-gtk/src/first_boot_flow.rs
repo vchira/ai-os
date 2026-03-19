@@ -546,16 +546,17 @@ pub(crate) fn transition_to_normal_mode(
     // Create shared application state.
     let state = Rc::new(RefCell::new(AiosApp::new(config, llm, tools, rt, Some(queue))));
 
-    // Show the transition message.
-    chat_view.add_message("system", &t("setup.transition"));
-
-    // Show the settings button, info button, and prompt input.
+    // Show the settings button, info button, and prompt input FIRST.
     main_window::set_settings_button_visible(window, true);
     prompt_input.widget().set_visible(true);
-    // Force a full layout recompute — without this, the prompt may not
-    // appear after the autoconfig path because the window was presented
-    // before the idle callback that runs transition_to_normal_mode.
-    window.queue_draw();
+    prompt_input.widget().set_sensitive(true);
+    // Ensure the prompt widget is allocated and laid out.
+    prompt_input.widget().set_hexpand(true);
+
+    // Show the transition message.
+    chat_view.add_message("system", &t("setup.transition"));
+    chat_view.add_message("system", &t("setup.type_message"));
+
     info!("Settings button and prompt input set to visible");
 
     // Update the provider dropdown.
