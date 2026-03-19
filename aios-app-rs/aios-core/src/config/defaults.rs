@@ -30,7 +30,7 @@ pub const DEFAULTS_JSON: &str = r#"{
         "tts_voice": "en_US-amy-medium",
         "tts_gender": "female",
         "tts_rate": 1.0,
-        "wake_word": "ok computer",
+        "wake_word": "hey jarvis",
         "wake_enabled": true,
         "wake_word_source": "pretrained",
         "wake_threshold": 0.5
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn wake_word_default_is_ok_computer() {
         let v = defaults();
-        assert_eq!(v["voice"]["wake_word"], "ok computer");
+        assert_eq!(v["voice"]["wake_word"], "hey jarvis");
     }
 
     #[test]

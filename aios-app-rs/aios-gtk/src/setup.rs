@@ -48,7 +48,7 @@ impl Default for SetupState {
             primary_provider: None,
             backup_provider: None,
             assistant_name: "Assistant".to_string(),
-            wake_word: "ok computer".to_string(),
+            wake_word: "hey jarvis".to_string(),
             machine_name: "assistant".to_string(),
             master_password: None,
         }

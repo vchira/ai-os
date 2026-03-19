@@ -226,9 +226,16 @@ impl AiosApp {
 
         // Create shared application state.
         let llm_arc = Arc::new(tokio::sync::Mutex::new(llm));
-        let kws_models_dir = dirs::home_dir()
+        // KWS models can be in the system path (ISO) or user path.
+        let system_kws = std::path::PathBuf::from("/opt/aios-app/models/kws");
+        let user_kws = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
             .join(".aios/models/kws");
+        let kws_models_dir = if system_kws.join("infrastructure/melspectrogram.onnx").exists() {
+            system_kws
+        } else {
+            user_kws
+        };
         let state = Rc::new(RefCell::new(AiosApp {
             config,
             llm: llm_arc,

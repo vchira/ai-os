@@ -519,7 +519,7 @@ impl<'a> CommandHandler<'a> {
 
         // No args — show status
         if phrase.is_empty() {
-            let current = self.config.get_str("voice.wake_word", "ok computer");
+            let current = self.config.get_str("voice.wake_word", "hey jarvis");
             let enabled = self.config.get_bool("voice.wake_enabled", true);
             let source = self.config.get_str("voice.wake_word_source", "pretrained");
             let threshold = self.config.get_f64("voice.wake_threshold", 0.5);
@@ -536,7 +536,7 @@ impl<'a> CommandHandler<'a> {
         match phrase.to_lowercase().as_str() {
             "on" => {
                 let _ = self.config.set("voice.wake_enabled", json!(true));
-                let current = self.config.get_str("voice.wake_word", "ok computer");
+                let current = self.config.get_str("voice.wake_word", "hey jarvis");
                 CommandResult::Response(t_fmt("cmd.wake.enabled", &[("current", &current)]))
             }
             "off" => {
@@ -1259,7 +1259,7 @@ mod tests {
         match result {
             CommandResult::Response(text) => {
                 assert!(text.contains("Wake word:"));
-                assert!(text.contains("ok computer"));
+                assert!(text.contains("hey jarvis"));
                 assert!(text.contains("pretrained"));
                 assert!(text.contains("threshold"));
                 assert!(text.contains("/wake list"));

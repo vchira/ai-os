@@ -661,9 +661,14 @@ pub(crate) fn setup_voice(
     ));
     let wake_training = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    // KWS engine (best-effort).
-    let kws_models_dir =
-        ConfigManager::default_config_dir().join("models/kws");
+    // KWS engine (best-effort). Check system path first, then user path.
+    let system_kws = std::path::PathBuf::from("/opt/aios-app/models/kws");
+    let user_kws = ConfigManager::default_config_dir().join("models/kws");
+    let kws_models_dir = if system_kws.join("infrastructure/melspectrogram.onnx").exists() {
+        system_kws
+    } else {
+        user_kws
+    };
     let kws_engine: Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> = {
         match aios_voice::KwsEngine::new(&kws_models_dir) {
             Ok(engine) => {

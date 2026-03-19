@@ -60,7 +60,7 @@ pub(crate) fn setup_kws_and_voice(
     // Read wake word configuration.
     let wake_word_cfg = {
         let s = state.borrow();
-        let wake_phrase = s.config.get_str("voice.wake_word", "ok computer");
+        let wake_phrase = s.config.get_str("voice.wake_word", "hey jarvis");
         let wake_on = s.config.get_bool("voice.wake_enabled", true);
         let wake_source = s.config.get_str("voice.wake_word_source", "");
         (wake_phrase, wake_on, wake_source)
@@ -198,7 +198,7 @@ fn recover_interrupted_training(
     let phrase = state
         .borrow()
         .config
-        .get_str("voice.wake_word", "ok computer");
+        .get_str("voice.wake_word", "hey jarvis");
     let retries = state
         .borrow()
         .config
@@ -210,7 +210,7 @@ fn recover_interrupted_training(
             let mut s = state.borrow_mut();
             let _ = s
                 .config
-                .set("voice.wake_word", serde_json::json!("ok computer"));
+                .set("voice.wake_word", serde_json::json!("hey jarvis"));
             let _ = s
                 .config
                 .set("voice.wake_word_source", serde_json::json!("pretrained"));

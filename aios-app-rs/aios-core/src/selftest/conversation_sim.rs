@@ -585,7 +585,7 @@ pub fn standard_dialogs() -> Vec<Dialog> {
         description: "Configure wake word via commands".into(),
         channel: ChannelKind::Desktop,
         steps: vec![
-            DialogStep::SlashCommand { command: "/wake".into(), expect: ExpectedResult::ResponseContains("computer".into()) },
+            DialogStep::SlashCommand { command: "/wake".into(), expect: ExpectedResult::ResponseContains("jarvis".into()) },
             DialogStep::SlashCommand { command: "/wake ok computer".into(), expect: ExpectedResult::ResponseContains("ok computer".into()) },
             DialogStep::Assert(Assertion::ConfigValue { key: "voice.wake_word".into(), expected: "ok computer".into() }),
             DialogStep::SlashCommand { command: "/wake off".into(), expect: ExpectedResult::ResponseContains("disabled".into()) },
@@ -1596,7 +1596,7 @@ mod tests {
                 // Check current wake word
                 DialogStep::SlashCommand {
                     command: "/wake".into(),
-                    expect: ExpectedResult::ResponseContains("computer".into()),
+                    expect: ExpectedResult::ResponseContains("jarvis".into()),
                 },
                 // List available wake words
                 DialogStep::SlashCommand {
