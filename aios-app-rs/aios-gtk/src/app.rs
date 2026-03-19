@@ -547,6 +547,10 @@ impl llm_handler::LlmState for AiosApp {
         self.queue.clone()
     }
 
+    fn tool_schemas(&self) -> Vec<aios_core::types::ToolSchema> {
+        self.tools.get_schemas()
+    }
+
     fn config_snapshot(&self) -> ConfigManager {
         first_boot_flow::load_config()
     }

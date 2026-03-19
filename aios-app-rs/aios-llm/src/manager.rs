@@ -292,7 +292,7 @@ impl LlmManager {
         }
 
         // UI keywords.
-        let ui_keywords = ["show", "display", "image", "notification", "panel", "render", "map", "location", "address", "directions", "browse", "open page", "webpage"];
+        let ui_keywords = ["show", "display", "image", "picture", "photo", "notification", "panel", "render", "map", "location", "address", "directions", "browse", "open page", "webpage", "email", "send mail"];
         if ui_keywords.iter().any(|kw| msg_lower.contains(kw)) {
             categories.push("ui".to_string());
         }

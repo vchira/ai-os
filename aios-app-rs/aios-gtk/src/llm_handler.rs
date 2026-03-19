@@ -31,6 +31,7 @@ pub(crate) trait LlmState {
     fn llm(&self) -> Arc<tokio::sync::Mutex<aios_llm::LlmManager>>;
     fn rt(&self) -> tokio::runtime::Handle;
     fn conversation(&self) -> Vec<aios_core::types::Message>;
+    fn tool_schemas(&self) -> Vec<aios_core::types::ToolSchema>;
     fn push_conversation(&mut self, msg: aios_core::types::Message);
     fn replace_conversation(&mut self, msgs: Vec<aios_core::types::Message>);
     fn queue(&self) -> Option<Arc<std::sync::Mutex<aios_core::queue::MessageQueue>>>;
@@ -86,6 +87,7 @@ pub(crate) fn send_to_llm<S: LlmState + 'static>(
     // Use mpsc channel: tokio task sends result, GTK polls via timeout_add_local.
     let (tx, rx) = std::sync::mpsc::channel::<LlmResult>();
     let history = state.borrow().conversation();
+    let tool_schemas = state.borrow().tool_schemas();
 
     // Spawn LLM call on Tokio (no GTK types captured -- all Send-safe).
     rt.spawn(async move {
@@ -99,8 +101,27 @@ pub(crate) fn send_to_llm<S: LlmState + 'static>(
             history.pop();
         }
 
+        // Route tools based on message content (Dynamic Tool Bundling).
+        let routed = llm_guard.route_tools(&text);
+        let schemas = if routed.is_empty() {
+            // No keyword match — send all tools as fallback.
+            tool_schemas.clone()
+        } else {
+            tool_schemas
+                .iter()
+                .filter(|s| {
+                    // Match tool category to routed categories.
+                    // Tools without a known category are always included.
+                    routed.iter().any(|c| s.name.contains(c) || c == "general")
+                        || routed.contains(&"ui".to_string())
+                        || routed.contains(&"general".to_string())
+                })
+                .cloned()
+                .collect()
+        };
+
         let result = llm_guard
-            .chat(&text, Some(&mut history), &[], None)
+            .chat(&text, Some(&mut history), &schemas, None)
             .await;
         drop(llm_guard);
 
