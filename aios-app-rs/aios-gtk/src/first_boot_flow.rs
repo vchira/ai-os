@@ -326,9 +326,7 @@ pub(crate) fn apply_autoconfig(
     // after the transition to normal mode. Hiding + showing in an idle
     // callback causes GTK layout issues where the widget never reappears.
 
-    // Start web server.
-    let runtime = aios_core::channel::AppRuntime::new();
-    let _web_server = AiosApp::start_web_server(&mut config, &runtime, None);
+    // Web server will be started in transition_to_normal_mode (needs Tokio runtime).
 
     // Build and show boot status.
     let boot_status_text = boot_status::build_boot_status(&config);
@@ -519,7 +517,15 @@ pub(crate) fn transition_to_normal_mode(
     vu_meter_widget: Option<gtk4::LevelBar>,
     queue: SharedQueue,
 ) {
-    let config = load_config();
+    let mut config = load_config();
+
+    // Start web server (needs Tokio runtime context).
+    {
+        let _guard = rt.enter();
+        let runtime = aios_core::channel::AppRuntime::new();
+        let _web = AiosApp::start_web_server(&mut config, &runtime, None);
+        info!("Web server started in transition_to_normal_mode");
+    }
 
     // Initialize tool registry.
     let mut tools = ToolRegistry::new();
