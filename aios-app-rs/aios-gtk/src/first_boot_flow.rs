@@ -685,14 +685,41 @@ pub(crate) fn setup_voice(
     } else {
         user_kws
     };
-    // KWS engine — skip initialization here. The ort crate's ONNX runtime
-    // init can abort the process on some systems. The voice listener will
-    // use the Whisper fallback path (VAD + transcription + keyword match)
-    // which is slower but doesn't require ONNX. KWS will be initialized
-    // properly when `activate_main` runs on subsequent boots (with vault).
+    // KWS engine — init in background thread to avoid blocking GTK.
+    // The Once guard in kws.rs ensures ort::init_from is only called once.
     let kws_engine: Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> =
         Arc::new(std::sync::Mutex::new(None));
-    info!("KWS: skipped ONNX init in autoconfig path (using Whisper fallback)");
+    {
+        let kws_ref = kws_engine.clone();
+        let kws_dir = kws_models_dir.clone();
+        let wake_word = state.borrow().config.get_str("voice.wake_word", "hey jarvis");
+        let wake_source = state.borrow().config.get_str("voice.wake_word_source", "pretrained");
+        std::thread::spawn(move || {
+            match aios_voice::KwsEngine::new(&kws_dir) {
+                Ok(mut engine) => {
+                    // Load the wake word model.
+                    if let Some(pretrained) = aios_voice::find_pretrained(&wake_word) {
+                        let model_path = aios_voice::pretrained_model_path(&kws_dir, pretrained);
+                        if model_path.exists() {
+                            match engine.load_wake_model(&model_path, pretrained.display_name) {
+                                Ok(()) => info!("KWS: loaded '{}' model OK", pretrained.display_name),
+                                Err(e) => warn!("KWS: failed to load model: {e}"),
+                            }
+                        } else {
+                            warn!("KWS: model not found at {}", model_path.display());
+                        }
+                    } else {
+                        info!("KWS: no pretrained model for '{wake_word}'");
+                    }
+                    *kws_ref.lock().unwrap() = Some(engine);
+                    info!("KWS engine ready");
+                }
+                Err(e) => {
+                    info!("KWS not available: {e} — using Whisper fallback");
+                }
+            }
+        });
+    }
 
     let audio_level = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
