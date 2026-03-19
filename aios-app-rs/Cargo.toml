@@ -34,7 +34,7 @@ tempfile = "3"
 cpal = "0.15"
 hound = "3.5"
 rubato = "0.15"
-ort = { version = "2.0.0-rc.9", features = ["load-dynamic"] }
+ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
 rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
 
 gtk4 = "0.9"

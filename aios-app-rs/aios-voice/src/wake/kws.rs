@@ -113,12 +113,11 @@ impl KwsEngine {
             )));
         }
 
-        // Set ORT_DYLIB_PATH so the ort crate auto-detects the library.
-        // Do NOT call ort::init_from().commit() — it can abort the process
-        // on some systems due to C-level ONNX runtime issues.
-        // SAFETY: called before any threads use ORT, single-threaded init.
-        unsafe { std::env::set_var("ORT_DYLIB_PATH", &lib_path); }
-        tracing::info!("ORT_DYLIB_PATH set to {lib_path}");
+        // ORT_DYLIB_PATH MUST be set BEFORE the process starts (in the
+        // session launcher script). Setting it at runtime doesn't work because
+        // the ort crate's static initializers have already run by this point.
+        // The aios-session.sh script exports ORT_DYLIB_PATH before launching /usr/bin/aios.
+        tracing::info!("KWS init: ORT_DYLIB_PATH={}", std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "NOT SET".into()));
 
         let mel_path = infra.join("melspectrogram.onnx");
         let mel_session = Session::builder()
