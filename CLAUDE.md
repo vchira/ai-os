@@ -6,6 +6,12 @@ AiOS is an AI-first Linux distribution. **Humans interact through voice and text
 
 The AI is the primary actor. Humans ask questions or express intent through voice or the text prompt. The AI interprets intent, decides what to do, and uses tools to fulfill it.
 
+## Code Quality Rules
+
+- **ZERO code duplication.** If two or more places do the same thing, extract a shared utility function. Never copy-paste code. Create factory functions for repeated widget creation, config reading patterns, etc.
+- **No workarounds or hacks.** Only clean, proper solutions.
+- **Always write tests** for every new feature, change, or bug fix (unit, integration, e2e).
+
 ## AI Interaction Model
 
 - Humans interact through **voice** (default) or **text prompt**

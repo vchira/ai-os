@@ -202,6 +202,7 @@ const PROVIDER_DROPDOWN_NAME: &str = "provider-dropdown";
 const MIC_BUTTON_NAME: &str = "mic-toggle";
 const SPEAKER_BUTTON_NAME: &str = "speaker-toggle";
 const SETTINGS_BUTTON_NAME: &str = "settings-button";
+const INFO_BUTTON_NAME: &str = "info-button";
 
 // ---------------------------------------------------------------------------
 // build_main_window
@@ -219,6 +220,29 @@ const SETTINGS_BUTTON_NAME: &str = "settings-button";
 pub struct MainWindowResult {
     pub window: adw::ApplicationWindow,
     pub vu_meter: gtk::LevelBar,
+}
+
+// ---------------------------------------------------------------------------
+// Widget factory helpers (avoid code duplication)
+// ---------------------------------------------------------------------------
+
+/// Create a header bar button with icon, tooltip, name, and initial visibility.
+fn make_header_button(icon: &str, tooltip: &str, name: &str, visible: bool) -> gtk::Button {
+    let btn = gtk::Button::from_icon_name(icon);
+    btn.set_tooltip_text(Some(tooltip));
+    btn.set_widget_name(name);
+    btn.set_visible(visible);
+    btn
+}
+
+/// Create a header bar toggle button with icon, tooltip, name, and initial state.
+fn make_toggle_button(icon: &str, tooltip: &str, name: &str, active: bool) -> gtk::ToggleButton {
+    let btn = gtk::ToggleButton::new();
+    btn.set_icon_name(icon);
+    btn.set_tooltip_text(Some(tooltip));
+    btn.set_widget_name(name);
+    btn.set_active(active);
+    btn
 }
 
 pub fn build_main_window(
@@ -285,26 +309,11 @@ pub fn build_main_window(
     provider_dropdown.set_tooltip_text(Some("Select LLM provider"));
     header.pack_start(&provider_dropdown);
 
-    // Right side buttons.
-    let mic_button = gtk::ToggleButton::new();
-    mic_button.set_icon_name("audio-input-microphone-symbolic");
-    mic_button.set_tooltip_text(Some("Toggle microphone"));
-    mic_button.set_widget_name(MIC_BUTTON_NAME);
-    mic_button.set_active(true);
-    header.pack_end(&mic_button);
-
-    let speaker_button = gtk::ToggleButton::new();
-    speaker_button.set_icon_name("audio-volume-high-symbolic");
-    speaker_button.set_tooltip_text(Some("Toggle speaker"));
-    speaker_button.set_widget_name(SPEAKER_BUTTON_NAME);
-    speaker_button.set_active(true);
-    header.pack_end(&speaker_button);
-
-    let settings_button = gtk::Button::from_icon_name("emblem-system-symbolic");
-    settings_button.set_tooltip_text(Some("Settings"));
-    settings_button.set_widget_name(SETTINGS_BUTTON_NAME);
-    settings_button.set_visible(false); // Hidden until setup completes
-    header.pack_end(&settings_button);
+    // Right side buttons — using helper to avoid duplication.
+    header.pack_end(&make_toggle_button("audio-input-microphone-symbolic", "Toggle microphone", MIC_BUTTON_NAME, true));
+    header.pack_end(&make_toggle_button("audio-volume-high-symbolic", "Toggle speaker", SPEAKER_BUTTON_NAME, true));
+    header.pack_end(&make_header_button("emblem-system-symbolic", "Settings", SETTINGS_BUTTON_NAME, false));
+    header.pack_end(&make_header_button("dialog-information-symbolic", "Info", INFO_BUTTON_NAME, false));
 
     // --- Main content ---
     let content_box = gtk::Box::new(Orientation::Vertical, 0);
@@ -378,6 +387,9 @@ pub fn set_settings_button_visible(window: &adw::ApplicationWindow, visible: boo
     if let Some(button) = find_widget_by_name::<gtk::Button>(window.upcast_ref(), SETTINGS_BUTTON_NAME) {
         button.set_visible(visible);
     }
+    if let Some(button) = find_widget_by_name::<gtk::Button>(window.upcast_ref(), INFO_BUTTON_NAME) {
+        button.set_visible(visible);
+    }
 }
 
 /// Update the provider dropdown model with the given provider names.
@@ -430,6 +442,18 @@ pub fn connect_settings_button(
     callback: impl Fn() + 'static,
 ) {
     if let Some(button) = find_widget_by_name::<gtk::Button>(window.upcast_ref(), SETTINGS_BUTTON_NAME) {
+        button.connect_clicked(move |_| {
+            callback();
+        });
+    }
+}
+
+/// Find the info button and connect its clicked signal.
+pub fn connect_info_button(
+    window: &adw::ApplicationWindow,
+    callback: impl Fn() + 'static,
+) {
+    if let Some(button) = find_widget_by_name::<gtk::Button>(window.upcast_ref(), INFO_BUTTON_NAME) {
         button.connect_clicked(move |_| {
             callback();
         });

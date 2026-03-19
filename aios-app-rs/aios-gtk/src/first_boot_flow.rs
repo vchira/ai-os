@@ -598,6 +598,12 @@ pub(crate) fn connect_common_signals(
         settings_dialog::show_settings(&win_ref, &s.config);
     });
 
+    // Info button — opens tabbed info dialog (Costs + About).
+    let win_ref = window.clone();
+    main_window::connect_info_button(window, move || {
+        crate::ui::info_dialog::show_info_dialog(&win_ref);
+    });
+
     // Speaker toggle.
     let state_ref = state.clone();
     main_window::connect_speaker_toggle(window, move |active| {

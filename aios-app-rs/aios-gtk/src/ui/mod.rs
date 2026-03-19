@@ -5,6 +5,7 @@ pub mod auth_dialog;
 pub mod channel_overlay;
 pub mod chat_view;
 pub mod desktop_channel;
+pub mod info_dialog;
 #[allow(unused)]
 pub mod first_boot;
 pub mod main_window;
