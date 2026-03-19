@@ -681,18 +681,25 @@ pub(crate) fn setup_voice(
     } else {
         user_kws
     };
-    let kws_engine: Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> = {
-        match aios_voice::KwsEngine::new(&kws_models_dir) {
-            Ok(engine) => {
-                info!("KWS engine initialized");
-                Arc::new(std::sync::Mutex::new(Some(engine)))
+    // KWS engine init can take seconds (ONNX model loading).
+    // Do it in a background thread to avoid blocking the GTK main loop.
+    let kws_engine: Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    {
+        let kws_engine_ref = kws_engine.clone();
+        let kws_dir = kws_models_dir.clone();
+        std::thread::spawn(move || {
+            match aios_voice::KwsEngine::new(&kws_dir) {
+                Ok(engine) => {
+                    info!("KWS engine initialized (background)");
+                    *kws_engine_ref.lock().unwrap() = Some(engine);
+                }
+                Err(e) => {
+                    info!("KWS engine not available: {e} -- using fallback");
+                }
             }
-            Err(e) => {
-                info!("KWS engine not available: {e} -- using fallback");
-                Arc::new(std::sync::Mutex::new(None))
-            }
-        }
-    };
+        });
+    }
 
     let audio_level = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
