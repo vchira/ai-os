@@ -113,28 +113,12 @@ impl KwsEngine {
             )));
         }
 
-        // ort::init_from can only be called ONCE per process. Calling it
-        // twice causes a panic/abort. Use a static Once guard.
-        use std::sync::Once;
-        static ORT_INIT: Once = Once::new();
-        static ORT_INIT_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        ORT_INIT.call_once(|| {
-            match ort::init_from(&lib_path) {
-                Ok(builder) => {
-                    builder
-                        .with_execution_providers([ort::ep::CPU::default().build()])
-                        .commit();
-                    ORT_INIT_OK.store(true, std::sync::atomic::Ordering::Relaxed);
-                    tracing::info!("ONNX Runtime initialized from {}", lib_path);
-                }
-                Err(e) => {
-                    tracing::warn!("ONNX Runtime init failed: {e}");
-                }
-            }
-        });
-        if !ORT_INIT_OK.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(VoiceError::Kws("ONNX Runtime failed to initialize".into()));
-        }
+        // Set ORT_DYLIB_PATH so the ort crate auto-detects the library.
+        // Do NOT call ort::init_from().commit() — it can abort the process
+        // on some systems due to C-level ONNX runtime issues.
+        // SAFETY: called before any threads use ORT, single-threaded init.
+        unsafe { std::env::set_var("ORT_DYLIB_PATH", &lib_path); }
+        tracing::info!("ORT_DYLIB_PATH set to {lib_path}");
 
         let mel_path = infra.join("melspectrogram.onnx");
         let mel_session = Session::builder()

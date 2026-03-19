@@ -1253,6 +1253,7 @@ swaybg -m solid_color -c '#1a1a2e' >> "$LOGFILE" 2>&1 &
 CRASH_COUNT=0
 while true; do
     log "Launching /usr/bin/aios..."
+    export ORT_DYLIB_PATH="/opt/aios-app/lib/libonnxruntime.so"
     /usr/bin/aios >> "$LOGFILE" 2>&1
     EXIT_CODE=$?
     log "AiOS exited with code $EXIT_CODE"
