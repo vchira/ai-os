@@ -422,6 +422,36 @@ impl ChatView {
 
     /// Add a thinking/loading placeholder message.
     ///
+    /// Display an image inline in the chat (with optional caption).
+    pub fn add_image(&self, path: &str, caption: Option<&str>) {
+        let row = gtk::Box::new(Orientation::Vertical, 4);
+        row.add_css_class("message-row");
+        row.add_css_class("message-assistant");
+        row.set_halign(Align::Start);
+        row.set_margin_start(0);
+        row.set_margin_end(60);
+        row.set_hexpand(true);
+
+        // Try to load the image.
+        let picture = gtk::Picture::for_filename(path);
+        picture.set_can_shrink(true);
+        picture.set_size_request(400, 300);
+        picture.add_css_class("chat-image");
+        row.append(&picture);
+
+        // Optional caption below the image.
+        if let Some(cap) = caption {
+            let label = gtk::Label::new(Some(cap));
+            label.add_css_class("message-content");
+            label.set_wrap(true);
+            label.set_halign(Align::Start);
+            row.append(&label);
+        }
+
+        self.container.append(&row);
+        self.scroll_to_bottom();
+    }
+
     /// Shows an animated "thinking" indicator in the assistant's position.
     /// Returns a [`ThinkingHandle`] — pass it to [`remove_thinking`] to
     /// remove the placeholder when the real response is ready.

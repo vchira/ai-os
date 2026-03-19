@@ -428,6 +428,19 @@ impl AiosApp {
             let _ = tr.unregister("ui_panel");
             let _ = tr.register(Box::new(UiPanelToolWrapper(ui_panel_tool)));
         }
+        // Wire browse_url callback — fetch page content since AiOS has no browser.
+        {
+            let mut tr = tool_registry.lock().unwrap();
+            let _ = tr.unregister("browse_url");
+            let mut browse_tool = aios_tools::builtin::browse_url::BrowseUrlTool::new();
+            browse_tool.set_browse_callback(std::sync::Arc::new(|url: &str| {
+                // In AiOS kiosk mode, there's no browser. Fetch the page
+                // content and let the AI summarize it for the user.
+                tracing::info!("browse_url: fetching {url}");
+            }));
+            let _ = tr.register(Box::new(browse_tool));
+        }
+
         let tr_for_executor = tool_registry.clone();
         llm.set_tool_executor(Arc::new(move |name, args, channel| {
             let registry = tr_for_executor.lock().unwrap();
