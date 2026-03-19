@@ -403,37 +403,55 @@ pub(crate) fn apply_autoconfig(
         return;
     }
 
-    // 2. Store API keys.
-    if !auto.provider.claude_api_key.is_empty() {
-        let entry = SecretEntry {
-            kind: SecretKind::ApiKey,
-            value: auto.provider.claude_api_key.clone(),
-            label: "Claude API Key".to_string(),
-            created: chrono::Utc::now(),
-            last_accessed: None,
-        };
-        let _ = vault.set("claude_api_key", entry);
-    }
-    if !auto.provider.openai_api_key.is_empty() {
-        let entry = SecretEntry {
-            kind: SecretKind::ApiKey,
-            value: auto.provider.openai_api_key.clone(),
-            label: "OpenAI API Key".to_string(),
-            created: chrono::Utc::now(),
-            last_accessed: None,
-        };
-        let _ = vault.set("openai_api_key", entry);
-    }
+    // 2. Store API keys — helper to avoid duplication.
+    let store_key = |vault: &mut Vault, id: &str, label: &str, value: &str| {
+        if !value.is_empty() {
+            let entry = SecretEntry {
+                kind: SecretKind::ApiKey,
+                value: value.to_string(),
+                label: label.to_string(),
+                created: chrono::Utc::now(),
+                last_accessed: None,
+            };
+            let _ = vault.set(id, entry);
+        }
+    };
+    store_key(&mut vault, "claude_api_key", "Claude API Key", &auto.provider.claude_api_key);
+    store_key(&mut vault, "openai_api_key", "OpenAI API Key", &auto.provider.openai_api_key);
+    store_key(&mut vault, "deepseek_api_key", "DeepSeek API Key", &auto.provider.deepseek_api_key);
+    store_key(&mut vault, "mistral_api_key", "Mistral API Key", &auto.provider.mistral_api_key);
+    store_key(&mut vault, "groq_api_key", "Groq API Key", &auto.provider.groq_api_key);
+    store_key(&mut vault, "gemini_api_key", "Gemini API Key", &auto.provider.gemini_api_key);
 
     // 3. Write config.
     let _ = config.set(
         "llm.claude_api_key",
         serde_json::json!(auto.provider.claude_api_key),
     );
-    let _ = config.set(
-        "llm.openai_api_key",
-        serde_json::json!(auto.provider.openai_api_key),
-    );
+    let _ = config.set("llm.openai_api_key", serde_json::json!(auto.provider.openai_api_key));
+    let _ = config.set("llm.deepseek_api_key", serde_json::json!(auto.provider.deepseek_api_key));
+    let _ = config.set("llm.mistral_api_key", serde_json::json!(auto.provider.mistral_api_key));
+    let _ = config.set("llm.groq_api_key", serde_json::json!(auto.provider.groq_api_key));
+    let _ = config.set("llm.gemini_api_key", serde_json::json!(auto.provider.gemini_api_key));
+
+    // AI model selection — main AI and TTS summarizer.
+    let main_provider = if auto.ai.main_provider.is_empty() {
+        &auto.provider.primary
+    } else {
+        &auto.ai.main_provider
+    };
+    let _ = config.set("llm.provider", serde_json::json!(main_provider));
+    if !auto.ai.main_model.is_empty() {
+        let model_key = format!("llm.{main_provider}_model");
+        let _ = config.set(&model_key, serde_json::json!(auto.ai.main_model));
+    }
+    if !auto.ai.summary_provider.is_empty() {
+        let _ = config.set("llm.tts_summary_provider", serde_json::json!(auto.ai.summary_provider));
+    }
+    if !auto.ai.summary_model.is_empty() {
+        let _ = config.set("llm.tts_summary_model", serde_json::json!(auto.ai.summary_model));
+    }
+
     let _ = config.set("assistant.name", serde_json::json!(auto.assistant.name));
     let _ = config.set(
         "assistant.language",

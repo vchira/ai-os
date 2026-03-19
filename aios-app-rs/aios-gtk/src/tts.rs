@@ -81,6 +81,9 @@ pub(crate) fn prepare_tts_text_short(raw: &str) -> Option<String> {
 
 /// Summarize a long response using Claude Haiku (fast, cheap).
 /// Falls back to sentence truncation if API call fails.
+///
+/// Uses the configured TTS summary provider (default: Claude Haiku).
+/// The provider/model/key are read from config by the caller.
 pub(crate) fn summarize_for_tts(raw: &str, api_key: &str) -> String {
     let (plain, code_blocks) = strip_for_tts(raw);
 

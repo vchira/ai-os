@@ -26,6 +26,10 @@ pub struct AutoConfig {
     #[serde(default)]
     pub install: InstallConfig,
 
+    /// AI model selection (main AI + TTS summarizer).
+    #[serde(default)]
+    pub ai: AiModelConfig,
+
     /// Assistant personality.
     #[serde(default)]
     pub assistant: AssistantConfig,
@@ -35,17 +39,51 @@ pub struct AutoConfig {
     pub debug: bool,
 }
 
+/// AI model configuration — separate main AI and TTS summarizer.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AiModelConfig {
+    /// Provider for the main AI (conversations, tools). Defaults to the primary provider.
+    #[serde(default)]
+    pub main_provider: String,
+    /// Model for the main AI. Empty = provider default.
+    #[serde(default)]
+    pub main_model: String,
+    /// Provider for TTS summary (one-sentence summary of long answers). Must be fast+cheap.
+    #[serde(default)]
+    pub summary_provider: String,
+    /// Model for TTS summary. Empty = cheapest available.
+    #[serde(default)]
+    pub summary_model: String,
+}
+
+impl Default for AiModelConfig {
+    fn default() -> Self {
+        Self {
+            main_provider: String::new(),
+            main_model: String::new(),
+            summary_provider: String::new(),
+            summary_model: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
-    /// Primary provider: "claude" or "openai".
+    /// Primary provider: "claude", "openai", "deepseek", "mistral", "groq", "gemini", "ollama".
     #[serde(default = "default_provider")]
     pub primary: String,
-    /// Claude API key.
     #[serde(default)]
     pub claude_api_key: String,
-    /// OpenAI API key.
     #[serde(default)]
     pub openai_api_key: String,
+    #[serde(default)]
+    pub deepseek_api_key: String,
+    #[serde(default)]
+    pub mistral_api_key: String,
+    #[serde(default)]
+    pub groq_api_key: String,
+    #[serde(default)]
+    pub gemini_api_key: String,
 }
 
 impl Default for ProviderConfig {
@@ -54,6 +92,10 @@ impl Default for ProviderConfig {
             primary: default_provider(),
             claude_api_key: String::new(),
             openai_api_key: String::new(),
+            deepseek_api_key: String::new(),
+            mistral_api_key: String::new(),
+            groq_api_key: String::new(),
+            gemini_api_key: String::new(),
         }
     }
 }
