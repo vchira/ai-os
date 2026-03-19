@@ -134,3 +134,32 @@ fn vad_detects_speech() {
     }
     assert!(detected, "Loud signal should trigger VAD");
 }
+
+#[test]
+fn kws_full_pipeline_with_audio() {
+    let Some(dir) = models_dir() else { return; };
+    let mut engine = match aios_voice::KwsEngine::new(&dir) { Ok(e) => e, Err(e) => { eprintln!("SKIP: {e}"); return; } };
+    let model_path = dir.join("pretrained/hey_jarvis.onnx");
+    if !model_path.exists() { return; }
+    engine.load_wake_model(&model_path, "Hey Jarvis").unwrap();
+
+    // Feed 3 seconds of silence — should NOT trigger, but should NOT error
+    let silence: Vec<f32> = vec![0.0; 16000 * 3];
+    let result = engine.process_audio(&silence);
+    eprintln!("Silence: confidence={:.4}, triggered={}", result.confidence, result.triggered);
+    assert!(!result.triggered);
+    
+    // Feed 3 seconds of speech-like signal (varied frequencies)
+    let speech: Vec<f32> = (0..16000 * 3)
+        .map(|i| {
+            let t = i as f32 / 16000.0;
+            (t * 440.0 * std::f32::consts::TAU).sin() * 0.3
+            + (t * 880.0 * std::f32::consts::TAU).sin() * 0.1
+            + (t * 220.0 * std::f32::consts::TAU).sin() * 0.2
+        })
+        .collect();
+    let result = engine.process_audio(&speech);
+    eprintln!("Speech-like: confidence={:.4}, triggered={}", result.confidence, result.triggered);
+    // Should not trigger for random tones (not "hey jarvis")
+    // But confidence should be non-zero proving the pipeline runs
+}

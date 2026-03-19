@@ -106,9 +106,12 @@ impl KwsEngine {
         }
 
         let mel_path = infra.join("melspectrogram.onnx");
-        let mel_model = tract_onnx::onnx()
+        let mut mel_model = tract_onnx::onnx()
             .model_for_path(&mel_path)
             .map_err(|e| VoiceError::Kws(format!("load melspectrogram model at {}: {e}", mel_path.display())))?;
+        // Set concrete input shape: [1, 1280] (batch=1, samples=80ms at 16kHz)
+        mel_model.set_input_fact(0, InferenceFact::dt_shape(f32::datum_type(), &[1, CHUNK_SAMPLES]))
+            .map_err(|e| VoiceError::Kws(format!("set mel input fact: {e}")))?;
         let mel_plan = SimplePlan::new(mel_model)
             .map_err(|e| VoiceError::Kws(format!("plan melspectrogram: {e}")))?;
 
@@ -116,6 +119,7 @@ impl KwsEngine {
         let emb_model = tract_onnx::onnx()
             .model_for_path(&emb_path)
             .map_err(|e| VoiceError::Kws(format!("load embedding model at {}: {e}", emb_path.display())))?;
+        // Embedding model has dynamic input — leave as inference mode
         let emb_plan = SimplePlan::new(emb_model)
             .map_err(|e| VoiceError::Kws(format!("plan embedding: {e}")))?;
 
