@@ -211,6 +211,7 @@
   "cmd.upgrade.desc": "Check for and install AiOS updates",
   "cmd.configure.desc": "Open settings dialog",
   "cmd.wake.desc": "Wake word settings",
+  "cmd.cost.desc": "Show AI usage costs",
   "cmd.clear.desc": "Clear chat history",
 
   "cmd.help.title": "Available commands:",
@@ -229,6 +230,7 @@
   "cmd.help.effort": "/effort <level>             Set AI effort (low, medium, high, auto)",
   "cmd.help.mode": "/mode <mode>                Set quality mode (saver, balanced, thorough)",
   "cmd.help.channel": "/channel                    Show active channel / channel settings",
+  "cmd.help.cost": "/cost                       Show AI usage costs and token breakdown",
   "cmd.help.selftest": "/selftest [filter]          Run self-tests (quick, channel, tools, interactive)",
   "cmd.help.sysinfo": "/sysinfo                    Show system monitor (CPU, memory, disk, processes)",
   "cmd.help.info": "/info                       Show system information",
@@ -267,6 +269,7 @@
   "cmd.mode.set": "Quality mode set to {mode}",
   "cmd.mode.current": "Current quality mode: {current}\nUsage: /mode <saver|balanced|thorough>\n- saver: cheapest model, heuristic escalation\n- balanced: auto-detected effort, reliable escalation only\n- thorough: best model always, extended thinking",
   "cmd.mode.usage": "Usage: /mode <saver|balanced|thorough>\n- saver: cheapest model, heuristic escalation (saves money)\n- balanced: auto-detected effort, reliable escalation only (default)\n- thorough: best model always, extended thinking (best quality)",
+  "cmd.cost.title": "AI Usage Costs",
   "cmd.keyboard.set": "Keyboard layout set to {layout}{suffix}",
   "cmd.resolution.usage": "Usage: /resolution <WxH>\nExample: /resolution 1920x1080",
   "cmd.resolution.set": "Resolution set to {resolution}",

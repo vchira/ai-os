@@ -935,4 +935,163 @@ mod tests {
         let result = OpenAIProvider::safe_parse_arguments("");
         assert_eq!(result, serde_json::json!({}));
     }
+
+    // -- Provider constructor tests -----------------------------------------
+
+    #[test]
+    fn deepseek_constructor_sets_correct_url() {
+        let p = OpenAIProvider::deepseek("sk-test", None);
+        assert!(
+            p.api_url.contains("deepseek.com"),
+            "expected deepseek.com in URL, got: {}",
+            p.api_url
+        );
+    }
+
+    #[test]
+    fn mistral_constructor_sets_correct_url() {
+        let p = OpenAIProvider::mistral("sk-test", None);
+        assert!(
+            p.api_url.contains("mistral.ai"),
+            "expected mistral.ai in URL, got: {}",
+            p.api_url
+        );
+    }
+
+    #[test]
+    fn groq_constructor_sets_correct_url() {
+        let p = OpenAIProvider::groq("sk-test", None);
+        assert!(
+            p.api_url.contains("groq.com"),
+            "expected groq.com in URL, got: {}",
+            p.api_url
+        );
+    }
+
+    #[test]
+    fn gemini_constructor_sets_correct_url() {
+        let p = OpenAIProvider::gemini("sk-test", None);
+        assert!(
+            p.api_url.contains("googleapis.com"),
+            "expected googleapis.com in URL, got: {}",
+            p.api_url
+        );
+    }
+
+    #[test]
+    fn ollama_constructor_sets_localhost() {
+        let p = OpenAIProvider::ollama(None);
+        assert!(
+            p.api_url.contains("localhost:11434"),
+            "expected localhost:11434 in URL, got: {}",
+            p.api_url
+        );
+    }
+
+    #[test]
+    fn ollama_has_empty_api_key() {
+        let p = OpenAIProvider::ollama(None);
+        assert!(
+            p.api_key.is_empty(),
+            "expected empty api_key for ollama, got: {}",
+            p.api_key
+        );
+    }
+
+    #[test]
+    fn with_base_url_appends_path() {
+        // Base URL without /v1 suffix — should get /v1/chat/completions appended.
+        let p = OpenAIProvider::with_base_url(
+            "key",
+            None,
+            None,
+            "https://custom.example.com",
+            "custom",
+        );
+        assert_eq!(
+            p.api_url,
+            "https://custom.example.com/v1/chat/completions"
+        );
+
+        // Base URL ending with /v1 — should get /chat/completions appended.
+        let p2 = OpenAIProvider::with_base_url(
+            "key",
+            None,
+            None,
+            "https://custom.example.com/v1",
+            "custom",
+        );
+        assert_eq!(
+            p2.api_url,
+            "https://custom.example.com/v1/chat/completions"
+        );
+
+        // Base URL already ending with /chat/completions — should be kept as-is.
+        let p3 = OpenAIProvider::with_base_url(
+            "key",
+            None,
+            None,
+            "https://custom.example.com/v1/chat/completions",
+            "custom",
+        );
+        assert_eq!(
+            p3.api_url,
+            "https://custom.example.com/v1/chat/completions"
+        );
+
+        // Base URL with trailing slash — should be trimmed before appending.
+        let p4 = OpenAIProvider::with_base_url(
+            "key",
+            None,
+            None,
+            "https://custom.example.com/",
+            "custom",
+        );
+        assert_eq!(
+            p4.api_url,
+            "https://custom.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn provider_name_matches_constructor() {
+        let openai = OpenAIProvider::new("key", None, None);
+        assert_eq!(openai.name(), "openai");
+
+        let deepseek = OpenAIProvider::deepseek("key", None);
+        assert_eq!(deepseek.name(), "deepseek");
+
+        let mistral = OpenAIProvider::mistral("key", None);
+        assert_eq!(mistral.name(), "mistral");
+
+        let groq = OpenAIProvider::groq("key", None);
+        assert_eq!(groq.name(), "groq");
+
+        let gemini = OpenAIProvider::gemini("key", None);
+        assert_eq!(gemini.name(), "gemini");
+
+        let ollama = OpenAIProvider::ollama(None);
+        assert_eq!(ollama.name(), "ollama");
+    }
+
+    #[test]
+    fn default_models_are_correct() {
+        let openai = OpenAIProvider::new("key", None, None);
+        assert_eq!(openai.model(), "gpt-4o");
+
+        let deepseek = OpenAIProvider::deepseek("key", None);
+        assert_eq!(deepseek.model(), "deepseek-chat");
+
+        let mistral = OpenAIProvider::mistral("key", None);
+        assert_eq!(mistral.model(), "mistral-small-latest");
+
+        let groq = OpenAIProvider::groq("key", None);
+        assert_eq!(groq.model(), "llama-3.3-70b-versatile");
+
+        let gemini = OpenAIProvider::gemini("key", None);
+        assert_eq!(gemini.model(), "gemini-2.0-flash");
+
+        let ollama = OpenAIProvider::ollama(None);
+        assert_eq!(ollama.model(), "llama3.2");
+    }
 }

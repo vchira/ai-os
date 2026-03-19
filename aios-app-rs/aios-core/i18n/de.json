@@ -211,6 +211,7 @@
   "cmd.upgrade.desc": "Nach AiOS-Updates suchen und installieren",
   "cmd.configure.desc": "Einstellungsdialog öffnen",
   "cmd.wake.desc": "Aktivierungswort setzen",
+  "cmd.cost.desc": "KI-Nutzungskosten anzeigen",
   "cmd.clear.desc": "Chatverlauf löschen",
 
   "cmd.help.title": "Verfügbare Befehle:",
@@ -229,6 +230,7 @@
   "cmd.help.effort": "/effort <stufe>             KI-Aufwand setzen (low, medium, high, auto)",
   "cmd.help.mode": "/mode <modus>               Qualitätsmodus setzen (saver, balanced, thorough)",
   "cmd.help.channel": "/channel                    Aktiven Kanal / Kanaleinstellungen anzeigen",
+  "cmd.help.cost": "/cost                       KI-Nutzungskosten und Token-Aufschlüsselung anzeigen",
   "cmd.help.selftest": "/selftest [filter]          Selbsttests ausführen (quick, channel, tools, interactive)",
   "cmd.help.sysinfo": "/sysinfo                    Systemmonitor anzeigen (CPU, Speicher, Festplatte, Prozesse)",
   "cmd.help.info": "/info                       Systeminformationen anzeigen",
@@ -267,6 +269,7 @@
   "cmd.mode.set": "Qualitätsmodus auf {mode} gesetzt",
   "cmd.mode.current": "Aktueller Qualitätsmodus: {current}\nVerwendung: /mode <saver|balanced|thorough>\n- saver: Günstigstes Modell, heuristische Eskalation\n- balanced: Automatisch erkannter Aufwand, nur zuverlässige Eskalation\n- thorough: Immer bestes Modell, erweitertes Denken",
   "cmd.mode.usage": "Verwendung: /mode <saver|balanced|thorough>\n- saver: Günstigstes Modell, heuristische Eskalation (spart Geld)\n- balanced: Automatisch erkannter Aufwand, nur zuverlässige Eskalation (Standard)\n- thorough: Immer bestes Modell, erweitertes Denken (beste Qualität)",
+  "cmd.cost.title": "KI-Nutzungskosten",
   "cmd.keyboard.set": "Tastaturlayout auf {layout}{suffix} gesetzt",
   "cmd.resolution.usage": "Verwendung: /resolution <BxH>\nBeispiel: /resolution 1920x1080",
   "cmd.resolution.set": "Auflösung auf {resolution} gesetzt",

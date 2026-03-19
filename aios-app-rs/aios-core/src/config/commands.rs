@@ -68,6 +68,7 @@ pub fn command_list() -> Vec<CommandInfo> {
         CommandInfo { command: "/upgrade", description: t("cmd.upgrade.desc") },
         CommandInfo { command: "/configure", description: t("cmd.configure.desc") },
         CommandInfo { command: "/wake", description: t("cmd.wake.desc") },
+        CommandInfo { command: "/cost", description: t("cmd.cost.desc") },
         CommandInfo { command: "/clear", description: t("cmd.clear.desc") },
     ]
 }
@@ -207,6 +208,7 @@ impl<'a> CommandHandler<'a> {
             "/mode" => self.cmd_mode(&args),
             "/wake" => self.cmd_wake(&args),
             "/channel" => self.cmd_channel(&args),
+            "/cost" => self.cmd_cost(),
             "/selftest" => CommandResult::SelfTest(args),
             "/sysinfo" => CommandResult::SysInfo,
             "/close" => CommandResult::ClosePanel,
@@ -240,6 +242,7 @@ impl<'a> CommandHandler<'a> {
             t("cmd.help.effort"),
             t("cmd.help.mode"),
             t("cmd.help.channel"),
+            t("cmd.help.cost"),
             t("cmd.help.selftest"),
             t("cmd.help.sysinfo"),
             t("cmd.help.info"),
@@ -656,6 +659,74 @@ impl<'a> CommandHandler<'a> {
             }
             _ => CommandResult::Response(t("cmd.mode.usage")),
         }
+    }
+
+    fn cmd_cost(&self) -> CommandResult {
+        let provider = self.config.get_str("llm.provider", "claude");
+        let model = self.config.get_str(
+            &format!("llm.{provider}_model"),
+            match provider.as_str() {
+                "claude" => "claude-sonnet-4",
+                "openai" => "gpt-4o",
+                _ => "unknown",
+            },
+        );
+        let input_tokens = self.config.get_f64("llm.total_input_tokens", 0.0) as u64;
+        let output_tokens = self.config.get_f64("llm.total_output_tokens", 0.0) as u64;
+        let total_tokens = input_tokens + output_tokens;
+
+        // Pricing table: (input $/M tokens, output $/M tokens)
+        let (input_rate, output_rate) = match model.as_str() {
+            m if m.contains("claude-sonnet-4") => (3.00, 15.00),
+            m if m.contains("claude-haiku") || m.contains("haiku-3.5") => (0.80, 4.00),
+            "gpt-4o" => (2.50, 10.00),
+            "gpt-4o-mini" => (0.15, 0.60),
+            "deepseek-chat" | "deepseek-reasoner" => (0.27, 1.10),
+            m if m.contains("mistral-small") => (0.10, 0.30),
+            m if m.contains("llama-3.3-70b") => (0.59, 0.79),
+            m if m.contains("gemini-2.0-flash") => (0.075, 0.30),
+            m if m.contains("llama") && m.contains("ollama") => (0.0, 0.0),
+            "ollama" => (0.0, 0.0),
+            _ => (0.0, 0.0), // unknown model — can't estimate
+        };
+
+        let input_cost = (input_tokens as f64 / 1_000_000.0) * input_rate;
+        let output_cost = (output_tokens as f64 / 1_000_000.0) * output_rate;
+        let total_cost = input_cost + output_cost;
+
+        let title = t("cmd.cost.title");
+        let quality_mode = self.config.get_str("llm.quality_mode", "balanced");
+        let effort = self.config.get_str("llm.effort", "auto");
+
+        let cost_line = if input_rate == 0.0 && output_rate == 0.0 {
+            format!("Estimated cost:  $0.00 (free / local model)")
+        } else {
+            format!(
+                "Estimated cost:  ${total_cost:.4}\n\
+                 \x20 Input:  {input_tokens} tokens x ${input_rate:.3}/M = ${input_cost:.4}\n\
+                 \x20 Output: {output_tokens} tokens x ${output_rate:.3}/M = ${output_cost:.4}"
+            )
+        };
+
+        let info = format!(
+            "\
+{title}
+========================================
+Provider:        {provider}
+Model:           {model}
+Quality mode:    {quality_mode}
+Effort level:    {effort}
+
+Session tokens:  {total_tokens} ({input_tokens} in + {output_tokens} out)
+{cost_line}
+
+Pricing: claude-sonnet-4 $3/$15 | haiku-3.5 $0.80/$4
+         gpt-4o $2.50/$10 | gpt-4o-mini $0.15/$0.60
+         deepseek $0.27/$1.10 | mistral-small $0.10/$0.30
+         llama-3.3-70b $0.59/$0.79 | gemini-2.0-flash $0.075/$0.30
+         ollama: free (local)"
+        );
+        CommandResult::Response(info)
     }
 
     fn cmd_channel(&mut self, args: &str) -> CommandResult {
