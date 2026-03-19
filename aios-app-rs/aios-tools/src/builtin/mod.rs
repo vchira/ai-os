@@ -19,6 +19,7 @@ pub mod send_email;
 pub mod show_image;
 pub mod show_map;
 pub mod system;
+pub mod timer;
 pub mod ui_panel;
 pub mod web;
 
@@ -38,5 +39,6 @@ pub use send_email::SendEmailTool;
 pub use show_image::ShowImageTool;
 pub use show_map::ShowMapTool;
 pub use system::SystemTool;
+pub use timer::TimerTool;
 pub use ui_panel::UiPanelTool;
 pub use web::WebTool;

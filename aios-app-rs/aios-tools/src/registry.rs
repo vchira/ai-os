@@ -151,7 +151,7 @@ impl ToolRegistry {
     /// This registers: `memory`, `notes`, `system`, `files`, `web`, `display`,
     /// `browse_url`, `ui_panel`, `delegate_to`, `reflect`, `recall_episodes`,
     /// `execute_code`, `process_data`, `find_content`, `show_image`,
-    /// `show_map`, `send_email`.
+    /// `show_map`, `send_email`, `timer`.
     pub fn load_builtins(&mut self) {
         let builtins: Vec<Box<dyn Tool>> = vec![
             Box::new(builtin::MemoryTool::new(None)),
@@ -171,6 +171,7 @@ impl ToolRegistry {
             Box::new(builtin::ShowImageTool::new()),
             Box::new(builtin::ShowMapTool::new()),
             Box::new(builtin::SendEmailTool::new()),
+            Box::new(builtin::TimerTool::new()),
         ];
 
         for tool in builtins {
@@ -453,8 +454,8 @@ mod tests {
     fn load_builtins_registers_expected_count() {
         let mut reg = ToolRegistry::new();
         reg.load_builtins();
-        // Should have 17 built-in tools.
-        assert_eq!(reg.len(), 17);
+        // Should have 18 built-in tools.
+        assert_eq!(reg.len(), 18);
     }
 
     // -- New comprehensive tests --
@@ -601,7 +602,7 @@ mod tests {
         let mut reg = ToolRegistry::new();
         reg.load_builtins();
         let schemas = reg.get_schemas();
-        assert_eq!(schemas.len(), 17);
+        assert_eq!(schemas.len(), 18);
         // Verify schemas are sorted by name.
         for pair in schemas.windows(2) {
             assert!(
@@ -614,16 +615,16 @@ mod tests {
     }
 
     #[test]
-    fn after_register_queue_tools_tool_count_is_18() {
+    fn after_register_queue_tools_tool_count_is_19() {
         let mut reg = ToolRegistry::new();
         reg.load_builtins();
-        assert_eq!(reg.len(), 17);
+        assert_eq!(reg.len(), 18);
 
         let queue = aios_core::queue::MessageQueue::open_in_memory().unwrap();
         let queue = std::sync::Arc::new(std::sync::Mutex::new(queue));
         reg.register_queue_tools(queue);
 
-        assert_eq!(reg.len(), 18);
+        assert_eq!(reg.len(), 19);
         let names = reg.list_tools();
         assert!(names.contains(&"conversation_history".to_string()));
     }
@@ -641,13 +642,14 @@ mod tests {
         assert!(fs_names.contains(&"find_content"));
         assert_eq!(fs_schemas.len(), 3);
 
-        // system category: system, execute_code, delegate_to.
+        // system category: system, execute_code, delegate_to, timer.
         let sys_schemas = reg.get_schemas_by_categories(&["system"]);
         let sys_names: Vec<&str> = sys_schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(sys_names.contains(&"system"));
         assert!(sys_names.contains(&"execute_code"));
         assert!(sys_names.contains(&"delegate_to"));
-        assert_eq!(sys_schemas.len(), 3);
+        assert!(sys_names.contains(&"timer"));
+        assert_eq!(sys_schemas.len(), 4);
 
         // ui category: browse_url, display, show_image, show_map, ui_panel.
         let ui_schemas = reg.get_schemas_by_categories(&["ui"]);
@@ -694,6 +696,7 @@ mod tests {
             "show_image",
             "show_map",
             "system",
+            "timer",
             "ui_panel",
             "web",
         ];
