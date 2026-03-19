@@ -55,52 +55,46 @@ pub(crate) fn build_boot_status(config: &ConfigManager) -> String {
     }
 
     // -- LLM Provider + Model --
-    let provider = config.get_str("llm.provider", "claude");
-    let claude_key = config.get_str("llm.claude_api_key", "");
-    let openai_key = config.get_str("llm.openai_api_key", "");
-    let has_claude = !claude_key.is_empty();
-    let has_openai = !openai_key.is_empty() && openai_key != "your-api-key-here";
-    let has_key = match provider.as_str() {
-        "claude" => has_claude,
-        "openai" => has_openai,
-        _ => false,
-    };
-    let model = match provider.as_str() {
-        "claude" => config.get_str("llm.claude_model", "claude-sonnet-4-20250514"),
-        "openai" => config.get_str("llm.openai_model", "gpt-4o"),
-        _ => provider.clone(),
-    };
+    let provider_id = config.get_str("llm.provider", "claude");
+    let active_def = crate::providers::find_by_id(&provider_id);
+    let has_key = active_def
+        .map(|p| crate::providers::is_configured(p, config))
+        .unwrap_or(false);
+    let model = active_def
+        .map(|p| crate::providers::current_model(p, config))
+        .unwrap_or_else(|| provider_id.clone());
+    let display = active_def
+        .map(|p| p.display_name)
+        .unwrap_or_else(|| provider_id.as_str());
     if has_key {
         status.add(StatusLine::new(
             &t("boot.status.llm_provider"),
             true,
-            format!("{provider} ({model})"),
+            format!("{display} ({model})"),
         ));
     } else {
         status.add(StatusLine::new(
             &t("boot.status.llm_provider"),
             false,
-            t_fmt("boot.status.no_api_key_hint", &[("provider", &provider)]),
+            t_fmt("boot.status.no_api_key_hint", &[("provider", display)]),
         ));
     }
 
-    // Show backup provider if available.
-    if has_claude && provider != "claude" {
-        status.add(StatusLine::new(
-            &t("boot.status.backup"),
-            true,
-            t_fmt("boot.status.backup_available", &[("provider", "Claude")]),
-        ));
-    }
-    if has_openai && provider != "openai" {
-        status.add(StatusLine::new(
-            &t("boot.status.backup"),
-            true,
-            t_fmt(
-                "boot.status.backup_available",
-                &[("provider", "ChatGPT")],
-            ),
-        ));
+    // Show backup providers — any configured provider that is not the active one.
+    for p in crate::providers::PROVIDERS {
+        if p.id == provider_id {
+            continue;
+        }
+        if crate::providers::is_configured(p, config) {
+            status.add(StatusLine::new(
+                &t("boot.status.backup"),
+                true,
+                t_fmt(
+                    "boot.status.backup_available",
+                    &[("provider", p.display_name)],
+                ),
+            ));
+        }
     }
 
     // -- Voice --

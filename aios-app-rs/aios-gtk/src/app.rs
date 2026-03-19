@@ -456,15 +456,7 @@ impl AiosApp {
 
     /// Get list of available providers (those with API keys configured).
     fn available_providers(config: &ConfigManager) -> Vec<String> {
-        let mut providers = Vec::new();
-        if !config.get_str("llm.claude_api_key", "").is_empty() {
-            providers.push("Claude".to_string());
-        }
-        let openai_key = config.get_str("llm.openai_api_key", "");
-        if !openai_key.is_empty() && openai_key != "your-api-key-here" {
-            providers.push("ChatGPT".to_string());
-        }
-        providers
+        crate::providers::configured_display_names(config)
     }
 
     /// Wire UiPanelTool and tool executor into the LLM manager.
@@ -570,12 +562,10 @@ impl AiosApp {
 
     /// Show a warning if no API key is configured for the active provider.
     fn warn_if_no_api_key(config: &ConfigManager, chat_view: &ChatView) {
-        let provider = config.get_str("llm.provider", "claude");
-        let has_key = match provider.as_str() {
-            "claude" => !config.get_str("llm.claude_api_key", "").is_empty(),
-            "openai" => !config.get_str("llm.openai_api_key", "").is_empty(),
-            _ => false,
-        };
+        let provider_id = config.get_str("llm.provider", "claude");
+        let has_key = crate::providers::find_by_id(&provider_id)
+            .map(|p| crate::providers::is_configured(p, config))
+            .unwrap_or(false);
         if !has_key {
             chat_view.add_level_message(
                 aios_core::types::MessageLevel::Warning,

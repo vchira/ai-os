@@ -9,6 +9,7 @@ mod command_handler;
 mod first_boot_flow;
 mod llm_handler;
 mod message_loop;
+mod providers;
 mod setup;
 mod tts;
 mod ui;

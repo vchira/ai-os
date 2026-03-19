@@ -140,15 +140,13 @@ pub(crate) fn run_first_boot_setup(
         } else {
             for provider in &result.providers {
                 let key_name = format!("{}_api_key", provider.name);
-                let label = match provider.name.as_str() {
-                    "claude" => "Claude API Key",
-                    "openai" => "OpenAI API Key",
-                    other => other,
-                };
+                let label = crate::providers::find_by_id(&provider.name)
+                    .map(|p| format!("{} API Key", p.display_name))
+                    .unwrap_or_else(|| format!("{} API Key", provider.name));
                 let entry = SecretEntry {
                     kind: SecretKind::ApiKey,
                     value: provider.api_key.clone(),
-                    label: label.to_string(),
+                    label,
                     created: chrono::Utc::now(),
                     last_accessed: None,
                 };
@@ -165,14 +163,10 @@ pub(crate) fn run_first_boot_setup(
                 let _ = config.set("llm.provider", serde_json::json!(primary.name));
             }
             for p in &result.providers {
-                match p.name.as_str() {
-                    "claude" => {
-                        let _ = config.set("llm.claude_api_key", serde_json::json!(p.api_key));
+                if let Some(def) = crate::providers::find_by_id(&p.name) {
+                    if def.needs_api_key && !def.api_key_config.is_empty() {
+                        let _ = config.set(def.api_key_config, serde_json::json!(p.api_key));
                     }
-                    "openai" => {
-                        let _ = config.set("llm.openai_api_key", serde_json::json!(p.api_key));
-                    }
-                    _ => {}
                 }
             }
 
@@ -356,11 +350,25 @@ pub(crate) fn apply_autoconfig(
         }
     };
 
+    // Build API key lines for all configured providers.
+    let api_key_lines: String = [
+        ("Claude", &auto.provider.claude_api_key),
+        ("OpenAI", &auto.provider.openai_api_key),
+        ("DeepSeek", &auto.provider.deepseek_api_key),
+        ("Mistral", &auto.provider.mistral_api_key),
+        ("Groq", &auto.provider.groq_api_key),
+        ("Gemini", &auto.provider.gemini_api_key),
+    ]
+    .iter()
+    .filter(|(_, key)| !key.is_empty())
+    .map(|(name, key)| format!("**{name} API Key:** {}", mask(key)))
+    .collect::<Vec<_>>()
+    .join("\n");
+
     let autoconfig_msg = format!(
         "**Autoconfig detected** \u{2014} applying unattended configuration:\n\n\
          **Provider:** {}\n\
-         **Claude API Key:** {}\n\
-         **OpenAI API Key:** {}\n\
+         {api_key_lines}\n\
          **Keyboard:** {}\n\
          **Language:** {}\n\
          **Timezone:** {}\n\
@@ -369,8 +377,6 @@ pub(crate) fn apply_autoconfig(
          **Install to disk:** {}\n\
          **Assistant name:** {}",
         auto.provider.primary,
-        mask(&auto.provider.claude_api_key),
-        mask(&auto.provider.openai_api_key),
         auto.system.keyboard,
         auto.system.language,
         if auto.system.timezone.is_empty() {
@@ -561,17 +567,8 @@ pub(crate) fn transition_to_normal_mode(
     }));
 
     // Collect configured providers before config is moved.
-    let configured_providers: Vec<&str> = {
-        let mut providers = Vec::new();
-        if !config.get_str("llm.claude_api_key", "").is_empty() {
-            providers.push("Claude");
-        }
-        let openai_key = config.get_str("llm.openai_api_key", "");
-        if !openai_key.is_empty() && openai_key != "your-api-key-here" {
-            providers.push("ChatGPT");
-        }
-        providers
-    };
+    let configured_names = crate::providers::configured_display_names(&config);
+    let configured_providers: Vec<&str> = configured_names.iter().map(|s| s.as_str()).collect();
 
     // Create shared application state.
     let state = Rc::new(RefCell::new(AiosApp::new(config, llm, tools, rt, Some(queue))));
@@ -616,10 +613,7 @@ pub(crate) fn connect_common_signals(
     let chat_view_ref = chat_view.clone();
     main_window::connect_provider_dropdown(window, move |provider_name| {
         let mut s = state_ref.borrow_mut();
-        let name = match provider_name {
-            "ChatGPT" | "chatgpt" => "openai".to_string(),
-            other => other.to_lowercase(),
-        };
+        let name = crate::providers::display_name_to_id(provider_name);
         let _ = s.config.set("llm.provider", serde_json::json!(name));
         if let Ok(mut llm) = s.llm.try_lock() {
             if llm.set_active(&name).is_err() {

@@ -15,19 +15,7 @@ use aios_core::config::ConfigManager;
 // Constants — model lists
 // ---------------------------------------------------------------------------
 
-/// Claude models: (human name, slug).
-const CLAUDE_MODELS: &[(&str, &str)] = &[
-    ("Claude Sonnet 4", "claude-sonnet-4-20250514"),
-    ("Claude Opus 4", "claude-opus-4-20250514"),
-    ("Claude Haiku 3.5", "claude-haiku-4-5-20251001"),
-];
-
-/// OpenAI / ChatGPT models: (human name, slug).
-const OPENAI_MODELS: &[(&str, &str)] = &[
-    ("GPT-4o", "gpt-4o"),
-    ("GPT-4o Mini", "gpt-4o-mini"),
-    ("GPT-4 Turbo", "gpt-4-turbo"),
-];
+// Model lists are defined in crate::providers::PROVIDERS.
 
 /// Known Piper voices: (slug, human name).
 const PIPER_VOICES: &[(&str, &str)] = &[
@@ -126,117 +114,137 @@ pub fn show_settings(parent: &adw::ApplicationWindow, config: &ConfigManager) {
 // ---------------------------------------------------------------------------
 
 fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
+    use crate::providers::{PROVIDERS, current_model};
+
     let page = adw::PreferencesPage::builder()
         .title("AI")
         .icon_name("applications-science-symbolic")
         .build();
 
-    // Provider group.
+    // -----------------------------------------------------------------------
+    // Provider group — combo row with ALL provider ids.
+    // -----------------------------------------------------------------------
     let provider_group = adw::PreferencesGroup::builder()
         .title("LLM Provider")
         .build();
 
-    // Provider combo row.
-    let providers = gtk::StringList::new(&["claude", "openai"]);
+    let provider_ids: Vec<&str> = PROVIDERS.iter().map(|p| p.id).collect();
+    let provider_list = gtk::StringList::new(&provider_ids);
     let provider_row = adw::ComboRow::builder()
         .title("Provider")
         .subtitle("Active LLM provider")
-        .model(&providers)
+        .model(&provider_list)
         .build();
     let current = config.get_str("llm.provider", "claude");
-    provider_row.set_selected(if current == "openai" { 1 } else { 0 });
+    let provider_idx = PROVIDERS
+        .iter()
+        .position(|p| p.id == current.as_str())
+        .unwrap_or(0) as u32;
+    provider_row.set_selected(provider_idx);
     provider_group.add(&provider_row);
 
     page.add(&provider_group);
 
-    // API keys group — edit-only, never show the actual key (Task 10).
+    // -----------------------------------------------------------------------
+    // API Keys group — one PasswordEntryRow per provider that needs a key.
+    // -----------------------------------------------------------------------
     let keys_group = adw::PreferencesGroup::builder()
         .title("API Keys")
         .description("Enter a new key to replace the existing one")
         .build();
 
-    let claude_key_row = adw::PasswordEntryRow::builder()
-        .title("Claude API Key")
-        .build();
-    let stored_claude = config.get_str("llm.claude_api_key", "");
-    if !stored_claude.is_empty() {
-        // Show placeholder dots — not the actual value.
-        claude_key_row.set_text(KEY_PLACEHOLDER);
-    }
-    keys_group.add(&claude_key_row);
+    for prov in PROVIDERS.iter().filter(|p| p.needs_api_key) {
+        let title = format!("{} API Key", prov.display_name);
+        let key_row = adw::PasswordEntryRow::builder()
+            .title(&title)
+            .build();
 
-    let openai_key_row = adw::PasswordEntryRow::builder()
-        .title("OpenAI API Key")
-        .build();
-    let stored_openai = config.get_str("llm.openai_api_key", "");
-    if !stored_openai.is_empty() {
-        openai_key_row.set_text(KEY_PLACEHOLDER);
-    }
-    keys_group.add(&openai_key_row);
+        let stored = config.get_str(prov.api_key_config, "");
+        if !stored.is_empty() {
+            key_row.set_text(KEY_PLACEHOLDER);
+        }
+        keys_group.add(&key_row);
 
-    // Save new key values on change (only if user typed something real).
-    {
+        // Save on change.
         let config_dir = ConfigManager::default_config_dir();
-        let claude_row = claude_key_row.clone();
-        claude_key_row.connect_changed(move |_| {
-            let text = claude_row.text().to_string();
-            // Only save if the user actually typed a new key, not the placeholder.
+        let config_key = prov.api_key_config.to_string();
+        let row_ref = key_row.clone();
+        key_row.connect_changed(move |_| {
+            let text = row_ref.text().to_string();
             if !text.is_empty() && text != KEY_PLACEHOLDER {
                 if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                    let _ = cfg.set("llm.claude_api_key", serde_json::json!(text));
+                    let _ = cfg.set(&config_key, serde_json::json!(text));
                 }
             }
         });
     }
-    {
+
+    // Ollama enabled switch (no API key, just a toggle).
+    if let Some(ollama) = PROVIDERS.iter().find(|p| p.id == "ollama") {
+        let switch = gtk::Switch::new();
+        switch.set_active(config.get_bool(ollama.enabled_config, false));
+        switch.set_valign(gtk::Align::Center);
+        let row = adw::ActionRow::builder()
+            .title("Ollama (local)")
+            .subtitle("Enable local Ollama inference")
+            .build();
+        row.add_suffix(&switch);
+        row.set_activatable_widget(Some(&switch));
+        keys_group.add(&row);
+
         let config_dir = ConfigManager::default_config_dir();
-        let openai_row = openai_key_row.clone();
-        openai_key_row.connect_changed(move |_| {
-            let text = openai_row.text().to_string();
-            if !text.is_empty() && text != KEY_PLACEHOLDER {
-                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                    let _ = cfg.set("llm.openai_api_key", serde_json::json!(text));
-                }
+        let enabled_key = ollama.enabled_config.to_string();
+        switch.connect_state_set(move |_, active| {
+            if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                let _ = cfg.set(&enabled_key, serde_json::json!(active));
             }
+            gtk::glib::Propagation::Proceed
         });
     }
 
     page.add(&keys_group);
 
-    // Models group — dropdowns instead of free-text (Task 11).
+    // -----------------------------------------------------------------------
+    // Models group — one ComboRow per provider.
+    // -----------------------------------------------------------------------
     let models_group = adw::PreferencesGroup::builder()
         .title("Models")
         .build();
 
-    // Claude model dropdown.
-    let claude_model_names: Vec<&str> = CLAUDE_MODELS.iter().map(|(name, _)| *name).collect();
-    let claude_model_list = gtk::StringList::new(&claude_model_names);
-    let claude_model_row = adw::ComboRow::builder()
-        .title("Claude Model")
-        .model(&claude_model_list)
-        .build();
-    let current_claude_model = config.get_str("llm.claude_model", "claude-sonnet-4-20250514");
-    let claude_model_idx = CLAUDE_MODELS
-        .iter()
-        .position(|(_, slug)| *slug == current_claude_model.as_str())
-        .unwrap_or(0) as u32;
-    claude_model_row.set_selected(claude_model_idx);
-    models_group.add(&claude_model_row);
+    for prov in PROVIDERS {
+        if prov.models.is_empty() {
+            continue;
+        }
+        let title = format!("{} Model", prov.display_name);
+        let model_names: Vec<&str> = prov.models.iter().map(|(name, _)| *name).collect();
+        let model_list = gtk::StringList::new(&model_names);
+        let model_row = adw::ComboRow::builder()
+            .title(&title)
+            .model(&model_list)
+            .build();
 
-    // OpenAI model dropdown.
-    let openai_model_names: Vec<&str> = OPENAI_MODELS.iter().map(|(name, _)| *name).collect();
-    let openai_model_list = gtk::StringList::new(&openai_model_names);
-    let openai_model_row = adw::ComboRow::builder()
-        .title("ChatGPT Model")
-        .model(&openai_model_list)
-        .build();
-    let current_openai_model = config.get_str("llm.openai_model", "gpt-4o");
-    let openai_model_idx = OPENAI_MODELS
-        .iter()
-        .position(|(_, slug)| *slug == current_openai_model.as_str())
-        .unwrap_or(0) as u32;
-    openai_model_row.set_selected(openai_model_idx);
-    models_group.add(&openai_model_row);
+        let cur = current_model(prov, config);
+        let idx = prov
+            .models
+            .iter()
+            .position(|(_, slug)| *slug == cur.as_str())
+            .unwrap_or(0) as u32;
+        model_row.set_selected(idx);
+        models_group.add(&model_row);
+
+        // Save on change.
+        let config_dir = ConfigManager::default_config_dir();
+        let model_config_key = prov.model_config.to_string();
+        let models_ref: Vec<(&str, &str)> = prov.models.to_vec();
+        model_row.connect_selected_notify(move |row| {
+            let sel = row.selected() as usize;
+            if let Some((_, slug)) = models_ref.get(sel) {
+                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                    let _ = cfg.set(&model_config_key, serde_json::json!(slug));
+                }
+            }
+        });
+    }
 
     let system_prompt_row = adw::EntryRow::builder()
         .title("Custom AI Instructions")
@@ -248,31 +256,51 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
     ));
     models_group.add(&system_prompt_row);
 
-    // Save model selection on change.
-    {
-        let config_dir = ConfigManager::default_config_dir();
-        claude_model_row.connect_selected_notify(move |row| {
-            let idx = row.selected() as usize;
-            if let Some((_, slug)) = CLAUDE_MODELS.get(idx) {
-                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                    let _ = cfg.set("llm.claude_model", serde_json::json!(slug));
-                }
-            }
-        });
-    }
-    {
-        let config_dir = ConfigManager::default_config_dir();
-        openai_model_row.connect_selected_notify(move |row| {
-            let idx = row.selected() as usize;
-            if let Some((_, slug)) = OPENAI_MODELS.get(idx) {
-                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                    let _ = cfg.set("llm.openai_model", serde_json::json!(slug));
-                }
-            }
-        });
-    }
-
     page.add(&models_group);
+
+    // -----------------------------------------------------------------------
+    // AI Model Assignment — show Main AI and Summarizer selections.
+    // -----------------------------------------------------------------------
+    let assign_group = adw::PreferencesGroup::builder()
+        .title("AI Model Assignment")
+        .description("Which provider/model to use for main AI and TTS summarizer")
+        .build();
+
+    // Main AI — currently the active provider + its model.
+    let main_provider_display = crate::providers::find_by_id(&config.get_str("llm.provider", "claude"))
+        .map(|p| p.display_name)
+        .unwrap_or("claude");
+    let main_model = crate::providers::find_by_id(&config.get_str("llm.provider", "claude"))
+        .map(|p| current_model(p, config))
+        .unwrap_or_default();
+    let main_row = adw::ActionRow::builder()
+        .title("Main AI")
+        .subtitle(format!("{main_provider_display} \u{2014} {main_model}"))
+        .build();
+    assign_group.add(&main_row);
+
+    // TTS Summarizer.
+    let summary_provider = config.get_str("llm.tts_summary_provider", "");
+    let summary_model = config.get_str("llm.tts_summary_model", "");
+    let summary_text = if summary_provider.is_empty() {
+        "Same as Main AI".to_string()
+    } else {
+        let display = crate::providers::find_by_id(&summary_provider)
+            .map(|p| p.display_name)
+            .unwrap_or(summary_provider.as_str());
+        if summary_model.is_empty() {
+            display.to_string()
+        } else {
+            format!("{display} \u{2014} {summary_model}")
+        }
+    };
+    let summary_row = adw::ActionRow::builder()
+        .title("TTS Summarizer")
+        .subtitle(&summary_text)
+        .build();
+    assign_group.add(&summary_row);
+
+    page.add(&assign_group);
 
     page
 }
