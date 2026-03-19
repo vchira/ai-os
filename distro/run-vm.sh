@@ -105,7 +105,7 @@ qemu-system-x86_64 \
     -smp 4 \
     -cdrom "${ISO}" \
     -drive file="${DISK_IMG}",format=qcow2,if=virtio,id=disk0 \
-    -boot order=dc \
+    -boot order=cd \
     -display none \
     -device qxl-vga,ram_size=67108864,vram_size=67108864,vgamem_mb=16 \
     -device qemu-xhci,id=usb \

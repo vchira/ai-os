@@ -176,9 +176,16 @@ fn append_kws_status(status: &mut BootStatus, config: &ConfigManager) {
         return;
     }
 
-    let kws_models_dir = dirs::home_dir()
+    // Check system path first (ISO), then user path.
+    let system_kws = std::path::PathBuf::from("/opt/aios-app/models/kws");
+    let user_kws = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
         .join(".aios/models/kws");
+    let kws_models_dir = if system_kws.join("infrastructure/melspectrogram.onnx").exists() {
+        system_kws
+    } else {
+        user_kws
+    };
     let wake_word = config.get_str("voice.wake_word", "hey_assistant");
     let wake_source = config.get_str("voice.wake_word_source", "pretrained");
     let infra_present = kws_models_dir
