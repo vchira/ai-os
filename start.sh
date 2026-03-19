@@ -75,8 +75,10 @@ else
         echo "[*] Debug mode on — after boot, check /tmp/aios-serial.log"
     fi
     echo "[*] Using QEMU/KVM"
-    # Clean up stale libvirt VM
+    # Kill any running AiOS QEMU instance first
+    pkill -9 -f "qemu-system-x86_64.*aios" 2>/dev/null || true
     virsh --connect qemu:///system destroy aios-live 2>/dev/null || true
     virsh --connect qemu:///system undefine aios-live 2>/dev/null || true
+    sleep 1
     cd "${SCRIPT_DIR}/distro" && exec ./run-vm.sh "${ISO}"
 fi
