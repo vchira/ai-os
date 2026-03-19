@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Unified message loop -- routes messages between queue, LLM, and channels.
 //!
 //! This module decouples the conversation orchestration from the GTK UI layer.

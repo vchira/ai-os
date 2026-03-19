@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Desktop channel — Channel trait implementation for the GTK4 desktop UI.
 //!
 //! Bridges the message queue to the GTK ChatView. Renders messages as GTK
@@ -9,7 +10,7 @@ use aios_core::channel::traits::Channel;
 use aios_core::channel::types::{ChannelCapabilities, ChannelKind};
 use aios_core::config::ConfigManager;
 use aios_core::queue::QueuedMessage;
-use aios_core::types::{MessageLevel, Role};
+use aios_core::types::Role;
 
 use crate::tts;
 use crate::ui::chat_view::ChatView;

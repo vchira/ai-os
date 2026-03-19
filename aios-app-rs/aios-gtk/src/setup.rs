@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Queue-based first-boot setup and autoconfig.
 //!
 //! Replaces the monolithic `SetupConversation` state machine. Setup steps

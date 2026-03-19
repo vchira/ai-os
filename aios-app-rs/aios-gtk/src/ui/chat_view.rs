@@ -81,10 +81,13 @@ pub struct ChatView {
     /// The input area of the last setup card (so we can remove it once answered).
     last_card_input: std::cell::RefCell<Option<gtk::Box>>,
     /// ID of the oldest rendered message (for scroll-back loading).
+    #[allow(dead_code)]
     oldest_rendered_id: std::cell::Cell<Option<i64>>,
     /// ID of the newest rendered message.
+    #[allow(dead_code)]
     newest_rendered_id: std::cell::Cell<Option<i64>>,
     /// Maximum number of message widgets to keep rendered.
+    #[allow(dead_code)]
     max_rendered_widgets: std::cell::Cell<usize>,
 }
 
@@ -101,9 +104,12 @@ impl ChatView {
             container,
             scroll_window: std::cell::RefCell::new(None),
             last_card_input: std::cell::RefCell::new(None),
-            oldest_rendered_id: std::cell::Cell::new(None),
-            newest_rendered_id: std::cell::Cell::new(None),
-            max_rendered_widgets: std::cell::Cell::new(50),
+            #[allow(dead_code)]
+    oldest_rendered_id: std::cell::Cell::new(None),
+            #[allow(dead_code)]
+    newest_rendered_id: std::cell::Cell::new(None),
+            #[allow(dead_code)]
+    max_rendered_widgets: std::cell::Cell::new(50),
         }
     }
 
@@ -123,6 +129,7 @@ impl ChatView {
     /// user is near the top of the chat), `on_scroll_back` is called with
     /// the [`oldest_rendered_id`] so the caller can load older messages
     /// from the message queue.
+    #[allow(dead_code)]
     pub fn connect_scroll_back<F: Fn(i64) + 'static>(&self, on_scroll_back: F) {
         if let Some(sw) = self.scroll_window.borrow().as_ref() {
             let oldest_id = self.oldest_rendered_id.clone();
@@ -423,6 +430,7 @@ impl ChatView {
     /// Add a thinking/loading placeholder message.
     ///
     /// Display an image inline in the chat (with optional caption).
+    #[allow(dead_code)]
     pub fn add_image(&self, path: &str, caption: Option<&str>) {
         let row = gtk::Box::new(Orientation::Vertical, 4);
         row.add_css_class("message-row");
@@ -542,8 +550,11 @@ impl ChatView {
     }
 
     // --- Queue-based rendering methods (Phase 3) ---
+    // These methods will be used when the queue-driven rendering is fully wired.
+    #[allow(dead_code)]
 
     /// Render a batch of QueuedMessages (initial load or scroll-back).
+    #[allow(dead_code)]
     pub fn render_messages(&self, msgs: &[aios_core::queue::QueuedMessage]) {
         for msg in msgs {
             self.render_queued_message(msg);
@@ -558,6 +569,7 @@ impl ChatView {
     }
 
     /// Append a single new QueuedMessage. Manages the widget window.
+    #[allow(dead_code)]
     pub fn append_message_from_queue(&self, msg: &aios_core::queue::QueuedMessage) {
         self.render_queued_message(msg);
         self.newest_rendered_id.set(Some(msg.id));
@@ -570,6 +582,7 @@ impl ChatView {
     }
 
     /// Prepend older messages at the top for scroll-back.
+    #[allow(dead_code)]
     pub fn prepend_messages(&self, msgs: &[aios_core::queue::QueuedMessage]) {
         // Iterate in reverse so the oldest message ends up at the top.
         for msg in msgs.iter().rev() {
@@ -581,6 +594,7 @@ impl ChatView {
     }
 
     /// Clear all message widgets from the display.
+    #[allow(dead_code)]
     pub fn clear_display(&self) {
         while let Some(child) = self.container.first_child() {
             self.container.remove(&child);
@@ -590,11 +604,13 @@ impl ChatView {
     }
 
     /// Get the oldest rendered message ID (for scroll-back queries).
+    #[allow(dead_code)]
     pub fn oldest_rendered_id(&self) -> Option<i64> {
         self.oldest_rendered_id.get()
     }
 
     /// Remove the oldest widgets from the top to stay within the max limit.
+    #[allow(dead_code)]
     fn trim_oldest_widgets(&self) {
         let max = self.max_rendered_widgets.get();
         let mut count = 0;
@@ -615,6 +631,7 @@ impl ChatView {
     }
 
     /// Prepend a single QueuedMessage at the top of the container.
+    #[allow(dead_code)]
     fn prepend_queued_message(&self, msg: &aios_core::queue::QueuedMessage) {
         // Build the role string.
         let role_str = match msg.role {
@@ -656,6 +673,7 @@ impl ChatView {
     }
 
     /// Render a single QueuedMessage using the appropriate method (appends).
+    #[allow(dead_code)]
     fn render_queued_message(&self, msg: &aios_core::queue::QueuedMessage) {
         // System messages with a level get special formatting.
         if msg.role == aios_core::types::Role::System {

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Voice listener — wake word detection and speech-to-text pipeline.
 //!
 //! Extracted from app.rs. Runs in a background thread, continuously capturing

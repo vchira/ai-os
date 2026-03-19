@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! TTS (Text-to-Speech) functions for AiOS.
 //!
 //! Extracted from app.rs. Handles speaking AI responses via Piper or espeak-ng,
