@@ -301,17 +301,64 @@ impl AiosApp {
 
     /// Initialize LLM providers from config.
     pub(crate) fn init_llm(config: &ConfigManager, llm: &mut LlmManager) {
+        // Claude (Anthropic)
         let claude_key = config.get_str("llm.claude_api_key", "");
         let claude_model = config.get_str("llm.claude_model", "claude-sonnet-4-20250514");
         llm.register_provider(Box::new(ClaudeProvider::new(
             claude_key, Some(claude_model), None,
         )));
 
+        // OpenAI (ChatGPT)
         let openai_key = config.get_str("llm.openai_api_key", "");
         let openai_model = config.get_str("llm.openai_model", "gpt-4o");
         llm.register_provider(Box::new(OpenAIProvider::new(
             openai_key, Some(openai_model), None,
         )));
+
+        // DeepSeek — near-Claude quality at ~10x cheaper
+        let deepseek_key = config.get_str("llm.deepseek_api_key", "");
+        if !deepseek_key.is_empty() {
+            let deepseek_model = config.get_str("llm.deepseek_model", "deepseek-chat");
+            llm.register_provider(Box::new(OpenAIProvider::deepseek(
+                deepseek_key, Some(deepseek_model),
+            )));
+        }
+
+        // Mistral — very cheap, good quality
+        let mistral_key = config.get_str("llm.mistral_api_key", "");
+        if !mistral_key.is_empty() {
+            let mistral_model = config.get_str("llm.mistral_model", "mistral-small-latest");
+            llm.register_provider(Box::new(OpenAIProvider::mistral(
+                mistral_key, Some(mistral_model),
+            )));
+        }
+
+        // Groq — extremely fast inference
+        let groq_key = config.get_str("llm.groq_api_key", "");
+        if !groq_key.is_empty() {
+            let groq_model = config.get_str("llm.groq_model", "llama-3.3-70b-versatile");
+            llm.register_provider(Box::new(OpenAIProvider::groq(
+                groq_key, Some(groq_model),
+            )));
+        }
+
+        // Google Gemini
+        let gemini_key = config.get_str("llm.gemini_api_key", "");
+        if !gemini_key.is_empty() {
+            let gemini_model = config.get_str("llm.gemini_model", "gemini-2.0-flash");
+            llm.register_provider(Box::new(OpenAIProvider::gemini(
+                gemini_key, Some(gemini_model),
+            )));
+        }
+
+        // Ollama (local, free — no API key needed)
+        let ollama_enabled = config.get_bool("llm.ollama_enabled", false);
+        if ollama_enabled {
+            let ollama_model = config.get_str("llm.ollama_model", "llama3.2");
+            llm.register_provider(Box::new(OpenAIProvider::ollama(
+                Some(ollama_model),
+            )));
+        }
 
         let active = config.get_str("llm.provider", "claude");
         if let Err(e) = llm.set_active(&active) {

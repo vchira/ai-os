@@ -20,7 +20,7 @@ use crate::error::{LlmError, Result};
 use crate::provider::{ChunkStream, LlmProvider};
 
 /// Base URL for the OpenAI Chat Completions API.
-const API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 /// Default model identifier.
 const DEFAULT_MODEL: &str = "gpt-4o";
 /// Mini model for low-effort requests.
@@ -40,6 +40,10 @@ pub struct OpenAIProvider {
     client: Client,
     /// Current effort level controlling model selection and token budget.
     effort: EffortLevel,
+    /// API base URL — configurable for OpenAI-compatible providers.
+    api_url: String,
+    /// Provider name for display/logging.
+    provider_name: String,
 }
 
 impl OpenAIProvider {
@@ -61,7 +65,96 @@ impl OpenAIProvider {
             max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
             client: Client::new(),
             effort: EffortLevel::Medium,
+            api_url: DEFAULT_API_URL.to_string(),
+            provider_name: "openai".to_string(),
         }
+    }
+
+    /// Create an OpenAI-compatible provider with a custom API URL.
+    ///
+    /// Works with DeepSeek, Mistral, Groq, Ollama, and any other provider
+    /// that implements the OpenAI chat completions API.
+    pub fn with_base_url(
+        api_key: impl Into<String>,
+        model: Option<String>,
+        max_tokens: Option<u32>,
+        base_url: impl Into<String>,
+        provider_name: impl Into<String>,
+    ) -> Self {
+        let base = base_url.into();
+        let api_url = if base.ends_with("/chat/completions") {
+            base
+        } else if base.ends_with("/v1") {
+            format!("{base}/chat/completions")
+        } else {
+            format!("{}/v1/chat/completions", base.trim_end_matches('/'))
+        };
+        Self {
+            api_key: api_key.into(),
+            model: model.unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+            max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            client: Client::new(),
+            effort: EffortLevel::Medium,
+            api_url,
+            provider_name: provider_name.into(),
+        }
+    }
+
+    /// Convenience constructors for popular providers.
+
+    /// DeepSeek (deepseek-chat or deepseek-reasoner).
+    pub fn deepseek(api_key: impl Into<String>, model: Option<String>) -> Self {
+        Self::with_base_url(
+            api_key,
+            Some(model.unwrap_or_else(|| "deepseek-chat".to_string())),
+            None,
+            "https://api.deepseek.com",
+            "deepseek",
+        )
+    }
+
+    /// Mistral AI.
+    pub fn mistral(api_key: impl Into<String>, model: Option<String>) -> Self {
+        Self::with_base_url(
+            api_key,
+            Some(model.unwrap_or_else(|| "mistral-small-latest".to_string())),
+            None,
+            "https://api.mistral.ai",
+            "mistral",
+        )
+    }
+
+    /// Groq (fast inference).
+    pub fn groq(api_key: impl Into<String>, model: Option<String>) -> Self {
+        Self::with_base_url(
+            api_key,
+            Some(model.unwrap_or_else(|| "llama-3.3-70b-versatile".to_string())),
+            None,
+            "https://api.groq.com/openai",
+            "groq",
+        )
+    }
+
+    /// Google Gemini via OpenAI-compatible endpoint.
+    pub fn gemini(api_key: impl Into<String>, model: Option<String>) -> Self {
+        Self::with_base_url(
+            api_key,
+            Some(model.unwrap_or_else(|| "gemini-2.0-flash".to_string())),
+            None,
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "gemini",
+        )
+    }
+
+    /// Local Ollama (no API key needed).
+    pub fn ollama(model: Option<String>) -> Self {
+        Self::with_base_url(
+            "",
+            Some(model.unwrap_or_else(|| "llama3.2".to_string())),
+            None,
+            "http://localhost:11434",
+            "ollama",
+        )
     }
 
     /// Convert internal AiOS tool schemas to OpenAI function-calling format.
@@ -299,7 +392,7 @@ impl OpenAIProvider {
 
         let resp = self
             .client
-            .post(API_URL)
+            .post(&self.api_url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(body)
@@ -327,7 +420,7 @@ impl OpenAIProvider {
 #[async_trait]
 impl LlmProvider for OpenAIProvider {
     fn name(&self) -> &str {
-        "openai"
+        &self.provider_name
     }
 
     async fn send_message(

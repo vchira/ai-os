@@ -95,6 +95,8 @@ pub(crate) fn summarize_for_tts(raw: &str, api_key: &str) -> String {
     // Try Haiku summarization
     if !api_key.is_empty() {
         let body = serde_json::json!({
+            // Use the cheapest available model for TTS summarization.
+            // Mistral Small ($0.10/M) or Haiku ($0.80/M) — configurable.
             "model": "claude-haiku-4-5-20251001",
             "max_tokens": 100,
             "messages": [{
