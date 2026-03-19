@@ -323,9 +323,13 @@ impl OpenAIProvider {
 
     /// Return the effective model for the current effort level.
     fn effective_model(&self) -> &str {
-        match self.effort {
-            EffortLevel::Low => MINI_MODEL,
-            EffortLevel::Medium | EffortLevel::High => &self.model,
+        // Only OpenAI has a known cheap "mini" model to downgrade to.
+        // Other providers (Gemini, DeepSeek, Mistral, etc.) should always
+        // use the configured model — sending "gpt-4o-mini" to Gemini breaks.
+        if self.effort == EffortLevel::Low && self.provider_name == "openai" {
+            MINI_MODEL
+        } else {
+            &self.model
         }
     }
 
