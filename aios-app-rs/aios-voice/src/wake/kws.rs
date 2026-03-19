@@ -113,10 +113,28 @@ impl KwsEngine {
             )));
         }
 
-        ort::init_from(lib_path)
-            .map_err(|e| VoiceError::Kws(format!("ONNX Runtime library load failed: {e}")))?
-            .with_execution_providers([ort::ep::CPU::default().build()])
-            .commit();
+        // ort::init_from can only be called ONCE per process. Calling it
+        // twice causes a panic/abort. Use a static Once guard.
+        use std::sync::Once;
+        static ORT_INIT: Once = Once::new();
+        static ORT_INIT_OK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        ORT_INIT.call_once(|| {
+            match ort::init_from(&lib_path) {
+                Ok(builder) => {
+                    builder
+                        .with_execution_providers([ort::ep::CPU::default().build()])
+                        .commit();
+                    ORT_INIT_OK.store(true, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!("ONNX Runtime initialized from {}", lib_path);
+                }
+                Err(e) => {
+                    tracing::warn!("ONNX Runtime init failed: {e}");
+                }
+            }
+        });
+        if !ORT_INIT_OK.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(VoiceError::Kws("ONNX Runtime failed to initialize".into()));
+        }
 
         let mel_path = infra.join("melspectrogram.onnx");
         let mel_session = Session::builder()

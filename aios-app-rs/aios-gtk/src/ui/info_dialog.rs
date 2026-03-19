@@ -8,7 +8,7 @@ use aios_core::config::ConfigManager;
 
 /// Show the info dialog with Costs and About tabs.
 pub fn show_info_dialog(parent: &adw::ApplicationWindow) {
-    let dialog = adw::Window::builder()
+    let dialog = gtk::Window::builder()
         .title("AiOS Info")
         .default_width(500)
         .default_height(450)
@@ -18,11 +18,6 @@ pub fn show_info_dialog(parent: &adw::ApplicationWindow) {
 
     let content = gtk::Box::new(Orientation::Vertical, 0);
 
-    // Header bar with close button.
-    let header = adw::HeaderBar::new();
-    header.set_title_widget(Some(&gtk::Label::new(Some("AiOS Info"))));
-    content.append(&header);
-
     // Tabbed notebook.
     let notebook = gtk::Notebook::new();
     notebook.set_vexpand(true);
@@ -30,11 +25,11 @@ pub fn show_info_dialog(parent: &adw::ApplicationWindow) {
 
     // --- Tab 1: Costs ---
     let costs_page = build_costs_tab();
-    notebook.append_page(&costs_page, Some(&gtk::Label::new(Some("Costs"))));
+    notebook.append_page(&costs_page, Some(&gtk::Label::new(Some("  Costs  "))));
 
     // --- Tab 2: About ---
     let about_page = build_about_tab();
-    notebook.append_page(&about_page, Some(&gtk::Label::new(Some("About"))));
+    notebook.append_page(&about_page, Some(&gtk::Label::new(Some("  About  "))));
 
     content.append(&notebook);
     dialog.set_child(Some(&content));

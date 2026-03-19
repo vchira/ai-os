@@ -681,31 +681,14 @@ pub(crate) fn setup_voice(
     } else {
         user_kws
     };
-    // KWS engine init can take seconds (ONNX model loading).
-    // Do it in a background thread to avoid blocking the GTK main loop.
+    // KWS engine — skip initialization here. The ort crate's ONNX runtime
+    // init can abort the process on some systems. The voice listener will
+    // use the Whisper fallback path (VAD + transcription + keyword match)
+    // which is slower but doesn't require ONNX. KWS will be initialized
+    // properly when `activate_main` runs on subsequent boots (with vault).
     let kws_engine: Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> =
         Arc::new(std::sync::Mutex::new(None));
-    {
-        let kws_engine_ref = kws_engine.clone();
-        let kws_dir = kws_models_dir.clone();
-        std::thread::spawn(move || {
-            info!("KWS background init starting, models_dir={}", kws_dir.display());
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                aios_voice::KwsEngine::new(&kws_dir)
-            })) {
-                Ok(Ok(engine)) => {
-                    info!("KWS engine initialized (background) OK");
-                    *kws_engine_ref.lock().unwrap() = Some(engine);
-                }
-                Ok(Err(e)) => {
-                    warn!("KWS engine not available: {e} -- using Whisper fallback");
-                }
-                Err(panic) => {
-                    warn!("KWS engine panicked during init: {:?}", panic);
-                }
-            }
-        });
-    }
+    info!("KWS: skipped ONNX init in autoconfig path (using Whisper fallback)");
 
     let audio_level = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
