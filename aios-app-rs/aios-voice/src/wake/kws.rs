@@ -12,11 +12,12 @@
 //! Audio is buffered internally and fed in 80 ms chunks. When a wake word model is
 //! loaded and the confidence exceeds the configurable threshold, the result is marked
 //! as `triggered`.
+//!
+//! Uses `tract-onnx` for pure-Rust ONNX inference (no external shared libraries needed).
 
 use std::path::Path;
 
-use ort::session::Session;
-use ort::value::TensorRef;
+use tract_onnx::prelude::*;
 use tracing;
 
 use crate::error::VoiceError;
@@ -33,6 +34,14 @@ const MAX_EMBEDDINGS: usize = 16;
 
 /// Default detection threshold.
 const DEFAULT_THRESHOLD: f32 = 0.5;
+
+// ---------------------------------------------------------------------------
+// Type alias for the inference plan used by tract.
+// ---------------------------------------------------------------------------
+
+/// An inference plan backed by an `InferenceModel`.  Handles dynamic input
+/// shapes at runtime — no need to fix dimensions at load time.
+type InferencePlan = InferenceSimplePlan<InferenceModel>;
 
 // ---------------------------------------------------------------------------
 // KwsResult
@@ -56,12 +65,12 @@ pub struct KwsResult {
 /// Create with [`KwsEngine::new`], then load a wake word model via
 /// [`KwsEngine::load_wake_model`] before calling [`KwsEngine::process_audio`].
 pub struct KwsEngine {
-    /// Mel spectrogram session (infrastructure).
-    mel_session: Session,
-    /// Embedding model session (infrastructure).
-    emb_session: Session,
-    /// Optional wake word classification session.
-    wake_session: Option<Session>,
+    /// Mel spectrogram inference plan (infrastructure).
+    mel_plan: InferencePlan,
+    /// Embedding model inference plan (infrastructure).
+    emb_plan: InferencePlan,
+    /// Optional wake word classification plan.
+    wake_plan: Option<InferencePlan>,
     /// Human-readable name of the currently loaded wake word.
     wake_word: String,
 
@@ -82,65 +91,40 @@ impl KwsEngine {
     /// `models_dir` must contain an `infrastructure/` subdirectory with
     /// `melspectrogram.onnx` and `embedding_model.onnx`.
     ///
-    /// Calls `ort::init_from()` to load the ONNX Runtime shared library
-    /// dynamically, then configures the CPU execution provider.
-    ///
-    /// The library is searched in this order:
-    /// 1. `ORT_DYLIB_PATH` environment variable
-    /// 2. `/opt/aios-app/lib/libonnxruntime.so`
-    /// 3. System library path (LD_LIBRARY_PATH)
+    /// Uses `tract-onnx` for pure-Rust ONNX inference — no external shared
+    /// libraries or `ORT_DYLIB_PATH` needed.
     pub fn new(models_dir: &Path) -> Result<Self, VoiceError> {
-        // Load the ONNX Runtime shared library dynamically.
-        // With the `load-dynamic` feature, the library is NOT linked at
-        // compile time — it must be present at runtime.
-        let lib_path = std::env::var("ORT_DYLIB_PATH")
-            .unwrap_or_else(|_| "/opt/aios-app/lib/libonnxruntime.so".to_string());
-
-        // Check if the library file exists before trying to load it.
-        // ort::init_from may panic on some platforms if the file is missing.
-        if !std::path::Path::new(&lib_path).exists() {
-            return Err(VoiceError::Kws(format!(
-                "ONNX Runtime library not found at {lib_path}"
-            )));
-        }
-
-        // Check infrastructure models exist before loading ORT
+        // Check infrastructure models exist before loading
         let infra = models_dir.join("infrastructure");
-        if !infra.join("melspectrogram.onnx").exists() || !infra.join("embedding_model.onnx").exists() {
+        if !infra.join("melspectrogram.onnx").exists()
+            || !infra.join("embedding_model.onnx").exists()
+        {
             return Err(VoiceError::Kws(format!(
                 "KWS infrastructure models not found in {}",
                 infra.display()
             )));
         }
 
-        // ORT_DYLIB_PATH MUST be set BEFORE the process starts (in the
-        // session launcher script). Setting it at runtime doesn't work because
-        // the ort crate's static initializers have already run by this point.
-        // The aios-session.sh script exports ORT_DYLIB_PATH before launching /usr/bin/aios.
-        tracing::info!("KWS init: ORT_DYLIB_PATH={}", std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "NOT SET".into()));
-
         let mel_path = infra.join("melspectrogram.onnx");
-        let mel_session = Session::builder()
-            .map_err(|e| VoiceError::Kws(format!("session builder (mel): {e}")))?
-            .with_intra_threads(1)
-            .map_err(|e| VoiceError::Kws(format!("intra threads (mel): {e}")))?
-            .commit_from_file(&mel_path)
+        let mel_model = tract_onnx::onnx()
+            .model_for_path(&mel_path)
             .map_err(|e| VoiceError::Kws(format!("load melspectrogram model at {}: {e}", mel_path.display())))?;
+        let mel_plan = SimplePlan::new(mel_model)
+            .map_err(|e| VoiceError::Kws(format!("plan melspectrogram: {e}")))?;
 
         let emb_path = infra.join("embedding_model.onnx");
-        let emb_session = Session::builder()
-            .map_err(|e| VoiceError::Kws(format!("session builder (emb): {e}")))?
-            .with_intra_threads(1)
-            .map_err(|e| VoiceError::Kws(format!("intra threads (emb): {e}")))?
-            .commit_from_file(&emb_path)
+        let emb_model = tract_onnx::onnx()
+            .model_for_path(&emb_path)
             .map_err(|e| VoiceError::Kws(format!("load embedding model at {}: {e}", emb_path.display())))?;
+        let emb_plan = SimplePlan::new(emb_model)
+            .map_err(|e| VoiceError::Kws(format!("plan embedding: {e}")))?;
 
-        tracing::info!("KWS infrastructure models loaded from {}", infra.display());
+        tracing::info!("KWS infrastructure models loaded from {} (tract-onnx)", infra.display());
 
         Ok(Self {
-            mel_session,
-            emb_session,
-            wake_session: None,
+            mel_plan,
+            emb_plan,
+            wake_plan: None,
             wake_word: String::new(),
             audio_buf: Vec::with_capacity(CHUNK_SAMPLES),
             mel_buf: Vec::new(),
@@ -154,18 +138,21 @@ impl KwsEngine {
     /// `path` is the full path to the `.onnx` file.
     /// `wake_word` is the human-readable name (e.g. "Hey Jarvis").
     pub fn load_wake_model(&mut self, path: &Path, wake_word: &str) -> Result<(), VoiceError> {
-        let session = Session::builder()
-            .map_err(|e| VoiceError::Kws(format!("session builder (wake): {e}")))?
-            .with_intra_threads(1)
-            .map_err(|e| VoiceError::Kws(format!("intra threads (wake): {e}")))?
-            .commit_from_file(path)
+        let model = tract_onnx::onnx()
+            .model_for_path(path)
             .map_err(|e| VoiceError::Kws(format!("load wake model at {}: {e}", path.display())))?;
+        let plan = SimplePlan::new(model)
+            .map_err(|e| VoiceError::Kws(format!("plan wake model: {e}")))?;
 
-        self.wake_session = Some(session);
+        self.wake_plan = Some(plan);
         self.wake_word = wake_word.to_string();
         self.reset();
 
-        tracing::info!("KWS wake word model loaded: \"{}\" from {}", wake_word, path.display());
+        tracing::info!(
+            "KWS wake word model loaded: \"{}\" from {}",
+            wake_word,
+            path.display()
+        );
         Ok(())
     }
 
@@ -176,7 +163,7 @@ impl KwsEngine {
     pub fn process_audio(&mut self, samples: &[f32]) -> KwsResult {
         let no_detection = KwsResult { confidence: 0.0, triggered: false };
 
-        if self.wake_session.is_none() {
+        if self.wake_plan.is_none() {
             return no_detection;
         }
 
@@ -210,7 +197,7 @@ impl KwsEngine {
 
     /// Whether a wake word model is currently loaded.
     pub fn has_model(&self) -> bool {
-        self.wake_session.is_some()
+        self.wake_plan.is_some()
     }
 
     /// The name of the currently loaded wake word (empty if none).
@@ -262,18 +249,19 @@ impl KwsEngine {
 
     /// Run the mel spectrogram model on a single 80 ms chunk.
     fn run_mel(&mut self, chunk: &[f32]) -> Result<Vec<f32>, VoiceError> {
-        let input = TensorRef::from_array_view(([1_usize, CHUNK_SAMPLES], chunk))
+        let input = tract_ndarray::Array2::from_shape_vec((1, CHUNK_SAMPLES), chunk.to_vec())
             .map_err(|e| VoiceError::Kws(format!("mel input tensor: {e}")))?;
 
-        let outputs = self.mel_session
-            .run(ort::inputs![input])
+        let outputs = self
+            .mel_plan
+            .run(tvec![input.into_tvalue()])
             .map_err(|e| VoiceError::Kws(format!("mel inference: {e}")))?;
 
-        let (_, data) = outputs[0]
-            .try_extract_tensor::<f32>()
+        let data = outputs[0]
+            .to_array_view::<f32>()
             .map_err(|e| VoiceError::Kws(format!("mel output extract: {e}")))?;
 
-        Ok(data.to_vec())
+        Ok(data.iter().copied().collect())
     }
 
     /// Run the embedding model on the accumulated mel features.
@@ -283,43 +271,48 @@ impl KwsEngine {
         let flat: Vec<f32> = self.mel_buf.iter().flat_map(|f| f.iter().copied()).collect();
         let total = flat.len();
 
-        let input = TensorRef::from_array_view(([1_usize, total], &*flat))
+        let input = tract_ndarray::Array2::from_shape_vec((1, total), flat)
             .map_err(|e| VoiceError::Kws(format!("emb input tensor: {e}")))?;
 
-        let outputs = self.emb_session
-            .run(ort::inputs![input])
+        let outputs = self
+            .emb_plan
+            .run(tvec![input.into_tvalue()])
             .map_err(|e| VoiceError::Kws(format!("emb inference: {e}")))?;
 
-        let (_, data) = outputs[0]
-            .try_extract_tensor::<f32>()
+        let data = outputs[0]
+            .to_array_view::<f32>()
             .map_err(|e| VoiceError::Kws(format!("emb output extract: {e}")))?;
 
-        Ok(data.to_vec())
+        Ok(data.iter().copied().collect())
     }
 
     /// Run the wake word model on the latest embedding.
     fn run_wake(&mut self) -> Result<f32, VoiceError> {
-        let session = self.wake_session.as_mut()
+        let plan = self
+            .wake_plan
+            .as_ref()
             .ok_or_else(|| VoiceError::Kws("no wake model loaded".into()))?;
 
-        let embedding = self.emb_buf.last()
+        let embedding = self
+            .emb_buf
+            .last()
             .ok_or_else(|| VoiceError::Kws("no embeddings available".into()))?;
 
         let emb_len = embedding.len();
-        let input = TensorRef::from_array_view(([1_usize, emb_len], &**embedding))
+        let input = tract_ndarray::Array2::from_shape_vec((1, emb_len), embedding.clone())
             .map_err(|e| VoiceError::Kws(format!("wake input tensor: {e}")))?;
 
-        let outputs = session
-            .run(ort::inputs![input])
+        let outputs = plan
+            .run(tvec![input.into_tvalue()])
             .map_err(|e| VoiceError::Kws(format!("wake inference: {e}")))?;
 
-        let (_, data) = outputs[0]
-            .try_extract_tensor::<f32>()
+        let data = outputs[0]
+            .to_array_view::<f32>()
             .map_err(|e| VoiceError::Kws(format!("wake output extract: {e}")))?;
 
         // The model outputs a single confidence value (or the last element for
         // multi-output models).
-        let confidence = data.last().copied().unwrap_or(0.0);
+        let confidence = data.iter().last().copied().unwrap_or(0.0);
         Ok(confidence)
     }
 }
@@ -435,7 +428,7 @@ mod tests {
         // Without a KWS engine (which needs ONNX models), we verify the
         // expected behavior by checking that a KwsResult built from empty
         // audio processing would have zero confidence and no trigger.
-        // This mirrors the behavior of process_audio when wake_session is None.
+        // This mirrors the behavior of process_audio when wake_plan is None.
         let no_detection = KwsResult { confidence: 0.0, triggered: false };
         assert!(!no_detection.triggered);
         assert!((no_detection.confidence - 0.0).abs() < f32::EPSILON);
@@ -531,10 +524,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ONNX runtime and model files"]
+    #[ignore = "requires ONNX model files"]
     fn kws_engine_creation_with_valid_models() {
-        // This test is ignored by default because it requires ONNX runtime
-        // and model files at a specific path.
+        // This test is ignored by default because it requires
+        // model files at a specific path.
         let models_dir = std::path::Path::new("/opt/aios-app/models");
         let result = KwsEngine::new(models_dir);
         assert!(result.is_ok(), "KwsEngine::new failed: {:?}", result.err());
@@ -565,7 +558,7 @@ mod tests {
     #[test]
     fn process_empty_audio_no_model_returns_no_trigger() {
         // Without creating a full engine, verify the expected behavior:
-        // if wake_session is None, process_audio returns no-detection.
+        // if wake_plan is None, process_audio returns no-detection.
         let no_detection = KwsResult { confidence: 0.0, triggered: false };
         assert!(!no_detection.triggered);
         assert!((no_detection.confidence - 0.0).abs() < f32::EPSILON);
@@ -599,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ONNX runtime and model files"]
+    #[ignore = "requires ONNX model files"]
     fn kws_engine_has_model_returns_false_when_no_model_loaded() {
         let models_dir = std::path::Path::new("/opt/aios-app/models");
         if let Ok(engine) = KwsEngine::new(models_dir) {
@@ -608,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ONNX runtime and model files"]
+    #[ignore = "requires ONNX model files"]
     fn kws_engine_process_audio_with_empty_samples() {
         let models_dir = std::path::Path::new("/opt/aios-app/models");
         if let Ok(mut engine) = KwsEngine::new(models_dir) {
@@ -620,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ONNX runtime and model files"]
+    #[ignore = "requires ONNX model files"]
     fn kws_engine_process_audio_without_wake_model() {
         let models_dir = std::path::Path::new("/opt/aios-app/models");
         if let Ok(mut engine) = KwsEngine::new(models_dir) {
@@ -632,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ONNX runtime and model files"]
+    #[ignore = "requires ONNX model files"]
     fn kws_engine_reset_clears_internal_state() {
         let models_dir = std::path::Path::new("/opt/aios-app/models");
         if let Ok(mut engine) = KwsEngine::new(models_dir) {
@@ -650,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires ONNX runtime and model files"]
+    #[ignore = "requires ONNX model files"]
     fn kws_engine_set_threshold_and_verify() {
         let models_dir = std::path::Path::new("/opt/aios-app/models");
         if let Ok(mut engine) = KwsEngine::new(models_dir) {

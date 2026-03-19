@@ -1,6 +1,7 @@
 //! Integration test for KWS wake word detection.
 //!
-//! Run with: ORT_DYLIB_PATH=/path/to/libonnxruntime.so cargo test --test kws_integration
+//! Run with: cargo test --test kws_integration
+//! (No ORT_DYLIB_PATH needed — tract-onnx is pure Rust.)
 
 use std::path::PathBuf;
 
