@@ -317,6 +317,7 @@ pub fn build_main_window(
 
     // --- Main content ---
     let content_box = gtk::Box::new(Orientation::Vertical, 0);
+    content_box.set_vexpand(true);
 
     // Scrolled window for chat.
     let scrolled = gtk::ScrolledWindow::builder()
