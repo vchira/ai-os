@@ -31,3 +31,4 @@ Thumbs.db
 
 # Website generated docs
 website/docs/
+tests/qemu/build/

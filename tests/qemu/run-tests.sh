@@ -24,7 +24,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # ─── Configuration ────────────────────────────────────────────
-ISO="${1:-${PROJECT_DIR}/distro/build/live-image-amd64.hybrid.iso}"
+# Test ISO lives in its own directory — never touches the user's dev build.
+TEST_BUILD_DIR="${PROJECT_DIR}/tests/qemu/build"
+ISO="${1:-${TEST_BUILD_DIR}/aios-test.iso}"
 SSH_PORT=2222
 SSH_USER="aios"
 SSH_PASS="aios"  # Default password set during ISO build (autoconfig may change it at runtime)
@@ -93,34 +95,55 @@ else
     ACCEL="kvm"
 fi
 
-# ─── Build ISO with test autoconfig ───────────────────────────
+# ─── Build test ISO (isolated from user's dev build) ─────────
 BUILD_FLAG="${BUILD:-auto}"  # "auto", "deep", "skip"
 
-if [ "${BUILD_FLAG}" = "skip" ]; then
-    log "Skipping build (BUILD=skip)"
-elif [ "${BUILD_FLAG}" = "deep" ] || [ ! -f "${ISO}" ]; then
-    log "Building fresh ISO with test autoconfig (deep clean build)..."
-    log "This will take a while..."
-
-    # Symlink test autoconfig so the build picks it up
-    ln -sf "${PROJECT_DIR}/autoconfig-test.json" "${PROJECT_DIR}/autoconfig.json"
-
-    if [ "${BUILD_FLAG}" = "deep" ]; then
-        "${PROJECT_DIR}/clean.sh" --deep 2>&1 | tail -3
-    fi
-    "${PROJECT_DIR}/start.sh" --no-boot 2>&1 | tail -10 || die "ISO build failed"
-
-    # Remove the symlink after build
-    rm -f "${PROJECT_DIR}/autoconfig.json"
+if [ "${BUILD_FLAG}" = "skip" ] && [ -f "${ISO}" ]; then
+    log "Skipping build (BUILD=skip), using existing test ISO"
+elif [ "${BUILD_FLAG}" = "skip" ] && [ ! -f "${ISO}" ]; then
+    die "BUILD=skip but no test ISO at ${ISO}\nRun without BUILD=skip first to build it."
 else
-    log "Using existing ISO (set BUILD=deep for fresh build)"
+    # Build a test-specific ISO that never touches distro/build/
+    log "Building test ISO with test autoconfig..."
+    log "This is isolated from your dev build — distro/build/ is untouched."
+
+    mkdir -p "${TEST_BUILD_DIR}"
+
+    # Copy test autoconfig into place temporarily
+    cp "${PROJECT_DIR}/autoconfig-test.json" "${PROJECT_DIR}/autoconfig.json"
+
+    # Build the ISO using the standard build script.
+    # The ISO output goes to distro/build/ — we'll move it to our test dir.
+    if [ "${BUILD_FLAG}" = "deep" ]; then
+        log "Deep clean build..."
+        "${PROJECT_DIR}/clean.sh" 2>&1 | tail -3
+    fi
+
+    # Run the build (without booting)
+    # start.sh always boots — use distro/build.sh directly
+    cd "${PROJECT_DIR}/distro"
+    bash build.sh --no-bump 2>&1 | tail -10
+    BUILD_EXIT=$?
+    cd "${PROJECT_DIR}"
+
+    # Remove autoconfig so it doesn't interfere with user's dev builds
+    rm -f "${PROJECT_DIR}/autoconfig.json"
+
+    if [ ${BUILD_EXIT} -ne 0 ]; then
+        die "Test ISO build failed (exit ${BUILD_EXIT})"
+    fi
+
+    # Move the built ISO to the test directory
+    BUILT_ISO="${PROJECT_DIR}/distro/build/live-image-amd64.hybrid.iso"
+    if [ ! -f "${BUILT_ISO}" ]; then
+        die "Build completed but ISO not found at ${BUILT_ISO}"
+    fi
+
+    cp "${BUILT_ISO}" "${ISO}"
+    log "Test ISO copied to ${ISO} ($(du -h "${ISO}" | cut -f1))"
 fi
 
-if [ ! -f "${ISO}" ]; then
-    die "ISO not found: ${ISO}\nRun with BUILD=deep or build manually: ./start.sh"
-fi
-
-log "Using ISO: ${ISO}"
+log "Using test ISO: ${ISO}"
 
 # ─── Start QEMU VM ───────────────────────────────────────────
 log "Starting headless QEMU VM..."
