@@ -116,10 +116,12 @@ impl KwsEngine {
             .map_err(|e| VoiceError::Kws(format!("plan melspectrogram: {e}")))?;
 
         let emb_path = infra.join("embedding_model.onnx");
-        let emb_model = tract_onnx::onnx()
+        let mut emb_model = tract_onnx::onnx()
             .model_for_path(&emb_path)
             .map_err(|e| VoiceError::Kws(format!("load embedding model at {}: {e}", emb_path.display())))?;
-        // Embedding model has dynamic input — leave as inference mode
+        // Set concrete input shape: [1, 76, 32] (76 mel frames × 32 features)
+        emb_model.set_input_fact(0, InferenceFact::dt_shape(f32::datum_type(), &[1, 76, 32]))
+            .map_err(|e| VoiceError::Kws(format!("set emb input fact: {e}")))?;
         let emb_plan = SimplePlan::new(emb_model)
             .map_err(|e| VoiceError::Kws(format!("plan embedding: {e}")))?;
 
@@ -234,8 +236,12 @@ impl KwsEngine {
             self.mel_buf.drain(..self.mel_buf.len() - 128);
         }
 
-        // Step 2: embedding (needs accumulated mel frames)
+        // Step 2: embedding (needs 76 accumulated mel frames ≈ 6 seconds)
         let embedding = self.run_embedding()?;
+        if embedding.is_empty() {
+            // Not enough mel frames yet — skip wake word check
+            return Ok(KwsResult { confidence: 0.0, triggered: false });
+        }
         self.emb_buf.push(embedding);
 
         // Cap the embedding buffer to prevent unbounded growth.
@@ -271,20 +277,36 @@ impl KwsEngine {
     /// Run the embedding model on the accumulated mel features.
     ///
     /// Mel output per chunk is [1,1,5,32] = 160 values = 5 frames × 32 features.
-    /// Embedding expects [1, n_frames, 32] where n_frames = n_chunks * 5.
+    /// The openWakeWord embedding model expects exactly 76 mel frames [1, 76, 32].
+    /// We only run embedding when we have exactly 76 frames accumulated.
     fn run_embedding(&mut self) -> Result<Vec<f32>, VoiceError> {
-        let flat: Vec<f32> = self.mel_buf.iter().flat_map(|f| f.iter().copied()).collect();
-        let n_frames = self.mel_buf.len() * 5; // each chunk produces 5 mel frames
-        let feat_dim = 32;
+        const REQUIRED_MEL_FRAMES: usize = 76;
+        let n_frames = self.mel_buf.len() * 5;
 
-        if flat.len() != n_frames * feat_dim {
+        // Only run when we have enough frames
+        if n_frames < REQUIRED_MEL_FRAMES {
+            return Ok(Vec::new()); // Not enough data yet
+        }
+
+        // Take exactly 76 frames from the end
+        let flat: Vec<f32> = self.mel_buf.iter().flat_map(|f| f.iter().copied()).collect();
+        let feat_dim = 32;
+        let total_frames = flat.len() / feat_dim;
+        let start_frame = if total_frames > REQUIRED_MEL_FRAMES { total_frames - REQUIRED_MEL_FRAMES } else { 0 };
+        let start_idx = start_frame * feat_dim;
+        let end_idx = start_idx + REQUIRED_MEL_FRAMES * feat_dim;
+        let selected = &flat[start_idx..end_idx.min(flat.len())];
+
+        let n_frames = REQUIRED_MEL_FRAMES;
+
+        if selected.len() != n_frames * feat_dim {
             return Err(VoiceError::Kws(format!(
                 "mel buffer mismatch: {} values, expected {}x{}={}",
-                flat.len(), n_frames, feat_dim, n_frames * feat_dim
+                selected.len(), n_frames, feat_dim, n_frames * feat_dim
             )));
         }
 
-        let input = tract_ndarray::Array3::from_shape_vec((1, n_frames, feat_dim), flat)
+        let input = tract_ndarray::Array3::from_shape_vec((1, n_frames, feat_dim), selected.to_vec())
             .map_err(|e| VoiceError::Kws(format!("emb input tensor: {e}")))?;
 
         let outputs = self
