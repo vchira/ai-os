@@ -79,12 +79,19 @@ pub(crate) fn prepare_tts_text_short(raw: &str) -> Option<String> {
     None
 }
 
-/// Summarize a long response using Claude Haiku (fast, cheap).
+/// Configuration for the TTS summarizer LLM call.
+pub(crate) struct SummarizerConfig {
+    pub api_key: String,
+    pub model: String,
+    pub provider_id: String,
+}
+
+/// Summarize a long response using the configured LLM provider.
 /// Falls back to sentence truncation if API call fails.
 ///
-/// Uses the configured TTS summary provider (default: Claude Haiku).
+/// Uses the configured TTS summary provider (default: Claude).
 /// The provider/model/key are read from config by the caller.
-pub(crate) fn summarize_for_tts(raw: &str, api_key: &str) -> String {
+pub(crate) fn summarize_for_tts(raw: &str, cfg: &SummarizerConfig) -> String {
     let (plain, code_blocks) = strip_for_tts(raw);
 
     let code_mention = if code_blocks > 0 {
@@ -96,46 +103,60 @@ pub(crate) fn summarize_for_tts(raw: &str, api_key: &str) -> String {
         String::new()
     };
 
-    // Try Haiku summarization
-    if !api_key.is_empty() {
-        let body = serde_json::json!({
-            // Use the cheapest available model for TTS summarization.
-            // Mistral Small ($0.10/M) or Haiku ($0.80/M) — configurable.
-            "model": "claude-haiku-4-5-20251001",
-            "max_tokens": 100,
-            "messages": [{
-                "role": "user",
-                "content": format!(
-                    "Summarize the following AI assistant response in exactly ONE short spoken sentence (max 30 words). \
-                     No markdown, no special characters, no asterisks, no hashtags — just plain spoken English. \
-                     End with: The detailed answer is in the chat.\n\n---\n{}",
-                    &plain[..plain.len().min(2000)]
-                )
-            }]
-        });
+    if !cfg.api_key.is_empty() {
+        let prompt = format!(
+            "Summarize the following AI assistant response in exactly ONE short spoken sentence (max 30 words). \
+             No markdown, no special characters, no asterisks, no hashtags — just plain spoken English. \
+             End with: The detailed answer is in the chat.\n\n---\n{}",
+            &plain[..plain.len().min(2000)]
+        );
 
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build();
 
         if let Ok(client) = client {
-            let resp = client
-                .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .body(body.to_string())
-                .send();
+            let result = if cfg.provider_id == "claude" {
+                // Anthropic protocol
+                let body = serde_json::json!({
+                    "model": cfg.model,
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": prompt}]
+                });
+                let base = crate::providers::provider_api_url(&cfg.provider_id);
+                client
+                    .post(format!("{base}/v1/messages"))
+                    .header("x-api-key", &cfg.api_key)
+                    .header("anthropic-version", "2023-06-01")
+                    .header("content-type", "application/json")
+                    .body(body.to_string())
+                    .send()
+                    .ok()
+                    .and_then(|r| r.json::<serde_json::Value>().ok())
+                    .and_then(|j| j["content"][0]["text"].as_str().map(|s| s.trim().to_string()))
+            } else {
+                // OpenAI-compatible protocol
+                let body = serde_json::json!({
+                    "model": cfg.model,
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": prompt}]
+                });
+                let base = crate::providers::provider_api_url(&cfg.provider_id);
+                client
+                    .post(format!("{base}/v1/chat/completions"))
+                    .header("Authorization", format!("Bearer {}", cfg.api_key))
+                    .header("content-type", "application/json")
+                    .body(body.to_string())
+                    .send()
+                    .ok()
+                    .and_then(|r| r.json::<serde_json::Value>().ok())
+                    .and_then(|j| j["choices"][0]["message"]["content"].as_str().map(|s| s.trim().to_string()))
+            };
 
-            if let Ok(resp) = resp {
-                if let Ok(json) = resp.json::<serde_json::Value>() {
-                    if let Some(text) = json["content"][0]["text"].as_str() {
-                        let summary = text.trim().to_string();
-                        if !summary.is_empty() {
-                            tracing::debug!("TTS summary from Haiku: {summary}");
-                            return format!("{summary}{code_mention}");
-                        }
-                    }
+            if let Some(summary) = result {
+                if !summary.is_empty() {
+                    tracing::debug!("TTS summary from {}: {summary}", cfg.provider_id);
+                    return format!("{summary}{code_mention}");
                 }
             }
         }
@@ -194,11 +215,20 @@ pub(crate) fn speak_if_enabled_with_signal(
         return;
     }
 
-    // Long responses: summarize with Haiku in background thread
+    // Long responses: summarize with configured provider
     let raw = text.to_string();
-    let api_key = config.get_str("llm.claude_api_key", "");
+    let sum_provider = config.get_str("llm.tts_summary_provider", "claude");
+    let sum_model = config.get_str("llm.tts_summary_model", "claude-sonnet-4-20250514");
+    let api_key = crate::providers::find_by_id(&sum_provider)
+        .map(|p| config.get_str(p.api_key_config, ""))
+        .unwrap_or_default();
+    let summarizer_cfg = SummarizerConfig {
+        api_key,
+        model: sum_model,
+        provider_id: sum_provider,
+    };
     std::thread::spawn(move || {
-        let speak_text = summarize_for_tts(&raw, &api_key);
+        let speak_text = summarize_for_tts(&raw, &summarizer_cfg);
         do_tts_with_signal(&speak_text, tts_started);
     });
 }

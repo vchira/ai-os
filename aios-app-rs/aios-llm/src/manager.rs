@@ -103,8 +103,15 @@ pub struct LlmManager {
     semantic_cache: SemanticCache,
     /// Current quality mode controlling the escalation strategy.
     quality_mode: QualityMode,
-    /// Whether the user has requested a retry (reset after each chat call).
-    user_retry_pending: bool,
+    /// Channel that has requested a retry, if any.
+    ///
+    /// Stores the [`ChannelKind`] that initiated the retry so that only the
+    /// retrying channel's flag is consumed.  This prevents a retry requested
+    /// on one channel (e.g. Signal) from being stolen by a concurrent
+    /// `chat()` call from a different channel (e.g. Desktop).
+    ///
+    /// Reset to `None` after the matching `chat()` call consumes it.
+    user_retry_pending: Option<aios_core::channel::ChannelKind>,
     /// The currently active output channel.  Passed to tool executors so
     /// channel-aware tools can adapt their behaviour.
     active_channel: ChannelContext,
@@ -134,7 +141,7 @@ impl LlmManager {
                 Self::DEFAULT_CACHE_MAX_ENTRIES,
             ),
             quality_mode: QualityMode::default(),
-            user_retry_pending: false,
+            user_retry_pending: None,
             active_channel: ChannelContext::default(),
         }
     }
@@ -392,11 +399,19 @@ impl LlmManager {
         info!("Quality mode set to: {mode}");
     }
 
-    /// Mark that the user has requested a retry.
+    /// Mark that the user has requested a retry from the given channel.
     ///
-    /// This flag is consumed (reset) by the next `chat()` call.
+    /// The flag is consumed (reset to `None`) by the next `chat()` call
+    /// **only if** the active channel matches the one that set the flag.
+    /// This prevents cross-channel flag stealing.
+    ///
+    /// # Safety (concurrency)
+    ///
+    /// `LlmManager` is held behind `Arc<tokio::sync::Mutex>` at the app
+    /// level, so `&mut self` guarantees exclusive access.  Callers must
+    /// hold the mutex lock when calling this method.
     pub fn mark_user_retry(&mut self) {
-        self.user_retry_pending = true;
+        self.user_retry_pending = Some(self.active_channel.kind);
     }
 
     // -- Semantic cache -------------------------------------------------------
@@ -594,6 +609,14 @@ impl LlmManager {
             Err(_) => return None,
         };
 
+        // Only Claude supports prompt caching with keep-warm pings.
+        // Starting keep-warm for other providers would send the wrong
+        // API key to Anthropic's endpoint, so we skip entirely.
+        if provider.name() != "claude" {
+            debug!("start_keep_warm: provider '{}' is not Claude, skipping", provider.name());
+            return None;
+        }
+
         let cache_config = provider.cache_config()?;
 
         if provider.api_key().is_empty() {
@@ -621,15 +644,6 @@ impl LlmManager {
         };
         let tools = fp.tools();
 
-        // We need to clone the provider name so we can look it up later.
-        // However, the provider is behind a trait object and is not Send-able
-        // by moving.  Instead we capture the data we need for warmup and
-        // rely on the fact that warmup is just an HTTP call.
-        //
-        // To call provider.warmup() we need &self, but we can't move the
-        // provider into the task.  Instead, we reconstruct a minimal
-        // ClaudeProvider from the API key + model.  This is acceptable
-        // because warmup() only needs the HTTP client + API key + model.
         let api_key = provider.api_key().to_string();
         let model = provider.model().to_string();
         let provider_name = provider.name().to_string();
@@ -643,9 +657,9 @@ impl LlmManager {
             loop {
                 tokio::time::sleep(interval).await;
 
-                // Build a fresh provider for the warmup ping.
-                // We only support Claude caching today — if more providers
-                // add caching we'd need a factory here.
+                // Build a fresh ClaudeProvider for the warmup ping.
+                // This is safe because we verified the active provider is
+                // Claude before entering this code path.
                 let warmup_provider = crate::claude::ClaudeProvider::new(
                     api_key.clone(),
                     Some(model.clone()),
@@ -659,9 +673,6 @@ impl LlmManager {
                     Some(tools.as_slice())
                 };
 
-                // Note: last_request_at() on the warmup provider is always None
-                // (freshly constructed), so we skip the stale check and always
-                // send the ping. The real provider's usage is not accessible here.
                 debug!("keep-warm: sending ping for '{}'", provider_name);
                 match warmup_provider.warmup(sp, tools_ref).await {
                     Ok(()) => {
@@ -741,9 +752,17 @@ impl LlmManager {
         system_prompt: Option<&str>,
     ) -> Result<LlmResponse> {
         // -- 0. Detect user retry and consume the flag ------------------------
-        let user_requested_retry = self.user_retry_pending
-            || CascadeRouter::is_retry_request(user_message);
-        self.user_retry_pending = false;
+        // Only consume the retry flag if it was set by the same channel that
+        // is now calling chat().  This prevents a retry from one channel
+        // (e.g. Signal) being stolen by a different channel (e.g. Desktop).
+        let flag_matches_channel = self
+            .user_retry_pending
+            .map_or(false, |ch| ch == self.active_channel.kind);
+        let user_requested_retry =
+            flag_matches_channel || CascadeRouter::is_retry_request(user_message);
+        if flag_matches_channel {
+            self.user_retry_pending = None;
+        }
 
         // -- 0b. Semantic cache check -----------------------------------------
         // Skip cache for slash commands, when tools are available, and on retry.
@@ -1398,11 +1417,24 @@ mod tests {
 
     #[test]
     fn mark_user_retry_sets_flag() {
+        use aios_core::channel::ChannelKind;
+
         let mut mgr = LlmManager::new();
-        // Before marking, the flag is false (tested indirectly).
-        assert!(!mgr.user_retry_pending);
+        // Before marking, the flag is None.
+        assert!(mgr.user_retry_pending.is_none());
+        // Default active channel is Desktop.
         mgr.mark_user_retry();
-        assert!(mgr.user_retry_pending);
+        assert_eq!(mgr.user_retry_pending, Some(ChannelKind::Desktop));
+    }
+
+    #[test]
+    fn mark_user_retry_stores_active_channel() {
+        use aios_core::channel::{ChannelContext, ChannelKind};
+
+        let mut mgr = LlmManager::new();
+        mgr.set_active_channel(ChannelContext::new(ChannelKind::Signal));
+        mgr.mark_user_retry();
+        assert_eq!(mgr.user_retry_pending, Some(ChannelKind::Signal));
     }
 
     // -----------------------------------------------------------------------

@@ -13,8 +13,8 @@
   "boot.status.desktop": "Desktop",
   "boot.status.web_channel": "Web-Kanal",
   "boot.status.signal": "Signal",
-  "boot.status.llm_provider": "LLM-Anbieter",
-  "boot.status.backup": "Backup",
+  "boot.status.main_ai": "Haupt-KI",
+  "boot.status.summarizer": "Zusammenfasser",
   "boot.status.audio_output": "Audioausgabe (TTS)",
   "boot.status.audio_input": "Audioeingabe (STT)",
   "boot.status.keyboard": "Tastatur",
@@ -160,8 +160,6 @@
 
   "boot.status.disabled_web": "deaktiviert (/channel web on)",
   "boot.status.disabled_signal": "deaktiviert (/channel signal on)",
-  "boot.status.no_api_key_hint": "{provider} — **kein API-Schlüssel** (nutze /key)",
-  "boot.status.backup_available": "{provider} verfügbar",
 
   "app.no_api_key_warning": "Kein API-Schlüssel konfiguriert. Nutze **/key claude sk-ant-...** oder **/key openai sk-...**, um einen zu setzen.",
 

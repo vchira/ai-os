@@ -189,3 +189,121 @@ pub fn configured_display_names(config: &ConfigManager) -> Vec<String> {
 pub fn current_model(provider: &ProviderDef, config: &ConfigManager) -> String {
     config.get_str(provider.model_config, provider.default_model)
 }
+
+/// Look up the human-readable name for a model slug.
+///
+/// Searches all providers' model lists. Returns the slug itself if not found.
+pub fn model_human_name(slug: &str) -> String {
+    for prov in PROVIDERS {
+        for (human, model_slug) in prov.models {
+            if *model_slug == slug {
+                return human.to_string();
+            }
+        }
+    }
+    slug.to_string()
+}
+
+/// Mask an API key for display: show a recognizable prefix + last 4 chars.
+///
+/// Examples: `"sk-ant-...lwAA"`, `"gsk_...6xcR"`, `""` → `""`.
+pub fn mask_api_key(key: &str) -> String {
+    let len = key.len();
+    if len == 0 {
+        return String::new();
+    }
+    if len <= 8 {
+        return format!("...{key}");
+    }
+    // Find the last separator within the first 8 chars for a natural prefix break.
+    let prefix_end = key[..8]
+        .rfind(|c: char| c == '-' || c == '_')
+        .map(|i| i + 1) // include the separator
+        .unwrap_or(4);
+    let last4 = &key[len - 4..];
+    format!("{}...{}", &key[..prefix_end], last4)
+}
+
+/// Return display names for configured providers, excluding Ollama.
+pub fn configured_display_names_excluding_ollama(config: &ConfigManager) -> Vec<String> {
+    PROVIDERS
+        .iter()
+        .filter(|p| p.id != "ollama" && is_configured(p, config))
+        .map(|p| p.display_name.to_string())
+        .collect()
+}
+
+/// Return the base API URL for a provider.
+///
+/// For Claude, returns the Anthropic API base. For OpenAI-compatible providers,
+/// returns the base URL that `OpenAIProvider::with_base_url()` uses. The caller
+/// appends `/v1/messages` for Claude or `/v1/chat/completions` for others.
+pub fn provider_api_url(provider_id: &str) -> &'static str {
+    match provider_id {
+        "claude" => "https://api.anthropic.com",
+        "openai" => "https://api.openai.com",
+        "deepseek" => "https://api.deepseek.com",
+        "mistral" => "https://api.mistral.ai",
+        "groq" => "https://api.groq.com/openai",
+        "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai",
+        "ollama" => "http://localhost:11434",
+        _ => "",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_human_name_known() {
+        assert_eq!(model_human_name("deepseek-reasoner"), "DeepSeek Reasoner");
+        assert_eq!(model_human_name("claude-sonnet-4-20250514"), "Claude Sonnet 4");
+        assert_eq!(model_human_name("gpt-4o"), "GPT-4o");
+        assert_eq!(model_human_name("llama-3.1-8b-instant"), "Llama 3.1 8B");
+    }
+
+    #[test]
+    fn model_human_name_unknown() {
+        assert_eq!(model_human_name("some-unknown-model"), "some-unknown-model");
+    }
+
+    #[test]
+    fn mask_api_key_normal() {
+        assert_eq!(mask_api_key("sk-ant-FAKE-testkey1234abcdXXYY"), "sk-ant-...XXYY");
+        assert_eq!(mask_api_key("gsk_FAKE_TESTKEYabcdefghijklmnopqrstuvwxyz0123456789ABCD"), "gsk_...ABCD");
+    }
+
+    #[test]
+    fn mask_api_key_edge_cases() {
+        assert_eq!(mask_api_key(""), "");
+        assert_eq!(mask_api_key("abc"), "...abc");
+        assert_eq!(mask_api_key("abcdefgh"), "...abcdefgh"); // <= 8 chars
+    }
+
+    #[test]
+    fn configured_excluding_ollama() {
+        // Even with Ollama enabled in config, it should never appear.
+        let path = std::env::temp_dir().join("aios-test-excl-ollama.json");
+        let config = ConfigManager::with_path(path).unwrap();
+        let names = configured_display_names_excluding_ollama(&config);
+        assert!(!names.iter().any(|n| n == "Ollama"));
+    }
+
+    #[test]
+    fn provider_api_url_known() {
+        assert_eq!(provider_api_url("claude"), "https://api.anthropic.com");
+        assert_eq!(provider_api_url("deepseek"), "https://api.deepseek.com");
+        assert_eq!(provider_api_url("groq"), "https://api.groq.com/openai");
+        assert!(provider_api_url("gemini").contains("googleapis.com"));
+    }
+
+    #[test]
+    fn provider_api_url_unknown() {
+        assert_eq!(provider_api_url("nonexistent"), "");
+    }
+}

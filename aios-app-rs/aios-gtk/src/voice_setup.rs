@@ -88,6 +88,11 @@ pub(crate) fn setup_kws_and_voice(
     let kws_engine: Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> = {
         match aios_voice::KwsEngine::new(kws_models_dir) {
             Ok(mut engine) => {
+                // Apply configured threshold.
+                let threshold = state.borrow().config.get_f64("voice.wake_threshold", 0.5) as f32;
+                engine.set_threshold(threshold);
+                info!("KWS: threshold set to {threshold}");
+
                 load_wake_model(
                     &mut engine,
                     &wake_word_cfg.0,

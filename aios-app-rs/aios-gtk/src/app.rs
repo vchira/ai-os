@@ -151,6 +151,20 @@ impl AiosApp {
         let mut config = first_boot_flow::load_config();
         first_boot_flow::init_i18n(&config);
 
+        // Migrate legacy "auto" summary provider to explicit values.
+        {
+            let summary_prov = config.get_str("llm.tts_summary_provider", "");
+            if summary_prov == "auto" || summary_prov.is_empty() {
+                let main = config.get_str("llm.provider", "claude");
+                let main_model_key = format!("llm.{main}_model");
+                let main_model = config.get_str(&main_model_key, "");
+                let _ = config.set("llm.tts_summary_provider", serde_json::json!(main));
+                if !main_model.is_empty() {
+                    let _ = config.set("llm.tts_summary_model", serde_json::json!(main_model));
+                }
+            }
+        }
+
         // Initialize tools and LLM.
         let mut tools = ToolRegistry::new();
         tools.load_builtins();
@@ -168,8 +182,13 @@ impl AiosApp {
         let available_providers = Self::available_providers(&config);
         let provider_refs: Vec<&str> = available_providers.iter().map(|s| s.as_str()).collect();
 
+        let active_provider = crate::providers::find_by_id(
+            &config.get_str("llm.provider", "claude")
+        )
+        .map(|p| p.display_name)
+        .unwrap_or("Claude");
         let mw = main_window::build_main_window(
-            app, &chat_view, &prompt_input, &channel_overlay, &provider_refs,
+            app, &chat_view, &prompt_input, &channel_overlay, &provider_refs, active_provider,
         );
         let window = mw.window;
         let vu_meter_widget = mw.vu_meter;
@@ -454,9 +473,9 @@ impl AiosApp {
         command_handler::apply_theme(theme);
     }
 
-    /// Get list of available providers (those with API keys configured).
+    /// Get list of available providers (those with API keys configured, excluding Ollama).
     fn available_providers(config: &ConfigManager) -> Vec<String> {
-        crate::providers::configured_display_names(config)
+        crate::providers::configured_display_names_excluding_ollama(config)
     }
 
     /// Wire UiPanelTool and tool executor into the LLM manager.

@@ -94,7 +94,14 @@ const KEY_PLACEHOLDER: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\
 // ---------------------------------------------------------------------------
 
 /// Show the settings dialog as a modal window.
-pub fn show_settings(parent: &adw::ApplicationWindow, config: &ConfigManager) {
+///
+/// `on_close` is called when the dialog is closed, allowing the caller to
+/// refresh UI elements (e.g. the title bar provider dropdown) after changes.
+pub fn show_settings(
+    parent: &adw::ApplicationWindow,
+    config: &ConfigManager,
+    on_close: impl Fn() + 'static,
+) {
     let dialog = adw::PreferencesWindow::builder()
         .title("AiOS Settings")
         .transient_for(parent)
@@ -106,6 +113,11 @@ pub fn show_settings(parent: &adw::ApplicationWindow, config: &ConfigManager) {
     dialog.add(&build_voice_page(config));
     dialog.add(&build_system_page(config));
 
+    dialog.connect_close_request(move |_| {
+        on_close();
+        gtk::glib::Propagation::Proceed
+    });
+
     dialog.present();
 }
 
@@ -114,7 +126,10 @@ pub fn show_settings(parent: &adw::ApplicationWindow, config: &ConfigManager) {
 // ---------------------------------------------------------------------------
 
 fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
-    use crate::providers::{PROVIDERS, current_model};
+    use crate::providers::{
+        PROVIDERS, configured_display_names_excluding_ollama, find_by_display_name,
+        find_by_id, mask_api_key, is_configured,
+    };
 
     let page = adw::PreferencesPage::builder()
         .title("AI")
@@ -122,187 +137,319 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
         .build();
 
     // -----------------------------------------------------------------------
-    // Provider group — combo row with ALL provider ids.
+    // Section A: AI Model Assignment — Main AI + Summarizer
     // -----------------------------------------------------------------------
-    let provider_group = adw::PreferencesGroup::builder()
-        .title("LLM Provider")
+    let assign_group = adw::PreferencesGroup::builder()
+        .title("AI Model Assignment")
+        .description("Select provider and model for main AI and TTS summarizer")
         .build();
 
-    let provider_ids: Vec<&str> = PROVIDERS.iter().map(|p| p.id).collect();
-    let provider_list = gtk::StringList::new(&provider_ids);
-    let provider_row = adw::ComboRow::builder()
-        .title("Provider")
-        .subtitle("Active LLM provider")
-        .model(&provider_list)
+    let configured = configured_display_names_excluding_ollama(config);
+    let config_names: Vec<&str> = configured.iter().map(|s| s.as_str()).collect();
+
+    // -- Main AI provider + model --
+    let main_provider_list = gtk::StringList::new(&config_names);
+    let main_provider_row = adw::ComboRow::builder()
+        .title("Main AI")
+        .subtitle("Used for conversations and tool calls")
+        .model(&main_provider_list)
         .build();
-    let current = config.get_str("llm.provider", "claude");
-    let provider_idx = PROVIDERS
-        .iter()
-        .position(|p| p.id == current.as_str())
-        .unwrap_or(0) as u32;
-    provider_row.set_selected(provider_idx);
-    provider_group.add(&provider_row);
+    let main_prov_id = config.get_str("llm.provider", "claude");
+    let main_prov_display = find_by_id(&main_prov_id)
+        .map(|p| p.display_name)
+        .unwrap_or("Claude");
+    if let Some(idx) = config_names.iter().position(|n| *n == main_prov_display) {
+        main_provider_row.set_selected(idx as u32);
+    }
+    assign_group.add(&main_provider_row);
 
-    page.add(&provider_group);
+    // Main model dropdown — populated from selected provider's models.
+    let main_model_row = build_model_combo("Main Model", &main_prov_id, config);
+    assign_group.add(&main_model_row);
 
-    // -----------------------------------------------------------------------
-    // API Keys group — one PasswordEntryRow per provider that needs a key.
-    // -----------------------------------------------------------------------
-    let keys_group = adw::PreferencesGroup::builder()
-        .title("API Keys")
-        .description("Enter a new key to replace the existing one")
-        .build();
-
-    for prov in PROVIDERS.iter().filter(|p| p.needs_api_key) {
-        let title = format!("{} API Key", prov.display_name);
-        let key_row = adw::PasswordEntryRow::builder()
-            .title(&title)
-            .build();
-
-        let stored = config.get_str(prov.api_key_config, "");
-        if !stored.is_empty() {
-            key_row.set_text(KEY_PLACEHOLDER);
-        }
-        keys_group.add(&key_row);
-
-        // Save on change.
+    // Wire Main AI provider change → update model dropdown + config.
+    {
+        let model_row = main_model_row.clone();
         let config_dir = ConfigManager::default_config_dir();
-        let config_key = prov.api_key_config.to_string();
-        let row_ref = key_row.clone();
-        key_row.connect_changed(move |_| {
-            let text = row_ref.text().to_string();
-            if !text.is_empty() && text != KEY_PLACEHOLDER {
+        main_provider_row.connect_selected_notify(move |row| {
+            let sel = row.selected() as usize;
+            let model_ref = row.model().and_then(|m| m.downcast::<gtk::StringList>().ok());
+            let name = model_ref
+                .and_then(|sl| if sel < sl.n_items() as usize { sl.string(sel as u32).map(|s| s.to_string()) } else { None })
+                .unwrap_or_else(|| "Claude".to_string());
+            if let Some(prov) = find_by_display_name(&name) {
                 if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                    let _ = cfg.set(&config_key, serde_json::json!(text));
+                    let _ = cfg.set("llm.provider", serde_json::json!(prov.id));
+                }
+                // Update model dropdown.
+                let model_names: Vec<&str> = prov.models.iter().map(|(n, _)| *n).collect();
+                let new_model_list = gtk::StringList::new(&model_names);
+                model_row.set_model(Some(&new_model_list));
+                model_row.set_selected(0);
+                // Save default model.
+                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                    let _ = cfg.set(prov.model_config, serde_json::json!(prov.default_model));
                 }
             }
         });
     }
 
-    // Ollama enabled switch (no API key, just a toggle).
-    if let Some(ollama) = PROVIDERS.iter().find(|p| p.id == "ollama") {
-        let switch = gtk::Switch::new();
-        switch.set_active(config.get_bool(ollama.enabled_config, false));
-        switch.set_valign(gtk::Align::Center);
+    // Wire Main model change → config.
+    {
+        let prov_row = main_provider_row.clone();
+        let config_dir = ConfigManager::default_config_dir();
+        main_model_row.connect_selected_notify(move |row| {
+            let sel = row.selected() as usize;
+            // Find which provider is selected to get its model list.
+            let prov_sel = prov_row.selected() as usize;
+            let prov_model = prov_row.model().and_then(|m| m.downcast::<gtk::StringList>().ok());
+            let prov_name = prov_model
+                .and_then(|sl| if prov_sel < sl.n_items() as usize { sl.string(prov_sel as u32).map(|s| s.to_string()) } else { None })
+                .unwrap_or_default();
+            if let Some(prov) = find_by_display_name(&prov_name) {
+                if let Some((_, slug)) = prov.models.get(sel) {
+                    if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                        let _ = cfg.set(prov.model_config, serde_json::json!(slug));
+                    }
+                }
+            }
+        });
+    }
+
+    // -- Summarizer provider + model --
+    let sum_provider_list = gtk::StringList::new(&config_names);
+    let sum_provider_row = adw::ComboRow::builder()
+        .title("TTS Summarizer")
+        .subtitle("Generates one-sentence TTS summaries of long answers")
+        .model(&sum_provider_list)
+        .build();
+    let sum_prov_id = config.get_str("llm.tts_summary_provider", "claude");
+    let sum_prov_display = find_by_id(&sum_prov_id)
+        .map(|p| p.display_name)
+        .unwrap_or("Claude");
+    if let Some(idx) = config_names.iter().position(|n| *n == sum_prov_display) {
+        sum_provider_row.set_selected(idx as u32);
+    }
+    assign_group.add(&sum_provider_row);
+
+    let sum_model_slug = config.get_str("llm.tts_summary_model", "");
+    let sum_model_row = build_model_combo_for_summary(&sum_prov_id, &sum_model_slug);
+    assign_group.add(&sum_model_row);
+
+    // Wire Summarizer provider change → update model dropdown + config.
+    {
+        let model_row = sum_model_row.clone();
+        let config_dir = ConfigManager::default_config_dir();
+        sum_provider_row.connect_selected_notify(move |row| {
+            let sel = row.selected() as usize;
+            let model_ref = row.model().and_then(|m| m.downcast::<gtk::StringList>().ok());
+            let name = model_ref
+                .and_then(|sl| if sel < sl.n_items() as usize { sl.string(sel as u32).map(|s| s.to_string()) } else { None })
+                .unwrap_or_else(|| "Claude".to_string());
+            if let Some(prov) = find_by_display_name(&name) {
+                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                    let _ = cfg.set("llm.tts_summary_provider", serde_json::json!(prov.id));
+                }
+                let model_names: Vec<&str> = prov.models.iter().map(|(n, _)| *n).collect();
+                let new_model_list = gtk::StringList::new(&model_names);
+                model_row.set_model(Some(&new_model_list));
+                model_row.set_selected(0);
+                if let Some((_, slug)) = prov.models.first() {
+                    if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                        let _ = cfg.set("llm.tts_summary_model", serde_json::json!(slug));
+                    }
+                }
+            }
+        });
+    }
+
+    // Wire Summarizer model change → config.
+    {
+        let prov_row = sum_provider_row.clone();
+        let config_dir = ConfigManager::default_config_dir();
+        sum_model_row.connect_selected_notify(move |row| {
+            let sel = row.selected() as usize;
+            let prov_sel = prov_row.selected() as usize;
+            let prov_model = prov_row.model().and_then(|m| m.downcast::<gtk::StringList>().ok());
+            let prov_name = prov_model
+                .and_then(|sl| if prov_sel < sl.n_items() as usize { sl.string(prov_sel as u32).map(|s| s.to_string()) } else { None })
+                .unwrap_or_default();
+            if let Some(prov) = find_by_display_name(&prov_name) {
+                if let Some((_, slug)) = prov.models.get(sel) {
+                    if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                        let _ = cfg.set("llm.tts_summary_model", serde_json::json!(slug));
+                    }
+                }
+            }
+        });
+    }
+
+    page.add(&assign_group);
+
+    // -----------------------------------------------------------------------
+    // Section B: API Keys — only configured providers, with add/delete
+    // -----------------------------------------------------------------------
+    let keys_group = adw::PreferencesGroup::builder()
+        .title("API Keys")
+        .description("Configured provider API keys")
+        .build();
+
+    let main_prov_id_for_delete = config.get_str("llm.provider", "claude");
+    let sum_prov_id_for_delete = config.get_str("llm.tts_summary_provider", "claude");
+
+    for prov in PROVIDERS.iter().filter(|p| p.needs_api_key) {
+        let stored = config.get_str(prov.api_key_config, "");
+        if stored.is_empty() {
+            continue; // Only show configured keys.
+        }
+
+        let masked = mask_api_key(&stored);
         let row = adw::ActionRow::builder()
-            .title("Ollama (local)")
-            .subtitle("Enable local Ollama inference")
+            .title(prov.display_name)
+            .subtitle(&masked)
             .build();
-        row.add_suffix(&switch);
-        row.set_activatable_widget(Some(&switch));
-        keys_group.add(&row);
+
+        let delete_btn = gtk::Button::with_label("Delete");
+        delete_btn.add_css_class("destructive-action");
+        delete_btn.set_valign(gtk::Align::Center);
+
+        // Disable delete if in use by Main AI or Summarizer.
+        if prov.id == main_prov_id_for_delete.as_str() {
+            delete_btn.set_sensitive(false);
+            delete_btn.set_tooltip_text(Some("In use by Main AI"));
+        } else if prov.id == sum_prov_id_for_delete.as_str() {
+            delete_btn.set_sensitive(false);
+            delete_btn.set_tooltip_text(Some("In use by Summarizer"));
+        }
 
         let config_dir = ConfigManager::default_config_dir();
-        let enabled_key = ollama.enabled_config.to_string();
-        switch.connect_state_set(move |_, active| {
+        let key_config = prov.api_key_config.to_string();
+        delete_btn.connect_clicked(move |_btn| {
             if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                let _ = cfg.set(&enabled_key, serde_json::json!(active));
+                let _ = cfg.set(&key_config, serde_json::json!(""));
             }
-            gtk::glib::Propagation::Proceed
+        });
+
+        row.add_suffix(&delete_btn);
+        keys_group.add(&row);
+    }
+
+    // Inline add row — provider dropdown (unconfigured only) + key entry + save.
+    let unconfigured: Vec<&str> = PROVIDERS
+        .iter()
+        .filter(|p| p.needs_api_key && !is_configured(p, config))
+        .map(|p| p.display_name)
+        .collect();
+
+    if !unconfigured.is_empty() {
+        let add_prov_list = gtk::StringList::new(&unconfigured);
+        let add_prov_row = adw::ComboRow::builder()
+            .title("Add API Key")
+            .subtitle("Select a provider and enter the key")
+            .model(&add_prov_list)
+            .build();
+        keys_group.add(&add_prov_row);
+
+        let add_key_row = adw::PasswordEntryRow::builder()
+            .title("API Key")
+            .build();
+        keys_group.add(&add_key_row);
+
+        let save_btn = gtk::Button::with_label("Save");
+        save_btn.add_css_class("suggested-action");
+        save_btn.set_valign(gtk::Align::Center);
+
+        let save_row = adw::ActionRow::builder()
+            .title("")
+            .build();
+        save_row.add_suffix(&save_btn);
+        keys_group.add(&save_row);
+
+        let prov_combo = add_prov_row.clone();
+        let key_entry = add_key_row.clone();
+        let config_dir = ConfigManager::default_config_dir();
+        save_btn.connect_clicked(move |_| {
+            let sel = prov_combo.selected() as usize;
+            let prov_model = prov_combo.model().and_then(|m| m.downcast::<gtk::StringList>().ok());
+            let prov_name = prov_model
+                .and_then(|sl| if sel < sl.n_items() as usize { sl.string(sel as u32).map(|s| s.to_string()) } else { None })
+                .unwrap_or_default();
+            let key_text = key_entry.text().to_string();
+            if key_text.is_empty() || key_text == KEY_PLACEHOLDER {
+                return;
+            }
+            if let Some(prov) = find_by_display_name(&prov_name) {
+                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                    let _ = cfg.set(prov.api_key_config, serde_json::json!(key_text));
+                }
+            }
+            key_entry.set_text("");
         });
     }
 
     page.add(&keys_group);
 
     // -----------------------------------------------------------------------
-    // Models group — one ComboRow per provider.
+    // Section C: Custom AI Instructions
     // -----------------------------------------------------------------------
-    let models_group = adw::PreferencesGroup::builder()
-        .title("Models")
+    let instructions_group = adw::PreferencesGroup::builder()
+        .title("Custom AI Instructions")
+        .description("Extra instructions added to every conversation")
         .build();
-
-    for prov in PROVIDERS {
-        if prov.models.is_empty() {
-            continue;
-        }
-        let title = format!("{} Model", prov.display_name);
-        let model_names: Vec<&str> = prov.models.iter().map(|(name, _)| *name).collect();
-        let model_list = gtk::StringList::new(&model_names);
-        let model_row = adw::ComboRow::builder()
-            .title(&title)
-            .model(&model_list)
-            .build();
-
-        let cur = current_model(prov, config);
-        let idx = prov
-            .models
-            .iter()
-            .position(|(_, slug)| *slug == cur.as_str())
-            .unwrap_or(0) as u32;
-        model_row.set_selected(idx);
-        models_group.add(&model_row);
-
-        // Save on change.
-        let config_dir = ConfigManager::default_config_dir();
-        let model_config_key = prov.model_config.to_string();
-        let models_ref: Vec<(&str, &str)> = prov.models.to_vec();
-        model_row.connect_selected_notify(move |row| {
-            let sel = row.selected() as usize;
-            if let Some((_, slug)) = models_ref.get(sel) {
-                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                    let _ = cfg.set(&model_config_key, serde_json::json!(slug));
-                }
-            }
-        });
-    }
 
     let system_prompt_row = adw::EntryRow::builder()
         .title("Custom AI Instructions")
         .build();
     system_prompt_row.set_text(&config.get_str("llm.extra_system_prompt", ""));
     system_prompt_row.set_tooltip_text(Some(
-        "Extra instructions added to every AI conversation.\n\
-         e.g., 'Always respond in German' or 'Be concise'"
+        "e.g., 'Always respond in German' or 'Be concise'"
     ));
-    models_group.add(&system_prompt_row);
+    instructions_group.add(&system_prompt_row);
 
-    page.add(&models_group);
+    {
+        let config_dir = ConfigManager::default_config_dir();
+        system_prompt_row.connect_changed(move |row| {
+            let text = row.text().to_string();
+            if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                let _ = cfg.set("llm.extra_system_prompt", serde_json::json!(text));
+            }
+        });
+    }
 
-    // -----------------------------------------------------------------------
-    // AI Model Assignment — show Main AI and Summarizer selections.
-    // -----------------------------------------------------------------------
-    let assign_group = adw::PreferencesGroup::builder()
-        .title("AI Model Assignment")
-        .description("Which provider/model to use for main AI and TTS summarizer")
-        .build();
-
-    // Main AI — currently the active provider + its model.
-    let main_provider_display = crate::providers::find_by_id(&config.get_str("llm.provider", "claude"))
-        .map(|p| p.display_name)
-        .unwrap_or("claude");
-    let main_model = crate::providers::find_by_id(&config.get_str("llm.provider", "claude"))
-        .map(|p| current_model(p, config))
-        .unwrap_or_default();
-    let main_row = adw::ActionRow::builder()
-        .title("Main AI")
-        .subtitle(format!("{main_provider_display} \u{2014} {main_model}"))
-        .build();
-    assign_group.add(&main_row);
-
-    // TTS Summarizer.
-    let summary_provider = config.get_str("llm.tts_summary_provider", "");
-    let summary_model = config.get_str("llm.tts_summary_model", "");
-    let summary_text = if summary_provider.is_empty() {
-        "Same as Main AI".to_string()
-    } else {
-        let display = crate::providers::find_by_id(&summary_provider)
-            .map(|p| p.display_name)
-            .unwrap_or(summary_provider.as_str());
-        if summary_model.is_empty() {
-            display.to_string()
-        } else {
-            format!("{display} \u{2014} {summary_model}")
-        }
-    };
-    let summary_row = adw::ActionRow::builder()
-        .title("TTS Summarizer")
-        .subtitle(&summary_text)
-        .build();
-    assign_group.add(&summary_row);
-
-    page.add(&assign_group);
+    page.add(&instructions_group);
 
     page
+}
+
+/// Build a model ComboRow for the Main AI, selecting the current model.
+fn build_model_combo(title: &str, provider_id: &str, config: &ConfigManager) -> adw::ComboRow {
+    use crate::providers::{find_by_id, current_model};
+
+    let row = adw::ComboRow::builder().title(title).build();
+    if let Some(prov) = find_by_id(provider_id) {
+        let model_names: Vec<&str> = prov.models.iter().map(|(name, _)| *name).collect();
+        let model_list = gtk::StringList::new(&model_names);
+        row.set_model(Some(&model_list));
+        let cur = current_model(prov, config);
+        let idx = prov.models.iter().position(|(_, slug)| *slug == cur.as_str()).unwrap_or(0);
+        row.set_selected(idx as u32);
+    }
+    row
+}
+
+/// Build a model ComboRow for the Summarizer, selecting by slug.
+fn build_model_combo_for_summary(provider_id: &str, model_slug: &str) -> adw::ComboRow {
+    use crate::providers::find_by_id;
+
+    let row = adw::ComboRow::builder().title("Summarizer Model").build();
+    if let Some(prov) = find_by_id(provider_id) {
+        let model_names: Vec<&str> = prov.models.iter().map(|(name, _)| *name).collect();
+        let model_list = gtk::StringList::new(&model_names);
+        row.set_model(Some(&model_list));
+        let idx = prov.models.iter().position(|(_, slug)| *slug == model_slug).unwrap_or(0);
+        row.set_selected(idx as u32);
+    }
+    row
 }
 
 // ---------------------------------------------------------------------------

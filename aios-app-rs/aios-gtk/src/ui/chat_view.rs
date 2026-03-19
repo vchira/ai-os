@@ -181,77 +181,46 @@ impl ChatView {
 
             // Stop-reading button for assistant messages.
             if role == "assistant" {
-                let stop_btn = gtk::Button::from_icon_name("audio-volume-muted-symbolic");
-                stop_btn.add_css_class("flat");
-                stop_btn.add_css_class("circular");
-                stop_btn.set_tooltip_text(Some("Stop reading"));
-                stop_btn.connect_clicked(|_btn| {
-                    // Kill TTS processes in a background thread to avoid
-                    // blocking the GTK main loop (same as stop_tts() in tts.rs).
-                    std::thread::spawn(|| {
-                        let _ = std::process::Command::new("pkill")
-                            .args(["-f", "piper"])
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status();
-                        let _ = std::process::Command::new("pkill")
-                            .args(["-f", "espeak-ng"])
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status();
-                        let _ = std::process::Command::new("pkill")
-                            .args(["-f", "aplay.*raw"])
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status();
-                    });
-                });
-                role_row.append(&stop_btn);
+                role_row.append(&build_stop_reading_button());
             }
 
             row.append(&role_row);
         }
 
-        // Message bubble.
-        let bubble = gtk::Box::new(Orientation::Vertical, 4);
-        bubble.add_css_class("message-bubble");
-
-        // Split content by code blocks (```...```).
-        let parts = split_code_blocks(content);
-        for part in parts {
-            match part {
-                ContentPart::Text(text) => {
-                    if !text.is_empty() {
-                        // Convert rich text markup (**bold**, *italic*, etc.) to Pango.
-                        let pango = aios_core::types::to_pango(&text);
-                        let label = gtk::Label::new(None);
-                        label.set_markup(&pango);
-                        label.set_wrap(true);
-                        label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-                        label.set_xalign(0.0);
-                        label.set_selectable(true);
-                        bubble.append(&label);
-                    }
-                }
-                ContentPart::Code(code) => {
-                    let frame = gtk::Frame::new(None);
-                    frame.add_css_class("code-block");
-
-                    let code_label = gtk::Label::new(Some(&code));
-                    code_label.set_wrap(true);
-                    code_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-                    code_label.set_xalign(0.0);
-                    code_label.set_selectable(true);
-
-                    frame.set_child(Some(&code_label));
-                    bubble.append(&frame);
-                }
-            }
-        }
-
-        row.append(&bubble);
+        row.append(&build_message_bubble(content));
         self.container.append(&row);
 
+        self.scroll_to_bottom();
+    }
+
+    /// Append an assistant message with model attribution in the role label.
+    ///
+    /// Renders as: "Assistant — DeepSeek Reasoner" or with summarizer in parens.
+    pub fn add_assistant_message(&self, content: &str, model_label: &str) {
+        let row = gtk::Box::new(Orientation::Vertical, 2);
+        row.add_css_class("message-row");
+        row.add_css_class("message-assistant");
+
+        row.set_halign(Align::Start);
+        row.set_margin_start(0);
+        row.set_margin_end(60);
+        row.set_hexpand(true);
+
+        // Role label with model attribution.
+        let role_row = gtk::Box::new(Orientation::Horizontal, 4);
+        role_row.set_halign(Align::Start);
+
+        let display_name = ASSISTANT_NAME.with(|n| n.borrow().clone());
+        let full_label = format!("{display_name} \u{2014} {model_label}");
+        let role_label = gtk::Label::new(Some(&full_label));
+        role_label.add_css_class("message-role-label");
+        role_row.append(&role_label);
+
+        role_row.append(&build_stop_reading_button());
+        row.append(&role_row);
+
+        row.append(&build_message_bubble(content));
+        self.container.append(&row);
         self.scroll_to_bottom();
     }
 
@@ -760,6 +729,71 @@ fn split_code_blocks(content: &str) -> Vec<ContentPart> {
 
     // If nothing was parsed (empty input), return empty.
     parts
+}
+
+/// Build a message bubble with code block detection.
+fn build_message_bubble(content: &str) -> gtk::Box {
+    let bubble = gtk::Box::new(Orientation::Vertical, 4);
+    bubble.add_css_class("message-bubble");
+
+    let parts = split_code_blocks(content);
+    for part in parts {
+        match part {
+            ContentPart::Text(text) => {
+                if !text.is_empty() {
+                    let pango = aios_core::types::to_pango(&text);
+                    let label = gtk::Label::new(None);
+                    label.set_markup(&pango);
+                    label.set_wrap(true);
+                    label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+                    label.set_xalign(0.0);
+                    label.set_selectable(true);
+                    bubble.append(&label);
+                }
+            }
+            ContentPart::Code(code) => {
+                let frame = gtk::Frame::new(None);
+                frame.add_css_class("code-block");
+                let code_label = gtk::Label::new(Some(&code));
+                code_label.set_wrap(true);
+                code_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+                code_label.set_xalign(0.0);
+                code_label.set_selectable(true);
+                frame.set_child(Some(&code_label));
+                bubble.append(&frame);
+            }
+        }
+    }
+
+    bubble
+}
+
+/// Build the stop-reading button that kills TTS processes.
+fn build_stop_reading_button() -> gtk::Button {
+    let stop_btn = gtk::Button::from_icon_name("audio-volume-muted-symbolic");
+    stop_btn.add_css_class("flat");
+    stop_btn.add_css_class("circular");
+    stop_btn.set_tooltip_text(Some("Stop reading"));
+    stop_btn.connect_clicked(|_btn| {
+        std::thread::spawn(|| {
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "piper"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "espeak-ng"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = std::process::Command::new("pkill")
+                .args(["-f", "aplay.*raw"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        });
+    });
+    stop_btn
 }
 
 /// Human-friendly display name for a role.

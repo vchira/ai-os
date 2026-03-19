@@ -54,48 +54,47 @@ pub(crate) fn build_boot_status(config: &ConfigManager) -> String {
         ));
     }
 
-    // -- LLM Provider + Model --
-    let provider_id = config.get_str("llm.provider", "claude");
-    let active_def = crate::providers::find_by_id(&provider_id);
-    let has_key = active_def
+    // -- Main AI --
+    let main_provider_id = config.get_str("llm.provider", "claude");
+    let main_def = crate::providers::find_by_id(&main_provider_id);
+    let main_has_key = main_def
         .map(|p| crate::providers::is_configured(p, config))
         .unwrap_or(false);
-    let model = active_def
+    let main_model = main_def
         .map(|p| crate::providers::current_model(p, config))
-        .unwrap_or_else(|| provider_id.clone());
-    let display = active_def
+        .unwrap_or_else(|| main_provider_id.clone());
+    let main_display = main_def
         .map(|p| p.display_name)
-        .unwrap_or_else(|| provider_id.as_str());
-    if has_key {
-        status.add(StatusLine::new(
-            &t("boot.status.llm_provider"),
-            true,
-            format!("{display} ({model})"),
-        ));
-    } else {
-        status.add(StatusLine::new(
-            &t("boot.status.llm_provider"),
-            false,
-            t_fmt("boot.status.no_api_key_hint", &[("provider", display)]),
-        ));
-    }
+        .unwrap_or_else(|| main_provider_id.as_str());
+    status.add(StatusLine::new(
+        &t("boot.status.main_ai"),
+        main_has_key,
+        if main_has_key {
+            format!("{main_display} ({main_model})")
+        } else {
+            t("boot.status.no_api_key").to_string()
+        },
+    ));
 
-    // Show backup providers — any configured provider that is not the active one.
-    for p in crate::providers::PROVIDERS {
-        if p.id == provider_id {
-            continue;
-        }
-        if crate::providers::is_configured(p, config) {
-            status.add(StatusLine::new(
-                &t("boot.status.backup"),
-                true,
-                t_fmt(
-                    "boot.status.backup_available",
-                    &[("provider", p.display_name)],
-                ),
-            ));
-        }
-    }
+    // -- Summarizer --
+    let sum_provider_id = config.get_str("llm.tts_summary_provider", "claude");
+    let sum_def = crate::providers::find_by_id(&sum_provider_id);
+    let sum_has_key = sum_def
+        .map(|p| crate::providers::is_configured(p, config))
+        .unwrap_or(false);
+    let sum_model = config.get_str("llm.tts_summary_model", "");
+    let sum_display = sum_def
+        .map(|p| p.display_name)
+        .unwrap_or_else(|| sum_provider_id.as_str());
+    status.add(StatusLine::new(
+        &t("boot.status.summarizer"),
+        sum_has_key,
+        if sum_has_key {
+            format!("{sum_display} ({sum_model})")
+        } else {
+            t("boot.status.no_api_key").to_string()
+        },
+    ));
 
     // -- Voice --
     let stt = config.get_bool("voice.stt_enabled", true);

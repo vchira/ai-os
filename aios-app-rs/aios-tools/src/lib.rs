@@ -42,9 +42,13 @@ pub use registry::ToolRegistry;
 pub use sandbox::{Sandbox, SandboxType};
 pub use tool::Tool;
 
-/// Return the user's home directory, falling back to `/tmp`.
+/// Return the user's home directory, falling back to `/home/aios`.
+///
+/// The fallback is the AiOS default user's home directory, which is
+/// guaranteed to exist on the target system.  We never fall back to
+/// `/tmp` because that is ephemeral and would silently lose data.
 pub fn home_dir() -> std::path::PathBuf {
     directories::BaseDirs::new()
         .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
 }

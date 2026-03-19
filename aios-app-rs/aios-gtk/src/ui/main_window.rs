@@ -251,6 +251,7 @@ pub fn build_main_window(
     prompt_input: &PromptInput,
     channel_overlay: &ChannelOverlay,
     available_providers: &[&str],
+    active_provider: &str,
 ) -> MainWindowResult {
     // Load CSS.
     let css_provider = gtk::CssProvider::new();
@@ -307,6 +308,10 @@ pub fn build_main_window(
     let provider_dropdown = gtk::DropDown::new(Some(provider_model), gtk::Expression::NONE);
     provider_dropdown.set_widget_name(PROVIDER_DROPDOWN_NAME);
     provider_dropdown.set_tooltip_text(Some("Select LLM provider"));
+    // Select the active provider.
+    if let Some(idx) = provider_names.iter().position(|n| *n == active_provider) {
+        provider_dropdown.set_selected(idx as u32);
+    }
     header.pack_start(&provider_dropdown);
 
     // Right side buttons — using helper to avoid duplication.

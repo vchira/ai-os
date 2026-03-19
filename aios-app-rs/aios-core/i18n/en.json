@@ -13,8 +13,8 @@
   "boot.status.desktop": "Desktop",
   "boot.status.web_channel": "Web Channel",
   "boot.status.signal": "Signal",
-  "boot.status.llm_provider": "LLM Provider",
-  "boot.status.backup": "Backup",
+  "boot.status.main_ai": "Main AI",
+  "boot.status.summarizer": "Summarizer",
   "boot.status.audio_output": "Audio Output (TTS)",
   "boot.status.audio_input": "Audio Input (STT)",
   "boot.status.keyboard": "Keyboard",
@@ -160,8 +160,6 @@
 
   "boot.status.disabled_web": "disabled (/channel web on)",
   "boot.status.disabled_signal": "disabled (/channel signal on)",
-  "boot.status.no_api_key_hint": "{provider} — **no API key** (use /key)",
-  "boot.status.backup_available": "{provider} available",
 
   "app.no_api_key_warning": "No API key configured. Use **/key claude sk-ant-...** or **/key openai sk-...** to set one.",
 

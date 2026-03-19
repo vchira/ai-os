@@ -194,11 +194,18 @@ impl KwsEngine {
         last_result
     }
 
-    /// Clear all internal buffers to start fresh.
+    /// Clear all internal buffers and pre-fill the embedding buffer with
+    /// zero vectors so that the wake word model can start running as soon as
+    /// the first real embedding arrives (no 16-embedding warm-up delay).
     pub fn reset(&mut self) {
         self.audio_buf.clear();
         self.mel_buf.clear();
         self.emb_buf.clear();
+        // Pre-fill with silence embeddings so run_wake() can execute immediately
+        // once real audio starts arriving.
+        for _ in 0..MAX_EMBEDDINGS {
+            self.emb_buf.push(vec![0.0; 96]);
+        }
     }
 
     /// Whether a wake word model is currently loaded.

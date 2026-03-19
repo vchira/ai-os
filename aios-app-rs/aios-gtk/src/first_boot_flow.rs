@@ -64,6 +64,7 @@ pub(crate) fn run_first_boot_setup(
         &prompt_input,
         &channel_overlay,
         &[&t("setup.window_title")],
+        &t("setup.window_title"),
     );
     let window = mw.window;
     let vu_meter_ref = mw.vu_meter;
@@ -307,12 +308,16 @@ pub(crate) fn apply_autoconfig(
     aios_core::i18n::init();
     aios_core::i18n::set_language(&auto.system.language);
 
+    let active_display = crate::providers::find_by_id(&auto.provider.primary)
+        .map(|p| p.display_name)
+        .unwrap_or("AiOS");
     let mw = main_window::build_main_window(
         app,
         &chat_view,
         &prompt_input,
         &channel_overlay,
         &["AiOS"],
+        active_display,
     );
     let window = mw.window;
     let vu_meter_autoconfig = mw.vu_meter;
@@ -365,9 +370,30 @@ pub(crate) fn apply_autoconfig(
     .collect::<Vec<_>>()
     .join("\n");
 
+    // Resolve Main AI and Summarizer display info.
+    let main_prov_display = crate::providers::find_by_id(&auto.ai.main_provider)
+        .map(|p| p.display_name)
+        .unwrap_or(auto.ai.main_provider.as_str());
+    let main_model_human = crate::providers::model_human_name(&auto.ai.main_model);
+    let sum_prov_id = if auto.ai.summary_provider.is_empty() {
+        &auto.ai.main_provider
+    } else {
+        &auto.ai.summary_provider
+    };
+    let sum_model_id = if auto.ai.summary_model.is_empty() {
+        &auto.ai.main_model
+    } else {
+        &auto.ai.summary_model
+    };
+    let sum_prov_display = crate::providers::find_by_id(sum_prov_id)
+        .map(|p| p.display_name)
+        .unwrap_or(sum_prov_id.as_str());
+    let sum_model_human = crate::providers::model_human_name(sum_model_id);
+
     let autoconfig_msg = format!(
         "**Autoconfig detected** \u{2014} applying unattended configuration:\n\n\
-         **Provider:** {}\n\
+         **Main AI:** {main_prov_display} \u{2014} {main_model_human}\n\
+         **Summarizer:** {sum_prov_display} \u{2014} {sum_model_human}\n\
          {api_key_lines}\n\
          **Keyboard:** {}\n\
          **Language:** {}\n\
@@ -376,7 +402,6 @@ pub(crate) fn apply_autoconfig(
          **Password:** ****\n\
          **Install to disk:** {}\n\
          **Assistant name:** {}",
-        auto.provider.primary,
         auto.system.keyboard,
         auto.system.language,
         if auto.system.timezone.is_empty() {
@@ -449,10 +474,19 @@ pub(crate) fn apply_autoconfig(
         let model_key = format!("llm.{main_provider}_model");
         let _ = config.set(&model_key, serde_json::json!(auto.ai.main_model));
     }
-    if !auto.ai.summary_provider.is_empty() {
+    // Always set summarizer — fall back to main provider if not specified.
+    if auto.ai.summary_provider.is_empty() {
+        let _ = config.set("llm.tts_summary_provider", serde_json::json!(main_provider));
+        let main_model = if auto.ai.main_model.is_empty() {
+            crate::providers::find_by_id(main_provider)
+                .map(|p| p.default_model.to_string())
+                .unwrap_or_default()
+        } else {
+            auto.ai.main_model.clone()
+        };
+        let _ = config.set("llm.tts_summary_model", serde_json::json!(main_model));
+    } else {
         let _ = config.set("llm.tts_summary_provider", serde_json::json!(auto.ai.summary_provider));
-    }
-    if !auto.ai.summary_model.is_empty() {
         let _ = config.set("llm.tts_summary_model", serde_json::json!(auto.ai.summary_model));
     }
 
@@ -469,8 +503,9 @@ pub(crate) fn apply_autoconfig(
         &format!(
             "**Autoconfig applied successfully!**\n\n\
              Vault created, API keys stored, system configured.\n\
-             Provider: **{}** | Keyboard: **{}** | Mode: **{}**",
-            auto.provider.primary,
+             Main AI: **{main_prov_display} \u{2014} {main_model_human}** | \
+             Summarizer: **{sum_prov_display} \u{2014} {sum_model_human}** | \
+             Keyboard: **{}** | Mode: **{}**",
             auto.system.keyboard,
             if auto.install.enabled {
                 "hard drive install"
@@ -627,9 +662,19 @@ pub(crate) fn connect_common_signals(
     // Settings button.
     let state_ref = state.clone();
     let win_ref = window.clone();
+    let win_for_refresh = window.clone();
     main_window::connect_settings_button(window, move || {
         let s = state_ref.borrow();
-        settings_dialog::show_settings(&win_ref, &s.config);
+        let refresh_win = win_for_refresh.clone();
+        settings_dialog::show_settings(&win_ref, &s.config, move || {
+            // Refresh title bar provider dropdown after settings close.
+            let config_dir = ConfigManager::default_config_dir();
+            if let Ok(cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                let names = crate::providers::configured_display_names_excluding_ollama(&cfg);
+                let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+                main_window::update_provider_dropdown(&refresh_win, &name_refs);
+            }
+        });
     });
 
     // Info button — opens tabbed info dialog (Costs + About).

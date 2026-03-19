@@ -15,6 +15,27 @@ use crate::tts::{speak_if_enabled_with_signal, stop_tts};
 use crate::ui::chat_view::ChatView;
 use crate::ui::prompt_input::PromptInput;
 
+/// Build the model attribution label from config.
+///
+/// Returns e.g. "DeepSeek Reasoner" or "DeepSeek Reasoner (Llama 3.1 8B)"
+/// if the summarizer differs from the main model.
+fn build_model_label(config: &aios_core::config::ConfigManager) -> String {
+    let provider_id = config.get_str("llm.provider", "claude");
+    let model_key = format!("llm.{provider_id}_model");
+    let model_slug = config.get_str(&model_key, "");
+    let main_name = crate::providers::model_human_name(&model_slug);
+
+    let sum_provider = config.get_str("llm.tts_summary_provider", "");
+    let sum_model = config.get_str("llm.tts_summary_model", "");
+
+    if !sum_provider.is_empty() && (sum_provider != provider_id || sum_model != model_slug) {
+        let sum_name = crate::providers::model_human_name(&sum_model);
+        format!("{main_name} ({sum_name})")
+    } else {
+        main_name
+    }
+}
+
 /// Internal result type for async LLM communication.
 pub(crate) enum LlmResult {
     Success {
@@ -223,12 +244,18 @@ pub(crate) fn send_to_llm<S: LlmState + 'static>(
                 let cv = chat_view_ref.clone();
                 let handle = thinking_handle.clone();
                 let content_for_display = content.clone();
+                let state_for_label = state_ref.clone();
                 glib::timeout_add_local(
                     std::time::Duration::from_millis(30),
                     move || {
                         if tts_flag.load(std::sync::atomic::Ordering::Relaxed) {
                             cv.remove_thinking(&handle);
-                            cv.add_message("assistant", &content_for_display);
+                            let model_label = {
+                                let s = state_for_label.borrow();
+                                let cfg = s.config_snapshot();
+                                build_model_label(&cfg)
+                            };
+                            cv.add_assistant_message(&content_for_display, &model_label);
                             glib::ControlFlow::Break
                         } else {
                             glib::ControlFlow::Continue
@@ -342,7 +369,14 @@ pub(crate) fn handle_remote_llm_message<S: LlmState + 'static>(
                 content,
                 updated_history,
             }) => {
-                chat_for_resp.add_message("assistant", &content);
+                {
+                    let model_label = {
+                        let s = state_for_resp.borrow();
+                        let cfg = s.config_snapshot();
+                        build_model_label(&cfg)
+                    };
+                    chat_for_resp.add_assistant_message(&content, &model_label);
+                }
                 {
                     let s = state_for_resp.borrow();
                     let cfg = s.config_snapshot();
