@@ -269,13 +269,22 @@ impl KwsEngine {
     }
 
     /// Run the embedding model on the accumulated mel features.
+    ///
+    /// Mel output per chunk is [1,1,5,32] = 160 values = 5 frames × 32 features.
+    /// Embedding expects [1, n_frames, 32] where n_frames = n_chunks * 5.
     fn run_embedding(&mut self) -> Result<Vec<f32>, VoiceError> {
-        // Flatten all mel frames into a single contiguous buffer and present
-        // as shape [1, total_features].
         let flat: Vec<f32> = self.mel_buf.iter().flat_map(|f| f.iter().copied()).collect();
-        let total = flat.len();
+        let n_frames = self.mel_buf.len() * 5; // each chunk produces 5 mel frames
+        let feat_dim = 32;
 
-        let input = tract_ndarray::Array2::from_shape_vec((1, total), flat)
+        if flat.len() != n_frames * feat_dim {
+            return Err(VoiceError::Kws(format!(
+                "mel buffer mismatch: {} values, expected {}x{}={}",
+                flat.len(), n_frames, feat_dim, n_frames * feat_dim
+            )));
+        }
+
+        let input = tract_ndarray::Array3::from_shape_vec((1, n_frames, feat_dim), flat)
             .map_err(|e| VoiceError::Kws(format!("emb input tensor: {e}")))?;
 
         let outputs = self
@@ -283,6 +292,7 @@ impl KwsEngine {
             .run(tvec![input.into_tvalue()])
             .map_err(|e| VoiceError::Kws(format!("emb inference: {e}")))?;
 
+        // Output is [N, 1, 1, 96] — flatten to a single 96-dim embedding vector
         let data = outputs[0]
             .to_array_view::<f32>()
             .map_err(|e| VoiceError::Kws(format!("emb output extract: {e}")))?;
@@ -290,20 +300,32 @@ impl KwsEngine {
         Ok(data.iter().copied().collect())
     }
 
-    /// Run the wake word model on the latest embedding.
+    /// Run the wake word model on accumulated embeddings.
+    ///
+    /// Wake model expects [1, 16, 96] — 16 embeddings of 96 dims each.
     fn run_wake(&mut self) -> Result<f32, VoiceError> {
         let plan = self
             .wake_plan
             .as_ref()
             .ok_or_else(|| VoiceError::Kws("no wake model loaded".into()))?;
 
-        let embedding = self
-            .emb_buf
-            .last()
-            .ok_or_else(|| VoiceError::Kws("no embeddings available".into()))?;
+        // Need exactly 16 embeddings of 96 dims
+        if self.emb_buf.len() < 16 {
+            return Ok(0.0); // Not enough embeddings yet
+        }
 
-        let emb_len = embedding.len();
-        let input = tract_ndarray::Array2::from_shape_vec((1, emb_len), embedding.clone())
+        // Take the last 16 embeddings, each should be 96 dims
+        let recent: Vec<f32> = self.emb_buf[self.emb_buf.len()-16..]
+            .iter()
+            .flat_map(|e| {
+                // Each embedding might be >96 dims (multiple from one inference)
+                // Take the last 96 values
+                if e.len() >= 96 { e[e.len()-96..].to_vec() }
+                else { let mut v = vec![0.0; 96]; v[..e.len()].copy_from_slice(e); v }
+            })
+            .collect();
+
+        let input = tract_ndarray::Array3::from_shape_vec((1, 16, 96), recent)
             .map_err(|e| VoiceError::Kws(format!("wake input tensor: {e}")))?;
 
         let outputs = plan
