@@ -490,6 +490,13 @@ impl LlmManager {
              - When the user asks what you remember, or asks about something they previously told \
              you to remember, use the 'memory' tool with action 'recall' or 'list_keys'.\n\
              - When the user asks you to forget something, use the 'memory' tool with action 'forget'.\n\
+             - CREDENTIALS AND SECRETS: When the user provides a password, app password, API key, \
+             login credential, or any sensitive value during a task, ALWAYS store it immediately \
+             using the 'memory' tool with action 'memorize'. Use a descriptive key like \
+             'gmail_app_password' or 'ssh_key_server1'. This way you never need to ask again. \
+             The memory store is encrypted (AES-256-GCM) — it is safe for secrets.\n\
+             - Before asking the user for a credential, ALWAYS check if you already have it stored \
+             by using 'memory' with action 'recall' first.\n\
              - Always use tools to perform actions. Never claim to have done something without \
              actually calling the appropriate tool."
                 .to_string(),
