@@ -171,7 +171,7 @@ pub(crate) fn start_voice_listener(
                             vad.reset();
                         }
                     } else if has_kws_model {
-                        // KWS path: feed audio to ONNX engine
+                        // KWS path: feed audio to ONNX engine + Whisper fallback
                         for &s in &samples {
                             if ring_buf.len() >= RING_BUFFER_CAPACITY {
                                 ring_buf.pop_front();
@@ -179,7 +179,7 @@ pub(crate) fn start_voice_listener(
                             ring_buf.push_back(s);
                         }
 
-                        let result = kws_engine
+                        let mut result = kws_engine
                             .lock()
                             .map(|mut e| {
                                 e.as_mut()
@@ -193,6 +193,45 @@ pub(crate) fn start_voice_listener(
                                 confidence: 0.0,
                                 triggered: false,
                             });
+
+                        // Log KWS confidence periodically for debugging.
+                        if frame % 100 == 0 && result.confidence > 0.01 {
+                            debug!("KWS confidence: {:.3} (threshold triggers at >=0.5)", result.confidence);
+                        }
+
+                        // Parallel Whisper fallback: also accumulate speech for
+                        // keyword matching, in case the KWS model misses.
+                        for chunk in samples.chunks(DEFAULT_FRAME_SIZE) {
+                            let is_active = vad.process_frame(chunk);
+                            if is_active {
+                                speech_buffer.extend_from_slice(chunk);
+                            } else if was_active && !is_active {
+                                let audio_duration = speech_buffer.len() as f32 / 16000.0;
+                                if audio_duration > 0.3 && audio_duration < 5.0 {
+                                    // Quick Whisper check for wake word
+                                    match transcribe_with_whisper(&speech_buffer) {
+                                        Ok(text) if !text.is_empty() => {
+                                            if wake_detector.matches_wake_word(&text) {
+                                                info!("Voice listener: wake word via Whisper fallback: \"{}\"", &text[..text.len().min(50)]);
+                                                result = aios_voice::KwsResult {
+                                                    confidence: 1.0,
+                                                    triggered: true,
+                                                };
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                speech_buffer.clear();
+                            }
+                            was_active = is_active;
+                        }
+
+                        // Cap speech buffer
+                        if speech_buffer.len() > 16000 * 5 {
+                            speech_buffer.clear();
+                            vad.reset();
+                        }
 
                         if result.triggered {
                             info!(
