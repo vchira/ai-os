@@ -334,6 +334,15 @@ impl OpenAIProvider {
     }
 
     /// Return the effective max_tokens for the current effort level.
+    /// Check if a model is reasoning-only (no tool/function calling support).
+    fn is_reasoning_only_model(&self, model: &str) -> bool {
+        // DeepSeek Reasoner and similar reasoning models don't support tool calling.
+        model.contains("reasoner")
+            || model.contains("reasoning")
+            || model.contains("o1-preview")
+            || model.contains("o1-mini")
+    }
+
     fn effective_max_tokens(&self) -> u32 {
         match self.effort {
             EffortLevel::Low => LOW_EFFORT_MAX_TOKENS,
@@ -371,7 +380,9 @@ impl OpenAIProvider {
             "messages": api_messages,
         });
 
-        if !tools.is_empty() {
+        // Some models (e.g. deepseek-reasoner) don't support tool/function calling.
+        // Only send tools to models that support them.
+        if !tools.is_empty() && !self.is_reasoning_only_model(&effective_model) {
             body["tools"] = Value::Array(Self::convert_tools(tools));
         }
 

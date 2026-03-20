@@ -33,7 +33,7 @@ const CHUNK_SAMPLES: usize = 1280;
 const MAX_EMBEDDINGS: usize = 16;
 
 /// Default detection threshold.
-const DEFAULT_THRESHOLD: f32 = 0.8;
+const DEFAULT_THRESHOLD: f32 = 0.3;
 
 // ---------------------------------------------------------------------------
 // Type alias for the inference plan used by tract.
@@ -443,7 +443,7 @@ mod tests {
 
     #[test]
     fn default_threshold_is_half() {
-        assert!((DEFAULT_THRESHOLD - 0.5).abs() < f32::EPSILON);
+        assert!((DEFAULT_THRESHOLD - 0.3).abs() < f32::EPSILON);
     }
 
     // -- Additional tests --

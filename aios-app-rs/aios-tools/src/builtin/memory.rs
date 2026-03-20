@@ -135,10 +135,23 @@ impl Tool for MemoryTool {
                     return ToolResult::fail("'key' is required for recall.");
                 };
                 match store.get(key) {
-                    Some(val) => ToolResult::ok_with_data(
-                        val.clone(),
-                        serde_json::json!({ "key": key, "value": val }),
-                    ),
+                    Some(val) => {
+                        // SECURITY: if the key looks like a credential, return a
+                        // redacted confirmation instead of the raw value. The AI
+                        // should use {{memory:key}} placeholders in tool commands;
+                        // the tool executor resolves them from the store directly.
+                        if is_credential_key(key) {
+                            ToolResult::ok_with_data(
+                                format!("[SECURE VALUE STORED for {key:?} — use {{{{memory:{key}}}}} in tool commands]"),
+                                serde_json::json!({ "key": key, "stored": true, "redacted": true }),
+                            )
+                        } else {
+                            ToolResult::ok_with_data(
+                                val.clone(),
+                                serde_json::json!({ "key": key, "value": val }),
+                            )
+                        }
+                    }
                     None => ToolResult::fail(format!("No memory found for key {key:?}.")),
                 }
             }
@@ -176,6 +189,25 @@ impl Tool for MemoryTool {
             )),
         }
     }
+}
+
+/// Check if a memory key likely holds a credential/secret value.
+///
+/// Keys containing these patterns are treated as sensitive — their raw values
+/// are never returned to the AI. Instead, a redacted confirmation is returned
+/// and the AI must use `{{memory:key}}` placeholders in tool commands.
+fn is_credential_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    lower.contains("password")
+        || lower.contains("passwd")
+        || lower.contains("secret")
+        || lower.contains("token")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("credential")
+        || lower.contains("app_password")
+        || lower.contains("private_key")
+        || lower.contains("auth")
 }
 
 // ---------------------------------------------------------------------------
@@ -517,5 +549,138 @@ mod tests {
         // BTreeMap keeps sorted order.
         assert_eq!(keys[0], "key_0");
         assert_eq!(keys[4], "key_4");
+    }
+
+    // -----------------------------------------------------------------------
+    // Security tests — credential keys must NEVER leak raw values
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_credential_key_detects_passwords() {
+        assert!(is_credential_key("gmail_app_password"));
+        assert!(is_credential_key("my_password"));
+        assert!(is_credential_key("SMTP_PASSWORD"));
+        assert!(is_credential_key("ssh_passwd"));
+    }
+
+    #[test]
+    fn is_credential_key_detects_api_keys() {
+        assert!(is_credential_key("openai_api_key"));
+        assert!(is_credential_key("claude_apikey"));
+        assert!(is_credential_key("stripe_secret"));
+        assert!(is_credential_key("github_token"));
+        assert!(is_credential_key("auth_token"));
+    }
+
+    #[test]
+    fn is_credential_key_allows_normal_keys() {
+        assert!(!is_credential_key("user_name"));
+        assert!(!is_credential_key("favorite_color"));
+        assert!(!is_credential_key("meeting_notes"));
+        assert!(!is_credential_key("shopping_list"));
+    }
+
+    #[test]
+    fn recall_credential_returns_redacted() {
+        let (tool, _dir) = temp_tool();
+        tool.execute(serde_json::json!({
+            "action": "memorize",
+            "key": "gmail_app_password",
+            "value": "super_secret_password_123"
+        }));
+
+        let r = tool.execute(serde_json::json!({
+            "action": "recall",
+            "key": "gmail_app_password"
+        }));
+        assert!(r.success);
+        // MUST NOT contain the actual password
+        assert!(!r.output.contains("super_secret_password_123"),
+            "SECURITY VIOLATION: recall returned raw credential value!");
+        // Must indicate it's stored securely
+        assert!(r.output.contains("SECURE"), "Should indicate secure storage");
+    }
+
+    #[test]
+    fn recall_credential_never_leaks_in_data() {
+        let (tool, _dir) = temp_tool();
+        tool.execute(serde_json::json!({
+            "action": "memorize",
+            "key": "smtp_auth_token",
+            "value": "tok_1234567890abcdef"
+        }));
+
+        let r = tool.execute(serde_json::json!({
+            "action": "recall",
+            "key": "smtp_auth_token"
+        }));
+        assert!(r.success);
+        // The data field must also not contain the raw value
+        if let Some(data) = &r.data {
+            let data_str = data.to_string();
+            assert!(!data_str.contains("tok_1234567890abcdef"),
+                "SECURITY VIOLATION: data field leaked credential!");
+            assert!(data_str.contains("redacted"),
+                "Data should indicate redaction");
+        }
+    }
+
+    #[test]
+    fn recall_normal_key_returns_full_value() {
+        let (tool, _dir) = temp_tool();
+        tool.execute(serde_json::json!({
+            "action": "memorize",
+            "key": "favorite_color",
+            "value": "blue"
+        }));
+
+        let r = tool.execute(serde_json::json!({
+            "action": "recall",
+            "key": "favorite_color"
+        }));
+        assert!(r.success);
+        // Normal keys should return the full value
+        assert_eq!(r.output, "blue");
+    }
+
+    #[test]
+    fn recall_api_key_is_redacted() {
+        let (tool, _dir) = temp_tool();
+        tool.execute(serde_json::json!({
+            "action": "memorize",
+            "key": "openai_api_key",
+            "value": "sk-proj-abc123def456"
+        }));
+
+        let r = tool.execute(serde_json::json!({
+            "action": "recall",
+            "key": "openai_api_key"
+        }));
+        assert!(r.success);
+        assert!(!r.output.contains("sk-proj-abc123def456"),
+            "SECURITY VIOLATION: API key leaked in recall output!");
+    }
+
+    #[test]
+    fn list_keys_does_not_leak_values() {
+        let (tool, _dir) = temp_tool();
+        tool.execute(serde_json::json!({
+            "action": "memorize",
+            "key": "gmail_password",
+            "value": "hunter2"
+        }));
+        tool.execute(serde_json::json!({
+            "action": "memorize",
+            "key": "pet_name",
+            "value": "Fluffy"
+        }));
+
+        let r = tool.execute(serde_json::json!({ "action": "list_keys" }));
+        assert!(r.success);
+        // list_keys should show keys only, never values
+        assert!(r.output.contains("gmail_password"));
+        assert!(r.output.contains("pet_name"));
+        assert!(!r.output.contains("hunter2"), "SECURITY VIOLATION: list_keys leaked a value!");
+        assert!(!r.output.contains("Fluffy"), "list_keys should not show values");
     }
 }

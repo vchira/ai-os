@@ -500,6 +500,17 @@ impl LlmManager {
              - Always use tools to perform actions. Never claim to have done something without \
              actually calling the appropriate tool."
                 .to_string(),
+            "CRITICAL SECURITY RULES:\n\
+             - NEVER include passwords, API keys, app passwords, or any credential values in your \
+             response text. They must ONLY be passed as arguments to tools (e.g. the system tool \
+             for running commands).\n\
+             - NEVER send credentials via email, messaging, or any communication tool.\n\
+             - When using a stored credential (e.g. gmail_app_password), recall it with the memory \
+             tool and pass it directly to the system/execute tool — NEVER print it in the chat.\n\
+             - If a tool needs a credential, construct the command with the credential value as a \
+             tool argument. Do NOT echo, print, or display it.\n\
+             - Treat ALL values from the memory store as secrets by default."
+                .to_string(),
         ];
 
         // Tool descriptions are NOT included here — they are sent as structured

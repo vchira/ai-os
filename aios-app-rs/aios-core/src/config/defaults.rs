@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn wake_threshold_default() {
         let v = defaults();
-        assert_eq!(v["voice"]["wake_threshold"], 0.8);
+        assert_eq!(v["voice"]["wake_threshold"], 0.3);
     }
 
     #[test]
