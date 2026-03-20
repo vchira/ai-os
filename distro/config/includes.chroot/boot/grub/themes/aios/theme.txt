@@ -1,0 +1,39 @@
+# AiOS GRUB Theme — minimal dark boot screen
+
+# No title text — clean look
+title-text: ""
+
+# Dark background (GitHub dark)
+desktop-color: "#0d1117"
+desktop-image: ""
+
+# Terminal font
+terminal-font: "DejaVu Sans Mono Regular 14"
+terminal-left: "0"
+terminal-top: "0"
+terminal-width: "100%"
+terminal-height: "100%"
+
+# Centered boot menu
++ boot_menu {
+    left = 25%
+    top = 25%
+    width = 50%
+    height = 50%
+    item_color = "#c9d1d9"
+    selected_item_color = "#ffffff"
+    item_height = 32
+    item_padding = 8
+    item_spacing = 4
+    selected_item_pixmap_style = "highlight_*.png"
+}
+
+# Bottom branding label
++ label {
+    left = 25%
+    top = 90%
+    width = 50%
+    align = "center"
+    color = "#666666"
+    text = "AiOS — AI-Native Linux"
+}

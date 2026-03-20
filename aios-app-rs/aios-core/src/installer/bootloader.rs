@@ -135,7 +135,7 @@ fn install_grub_bios(mount_point: &str, device: &str, progress: &dyn Fn(&str)) -
 /// Write `/etc/default/grub` with AiOS-branded settings.
 ///
 /// Settings:
-/// - Hidden 3-second timeout (press Shift/Esc to reveal the menu)
+/// - 3-second visible menu (shows boot options)
 /// - Graphics terminal with dark theme
 /// - Quiet boot (no verbose kernel messages)
 /// - "AiOS" as the distributor name for the menu entry
@@ -149,12 +149,15 @@ GRUB_DISTRIBUTOR=\"AiOS\"
 # Boot the default entry after 3 seconds
 GRUB_TIMEOUT=3
 
-# Hidden menu — press Shift (BIOS) or Esc (UEFI) to reveal
-GRUB_TIMEOUT_STYLE=hidden
+# Show menu so user can see boot options
+GRUB_TIMEOUT_STYLE=menu
 
 # Quiet boot: no verbose kernel messages, show splash
-GRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash loglevel=3\"
+GRUB_CMDLINE_LINUX_DEFAULT=\"quiet splash\"
 GRUB_CMDLINE_LINUX=\"\"
+
+# No background image — theme controls appearance
+GRUB_BACKGROUND=\"\"
 
 # Use graphical terminal with auto-detected resolution
 GRUB_TERMINAL_OUTPUT=gfxterm
@@ -175,7 +178,7 @@ GRUB_DISABLE_OS_PROBER=true
 /// Write a minimal GRUB theme for a clean dark boot screen.
 ///
 /// Creates `/boot/grub/themes/aios/theme.txt` with dark background,
-/// clean font, and a single-entry styled menu. This is referenced by
+/// clean font, and a centered menu. This is referenced by
 /// `GRUB_THEME` in `/etc/default/grub`.
 fn write_grub_theme(mount_point: &str) -> Result<(), String> {
     let theme_dir = format!("{mount_point}/boot/grub/themes/aios");
@@ -184,53 +187,42 @@ fn write_grub_theme(mount_point: &str) -> Result<(), String> {
     let theme = "\
 # AiOS GRUB Theme — minimal dark boot screen
 
-# Dark background
-desktop-color: \"#0a0a0a\"
+# No title text — clean look
+title-text: \"\"
 
-# Title text (top of screen)
-title-text: \"AiOS\"
-title-font: \"DejaVu Sans Bold 16\"
-title-color: \"#c0c0c0\"
+# Dark background (GitHub dark)
+desktop-color: \"#0d1117\"
+desktop-image: \"\"
 
-# Menu appearance
+# Terminal font
+terminal-font: \"DejaVu Sans Mono Regular 14\"
+terminal-left: \"0\"
+terminal-top: \"0\"
+terminal-width: \"100%\"
+terminal-height: \"100%\"
+
+# Centered boot menu
 + boot_menu {
     left = 25%
-    top = 40%
+    top = 25%
     width = 50%
-    height = 30%
-    item_font = \"DejaVu Sans 14\"
-    item_color = \"#a0a0a0\"
-    selected_item_font = \"DejaVu Sans Bold 14\"
+    height = 50%
+    item_color = \"#c9d1d9\"
     selected_item_color = \"#ffffff\"
-    item_height = 28
+    item_height = 32
     item_padding = 8
     item_spacing = 4
-    selected_item_pixmap_style = \"highlight_*\"
+    selected_item_pixmap_style = \"highlight_*.png\"
 }
 
-# Progress bar (timeout countdown)
-+ progress_bar {
-    id = \"__timeout__\"
-    left = 25%
-    top = 75%
-    width = 50%
-    height = 6
-    show_text = false
-    fg_color = \"#404040\"
-    bg_color = \"#1a1a1a\"
-    border_color = \"#2a2a2a\"
-    text_color = \"#808080\"
-}
-
-# Bottom label
+# Bottom branding label
 + label {
-    left = 0
-    top = 92%
-    width = 100%
+    left = 25%
+    top = 90%
+    width = 50%
     align = \"center\"
-    color = \"#505050\"
-    font = \"DejaVu Sans 10\"
-    text = \"Press Esc for boot menu\"
+    color = \"#666666\"
+    text = \"AiOS — AI-Native Linux\"
 }
 ";
 
@@ -279,9 +271,11 @@ mod tests {
         // Key settings that must be present:
         // - GRUB_DISTRIBUTOR="AiOS"
         // - GRUB_TIMEOUT=3
-        // - GRUB_TIMEOUT_STYLE=hidden
-        // - GRUB_CMDLINE_LINUX_DEFAULT contains "quiet"
+        // - GRUB_TIMEOUT_STYLE=menu
+        // - GRUB_CMDLINE_LINUX_DEFAULT contains "quiet splash"
+        // - GRUB_BACKGROUND="" (no background image)
         // - GRUB_TERMINAL_OUTPUT=gfxterm
+        // - GRUB_GFXMODE=auto
         // - GRUB_THEME points to /boot/grub/themes/aios/theme.txt
         // - GRUB_DISABLE_OS_PROBER=true
         //

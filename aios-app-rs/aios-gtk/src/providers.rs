@@ -306,4 +306,102 @@ mod tests {
     fn provider_api_url_unknown() {
         assert_eq!(provider_api_url("nonexistent"), "");
     }
+
+    #[test]
+    fn find_by_id_all_providers() {
+        for prov in PROVIDERS {
+            assert!(find_by_id(prov.id).is_some(), "find_by_id({}) should succeed", prov.id);
+        }
+        assert!(find_by_id("nonexistent").is_none());
+    }
+
+    #[test]
+    fn find_by_display_name_all_providers() {
+        for prov in PROVIDERS {
+            assert!(
+                find_by_display_name(prov.display_name).is_some(),
+                "find_by_display_name({}) should succeed",
+                prov.display_name
+            );
+        }
+        assert!(find_by_display_name("Nonexistent").is_none());
+    }
+
+    #[test]
+    fn display_name_to_id_roundtrip() {
+        for prov in PROVIDERS {
+            assert_eq!(
+                display_name_to_id(prov.display_name),
+                prov.id,
+                "display_name_to_id({}) should return {}",
+                prov.display_name,
+                prov.id
+            );
+        }
+    }
+
+    #[test]
+    fn model_human_name_all_providers() {
+        // Every model slug in PROVIDERS should resolve to a human name
+        for prov in PROVIDERS {
+            for (human, slug) in prov.models {
+                let result = model_human_name(slug);
+                assert_eq!(
+                    result, *human,
+                    "model_human_name({slug}) should be {human}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn provider_api_url_all_providers() {
+        // Every provider should have a non-empty URL
+        for prov in PROVIDERS {
+            let url = provider_api_url(prov.id);
+            assert!(
+                !url.is_empty(),
+                "provider_api_url({}) should not be empty",
+                prov.id
+            );
+        }
+    }
+
+    #[test]
+    fn mask_api_key_preserves_recognizable_prefix() {
+        // Key should be recognizable from its masked form
+        let masked = mask_api_key("sk-ant-FAKE-01234567890abcdef");
+        assert!(masked.starts_with("sk-ant-"), "should preserve sk-ant- prefix");
+        assert!(masked.ends_with("cdef"), "should preserve last 4 chars");
+        assert!(masked.contains("..."), "should contain ...");
+    }
+
+    #[test]
+    fn is_configured_with_key() {
+        let path = std::env::temp_dir().join("aios-test-configured.json");
+        let mut config = ConfigManager::with_path(path).unwrap();
+        let _ = config.set("llm.claude_api_key", serde_json::json!("sk-test-key"));
+        let claude = find_by_id("claude").unwrap();
+        assert!(is_configured(claude, &config));
+    }
+
+    #[test]
+    fn is_configured_without_key() {
+        let path = std::env::temp_dir().join("aios-test-not-configured.json");
+        let config = ConfigManager::with_path(path).unwrap();
+        let deepseek = find_by_id("deepseek").unwrap();
+        assert!(!is_configured(deepseek, &config));
+    }
+
+    #[test]
+    fn configured_names_only_includes_keyed_providers() {
+        let path = std::env::temp_dir().join("aios-test-configured-names.json");
+        let mut config = ConfigManager::with_path(path).unwrap();
+        let _ = config.set("llm.claude_api_key", serde_json::json!("sk-test"));
+        let _ = config.set("llm.deepseek_api_key", serde_json::json!("sk-test-ds"));
+        let names = configured_display_names(&config);
+        assert!(names.contains(&"Claude".to_string()));
+        assert!(names.contains(&"DeepSeek".to_string()));
+        assert!(!names.contains(&"ChatGPT".to_string()));
+    }
 }

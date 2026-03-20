@@ -1141,6 +1141,35 @@ cat > /home/aios/.config/labwc/rc.xml << RCEOF
 </labwc_config>
 RCEOF
 
+# labwc theme override — dark window borders matching AiOS dark theme.
+# This overrides the default openbox-3 themerc for the "AiOS" theme.
+cat > /home/aios/.config/labwc/themerc-override << 'THEMEEOF'
+# AiOS labwc theme — dark, minimal window decorations
+
+# Active window (focused)
+window.active.border.color: #3584e4
+window.active.title.bg.color: #1a1a2e
+window.active.label.text.color: #e6edf3
+
+# Inactive window (unfocused)
+window.inactive.border.color: #30363d
+window.inactive.title.bg.color: #161b22
+window.inactive.label.text.color: #8b949e
+
+# OSD (Alt-Tab window switcher, menus)
+osd.bg.color: #161b22
+osd.border.color: #30363d
+osd.label.text.color: #e6edf3
+
+# Minimal decorations
+border.width: 1
+padding.height: 4
+
+# No bottom handle, no client padding
+window.handle.width: 0
+window.client.padding.width: 0
+THEMEEOF
+
 # Foot terminal configuration.
 mkdir -p /home/aios/.config/foot
 cat > /home/aios/.config/foot/foot.ini << 'FOOTEOF'
@@ -1422,6 +1451,51 @@ print('[*] AiOS boot splash generated')
 mkdir -p config/bootloaders/syslinux
 cp config/bootloaders/isolinux/isolinux.cfg config/bootloaders/syslinux/syslinux.cfg 2>/dev/null || true
 cp config/bootloaders/isolinux/splash.png config/bootloaders/syslinux/splash.png 2>/dev/null || true
+
+# ─── GRUB EFI Boot Config (for UEFI live boot) ─────────────────
+# live-build uses config/bootloaders/grub-pc/ for the GRUB EFI menu.
+mkdir -p config/bootloaders/grub-pc
+
+cat > config/bootloaders/grub-pc/grub.cfg << 'GRUBEOF'
+# AiOS GRUB EFI boot menu for live ISO
+
+set timeout=3
+set default=0
+
+# Dark theme colors (no theme file needed for live — inline colors)
+set menu_color_normal=light-gray/black
+set menu_color_highlight=white/dark-gray
+set color_normal=light-gray/black
+set color_highlight=white/dark-gray
+
+# Use graphics mode
+if loadfont /boot/grub/fonts/unicode.pf2; then
+    set gfxmode=auto
+    insmod all_video
+    insmod gfxterm
+    terminal_output gfxterm
+fi
+
+# Load AiOS GRUB theme if available
+if [ -f /boot/grub/themes/aios/theme.txt ]; then
+    set theme=/boot/grub/themes/aios/theme.txt
+fi
+
+menuentry "AiOS" {
+    linux /live/vmlinuz boot=live components username=aios quiet splash
+    initrd /live/initrd.img
+}
+
+menuentry "AiOS Safe Mode" {
+    linux /live/vmlinuz boot=live components username=aios single nomodeset
+    initrd /live/initrd.img
+}
+
+menuentry "AiOS Debug Mode" {
+    linux /live/vmlinuz boot=live components username=aios debug
+    initrd /live/initrd.img
+}
+GRUBEOF
 
 rm -f *.iso 2>/dev/null || true
 
