@@ -245,10 +245,11 @@ pub(crate) fn do_tts_with_signal(
     };
 
     // Try Piper first (high-quality, natural sounding voice)
-    let piper_model = "/home/aios/.aios/models/piper/en_US-amy-medium.onnx";
-    if std::path::Path::new(piper_model).exists() {
+    let home_dir = std::env::var("HOME").unwrap_or_else(|_| String::from("/home/aios"));
+    let piper_model = format!("{home_dir}/.aios/models/piper/en_US-amy-medium.onnx");
+    if std::path::Path::new(&piper_model).exists() {
         let mut child = match std::process::Command::new("piper")
-            .args(["--model", piper_model, "--output_raw"])
+            .args(["--model", &piper_model, "--output_raw"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())

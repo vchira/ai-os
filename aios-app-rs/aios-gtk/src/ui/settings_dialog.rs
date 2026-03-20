@@ -920,7 +920,8 @@ fn build_voice_page(config: &ConfigManager) -> adw::PreferencesPage {
             let (tts_tx, tts_rx) = std::sync::mpsc::channel::<bool>();
             std::thread::spawn(move || {
                 let test_text = "Hello! This is a test of the AiOS voice output. If you can hear me, your audio is working correctly.";
-                let piper_model = format!("/home/aios/.aios/models/piper/{voice}.onnx");
+                let home_dir = std::env::var("HOME").unwrap_or_else(|_| String::from("/home/aios"));
+                let piper_model = format!("{home_dir}/.aios/models/piper/{voice}.onnx");
 
                 let success = if std::path::Path::new(&piper_model).exists() {
                     let child = std::process::Command::new("piper")
