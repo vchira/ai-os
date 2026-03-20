@@ -495,12 +495,16 @@ impl LlmManager {
                 .to_string(),
         ];
 
+        // Tool descriptions are NOT included here — they are sent as structured
+        // JSON via the API's `tools` parameter, which is more token-efficient and
+        // avoids double-counting. Only list tool names for awareness.
         if !available_tools.is_empty() {
-            let tool_lines: Vec<String> = available_tools
-                .iter()
-                .map(|t| format!("  - {}: {}", t.name, t.description))
-                .collect();
-            parts.push(format!("Available tools:\n{}", tool_lines.join("\n")));
+            let tool_names: Vec<&str> = available_tools.iter().map(|t| t.name.as_str()).collect();
+            parts.push(format!(
+                "You have {} tools available: {}. Use them when appropriate.",
+                available_tools.len(),
+                tool_names.join(", ")
+            ));
         }
 
         if let Some(ctx) = context {
@@ -1069,8 +1073,9 @@ mod tests {
             parameters: serde_json::json!({}),
         }];
         let prompt = LlmManager::get_system_prompt(None, &tools);
+        // Tool names listed (not full descriptions — those go via API tools param)
         assert!(prompt.contains("memory_store"));
-        assert!(prompt.contains("Persist a key-value pair"));
+        assert!(prompt.contains("1 tools available"));
     }
 
     #[test]
