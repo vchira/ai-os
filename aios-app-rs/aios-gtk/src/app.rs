@@ -287,12 +287,11 @@ impl AiosApp {
         let port: u16 = config.get_str("channels.web.port", "80").parse().unwrap_or(80);
         let web_tx = runtime.message_sender();
 
+        // Web channel auth: disabled by default since AiOS is a local OS.
+        // Set channels.web.token in config to enable token auth if needed.
         let web_token = config.get_str("channels.web.token", "");
         let web_token = if web_token.is_empty() {
-            let token = uuid::Uuid::new_v4().to_string().replace("-", "")[..16].to_string();
-            let _ = config.set("channels.web.token", serde_json::json!(token));
-            info!("Generated web auth token: {token}");
-            Some(token)
+            None // No auth — open access on LAN
         } else {
             Some(web_token)
         };
