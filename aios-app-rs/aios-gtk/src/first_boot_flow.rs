@@ -505,6 +505,54 @@ pub(crate) fn apply_autoconfig(
         ),
     );
 
+    // 4b. Download Sentinel model if configured in autoconfig.
+    if !auto.ai.sentinel_model.is_empty() {
+        chat_view.add_level_message(
+            MessageLevel::Info,
+            &format!("Downloading Sentinel model: **{}**...\nThis may take a few minutes.", auto.ai.sentinel_model),
+        );
+        // Force GTK to render the message before blocking on download.
+        while gtk4::glib::MainContext::default().iteration(false) {}
+
+        let model = auto.ai.sentinel_model.clone();
+        let client = aios_llm::OllamaClient::new();
+        if let Err(e) = client.ensure_running() {
+            warn!("Failed to start Ollama: {e}");
+            chat_view.add_level_message(MessageLevel::Warning, &format!("Ollama not available: {e}. Sentinel model not installed."));
+        } else if client.is_model_installed(&model) {
+            info!("Sentinel model {model} already installed");
+            chat_view.add_level_message(MessageLevel::Success, &format!("Sentinel model **{model}** already installed."));
+        } else {
+            // Download in background thread, poll status.
+            let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+            let model_clone = model.clone();
+            std::thread::spawn(move || {
+                let client = aios_llm::OllamaClient::new();
+                let result = client.pull_model(&model_clone, |p| {
+                    if p.total > 0 {
+                        let pct = (p.completed as f64 / p.total as f64 * 100.0) as u32;
+                        tracing::debug!("Sentinel download: {pct}% — {}", p.status);
+                    }
+                });
+                let _ = tx.send(result);
+            });
+            // Block until download completes (autoconfig is unattended).
+            match rx.recv() {
+                Ok(Ok(())) => {
+                    info!("Sentinel model {model} downloaded successfully");
+                    chat_view.add_level_message(MessageLevel::Success, &format!("Sentinel model **{model}** installed."));
+                }
+                Ok(Err(e)) => {
+                    warn!("Sentinel model download failed: {e}");
+                    chat_view.add_level_message(MessageLevel::Warning, &format!("Sentinel download failed: {e}"));
+                }
+                Err(_) => {
+                    warn!("Sentinel download thread disconnected");
+                }
+            }
+        }
+    }
+
     info!("Autoconfig applied -- finalizing boot");
 
     // 5. Finalize boot — init LLM, tools, channels, voice.
