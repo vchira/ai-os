@@ -333,6 +333,10 @@ pub(crate) fn apply_autoconfig(
     );
     let window = mw.window;
     let vu_meter_autoconfig = mw.vu_meter;
+
+    // Hide prompt + settings until downloads and initialization are complete.
+    prompt_input.widget().set_visible(false);
+    main_window::set_settings_button_visible(&window, false);
     // DON'T hide the prompt in autoconfig — it will be needed immediately
     // after the transition to normal mode. Hiding + showing in an idle
     // callback causes GTK layout issues where the widget never reappears.
