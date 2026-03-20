@@ -135,6 +135,12 @@
   "setup.order.primary": "{provider} als primär",
   "setup.order.tts": "Welcher Anbieter soll dein primärer KI-Assistent sein? Sag Claude oder ChatGPT.",
 
+  "setup.sentinel.title": "Sentinel-Sicherheitsmodell",
+  "setup.sentinel.description": "Wähle ein lokales KI-Modell für Sicherheitsprüfungen. Sentinel überprüft KI-Antworten, bevor sie dich erreichen — und blockiert Versuche, deine Zugangsdaten preiszugeben.",
+  "setup.sentinel.select": "Ausgewähltes Modell installieren",
+  "setup.sentinel.skip": "Vorerst überspringen",
+  "setup.sentinel.tts": "Wähle ein lokales KI-Modell zum Schutz deiner Daten. Du kannst dies auch später in den Einstellungen konfigurieren.",
+
   "setup.complete.title": "Ersteinrichtung abgeschlossen",
   "setup.complete.all_set_title": "Alles bereit!",
   "setup.complete.all_set_description": "Dein KI-Assistent ist bereit. Fang einfach an zu sprechen oder zu tippen.",

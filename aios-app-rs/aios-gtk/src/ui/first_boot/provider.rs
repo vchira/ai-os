@@ -402,13 +402,9 @@ impl SetupConversation {
         self.advance_to_complete_or_install();
     }
 
-    /// Advance to `InstallConfirm` if the user chose to install, otherwise `Complete`.
+    /// Advance to Sentinel model selection (mandatory), then install/complete.
     pub(super) fn advance_to_complete_or_install(&self) {
-        let installing = self.state.borrow().install_to_drive;
-        if installing {
-            self.advance(SetupStep::InstallConfirm);
-        } else {
-            self.advance(SetupStep::Complete);
-        }
+        // Sentinel is always required before completing setup.
+        self.advance(SetupStep::SentinelModel);
     }
 }

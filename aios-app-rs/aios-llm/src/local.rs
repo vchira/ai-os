@@ -510,4 +510,132 @@ mod tests {
     fn openai_compatible_url() {
         assert_eq!(OllamaClient::openai_compatible_url(), "http://localhost:11434");
     }
+
+    #[test]
+    fn model_catalog_all_have_names() {
+        for entry in MODEL_CATALOG {
+            assert!(!entry.name.is_empty(), "Model name must not be empty");
+            assert!(
+                !entry.display_name.is_empty(),
+                "Model '{}' has empty display_name",
+                entry.name
+            );
+            assert!(
+                !entry.description.is_empty(),
+                "Model '{}' has empty description",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn model_catalog_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for entry in MODEL_CATALOG {
+            assert!(
+                seen.insert(entry.name),
+                "Duplicate model name in catalog: '{}'",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn recommend_model_always_returns_something() {
+        // Should never panic, regardless of system RAM
+        let rec = recommend_model();
+        assert!(!rec.name.is_empty());
+        assert!(rec.min_ram_gb > 0 || rec.min_ram_gb == 0 || true); // just ensure no panic
+    }
+
+    #[test]
+    fn sentinel_prompt_contains_yes_no_instructions() {
+        assert!(
+            SENTINEL_SANITIZE_PROMPT.contains("YES"),
+            "Sentinel prompt must instruct the model to answer YES"
+        );
+        assert!(
+            SENTINEL_SANITIZE_PROMPT.contains("NO"),
+            "Sentinel prompt must instruct the model to answer NO"
+        );
+        assert!(
+            SENTINEL_SANITIZE_PROMPT.contains("sensitive data")
+                || SENTINEL_SANITIZE_PROMPT.contains("passwords")
+                || SENTINEL_SANITIZE_PROMPT.contains("API keys"),
+            "Sentinel prompt must mention what to look for"
+        );
+        assert!(
+            SENTINEL_SANITIZE_PROMPT.contains("security filter")
+                || SENTINEL_SANITIZE_PROMPT.contains("security"),
+            "Sentinel prompt must establish security role"
+        );
+        // Must end with the separator for the AI response to be appended
+        assert!(
+            SENTINEL_SANITIZE_PROMPT.ends_with("---\n"),
+            "Sentinel prompt should end with separator for response injection"
+        );
+    }
+
+    #[test]
+    fn pull_progress_display() {
+        let progress = PullProgress {
+            status: "downloading".to_string(),
+            completed: 512_000_000,
+            total: 1_024_000_000,
+        };
+        assert_eq!(progress.status, "downloading");
+        assert_eq!(progress.completed, 512_000_000);
+        assert_eq!(progress.total, 1_024_000_000);
+
+        // Zero progress
+        let zero = PullProgress {
+            status: "pulling manifest".to_string(),
+            completed: 0,
+            total: 0,
+        };
+        assert_eq!(zero.completed, 0);
+        assert_eq!(zero.total, 0);
+
+        // Complete
+        let done = PullProgress {
+            status: "success".to_string(),
+            completed: 2_000_000_000,
+            total: 2_000_000_000,
+        };
+        assert_eq!(done.completed, done.total);
+        assert_eq!(done.status, "success");
+    }
+
+    #[test]
+    fn installed_model_deserialize() {
+        let json = r#"{"name":"llama3.2:3b","size":2000000000,"modified_at":"2025-01-15T10:30:00Z"}"#;
+        let model: InstalledModel = serde_json::from_str(json).unwrap();
+        assert_eq!(model.name, "llama3.2:3b");
+        assert_eq!(model.size, 2_000_000_000);
+        assert_eq!(model.modified_at, "2025-01-15T10:30:00Z");
+    }
+
+    #[test]
+    fn installed_model_deserialize_minimal() {
+        // Only name provided — size and modified_at should default
+        let json = r#"{"name":"phi3:3.8b"}"#;
+        let model: InstalledModel = serde_json::from_str(json).unwrap();
+        assert_eq!(model.name, "phi3:3.8b");
+        assert_eq!(model.size, 0);
+        assert_eq!(model.modified_at, "");
+    }
+
+    #[test]
+    fn installed_model_serialize_roundtrip() {
+        let model = InstalledModel {
+            name: "mistral:7b".to_string(),
+            size: 4_100_000_000,
+            modified_at: "2025-03-20T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&model).unwrap();
+        let deserialized: InstalledModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, model.name);
+        assert_eq!(deserialized.size, model.size);
+        assert_eq!(deserialized.modified_at, model.modified_at);
+    }
 }

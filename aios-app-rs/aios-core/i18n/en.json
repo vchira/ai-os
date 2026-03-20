@@ -135,6 +135,12 @@
   "setup.order.primary": "{provider} as primary",
   "setup.order.tts": "Which provider should be your primary AI? Say Claude or ChatGPT.",
 
+  "setup.sentinel.title": "Sentinel Security Model",
+  "setup.sentinel.description": "Choose a local AI model for security checks. Sentinel verifies AI responses before they reach you — blocking any attempts to leak your credentials.",
+  "setup.sentinel.select": "Install Selected Model",
+  "setup.sentinel.skip": "Skip for Now",
+  "setup.sentinel.tts": "Choose a local AI model to protect your data. You can also configure this later in Settings.",
+
   "setup.complete.title": "First-Boot Setup Complete",
   "setup.complete.all_set_title": "You're All Set!",
   "setup.complete.all_set_description": "Your AI assistant is ready. Just start talking or typing.",

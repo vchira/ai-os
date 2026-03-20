@@ -171,6 +171,11 @@ pub(crate) fn run_first_boot_setup(
             let _ = config.set("voice.wake_word", serde_json::json!(result.wake_word));
             let _ = config.set("system.machine_name", serde_json::json!(result.machine_name));
 
+            // Save Sentinel model.
+            if !result.sentinel_model.is_empty() {
+                let _ = config.set("llm.sentinel_model", serde_json::json!(result.sentinel_model));
+            }
+
             // Determine wake word source.
             let normalized = result.wake_word.to_lowercase().replace(' ', "_");
             let pretrained_ids = [

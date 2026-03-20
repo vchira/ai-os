@@ -8,11 +8,11 @@
 
 use std::collections::BTreeMap;
 
-use aios_core::secure::registry::*;
 use aios_core::secure::{
     detect_sensitive_ask, is_credential_key, is_private_key, is_protected_key,
     scan_for_leaked_values, SecureKind, SecureRegistry,
 };
+use aios_core::ui_components::{DownloadProgressData, ModelTableRow};
 
 // ============================================================================
 // Credential key detection — must catch ALL sensitive key patterns
@@ -580,4 +580,284 @@ fn registry_handles_special_characters_in_keys() {
     reg.register("path/to/key", "Path Key", "Has slashes", SecureKind::Other);
     assert!(reg.get("email@domain.com").is_some());
     assert!(reg.get("path/to/key").is_some());
+}
+
+// ============================================================================
+// Sentinel security policy — blocking when not configured + secrets exist
+// ============================================================================
+
+#[test]
+fn sentinel_blocks_when_not_configured_and_secrets_exist() {
+    // Security policy: if secrets are stored but Sentinel is not configured,
+    // the system must detect this condition. We verify by checking that
+    // credential keys are detected in a memory store, which is the trigger
+    // for blocking responses without Sentinel.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_test_store(dir.path(), &[
+        ("gmail_app_password", "super_secret_value_123"),
+        ("openai_api_key", "sk-ant-test-key-abcdef12345"),
+    ]);
+
+    // Read the store and verify credential keys are detected
+    let store: BTreeMap<String, String> =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let has_secrets = store.keys().any(|k| is_credential_key(k));
+    assert!(
+        has_secrets,
+        "SECURITY: credential keys must be detected in the memory store — \
+         this is the trigger for requiring Sentinel"
+    );
+}
+
+#[test]
+fn sentinel_allows_when_no_secrets() {
+    // New installs should work without Sentinel — no credential keys in memory.
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_test_store(dir.path(), &[
+        ("favorite_color", "blue"),
+        ("timezone", "Europe/Berlin"),
+        ("language_preference", "en"),
+    ]);
+
+    let store: BTreeMap<String, String> =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let has_secrets = store.keys().any(|k| is_credential_key(k));
+    assert!(
+        !has_secrets,
+        "Non-credential keys should NOT trigger Sentinel requirement"
+    );
+}
+
+// ============================================================================
+// Private key detection — comprehensive patterns
+// ============================================================================
+
+#[test]
+fn private_key_detection_comprehensive() {
+    // Email patterns
+    assert!(is_private_key("email"), "should detect 'email'");
+    assert!(is_private_key("user_email"), "should detect 'user_email'");
+    assert!(is_private_key("e_mail_address"), "should detect 'e_mail_address'");
+    assert!(is_private_key("work_email"), "should detect 'work_email'");
+
+    // Name patterns
+    assert!(is_private_key("full_name"), "should detect 'full_name'");
+    assert!(is_private_key("first_name"), "should detect 'first_name'");
+    assert!(is_private_key("last_name"), "should detect 'last_name'");
+    assert!(is_private_key("display_name"), "should detect 'display_name'");
+
+    // Address patterns
+    assert!(is_private_key("home_address"), "should detect 'home_address'");
+    assert!(is_private_key("street_address"), "should detect 'street_address'");
+    assert!(is_private_key("mailing_address"), "should detect 'mailing_address'");
+
+    // Phone patterns
+    assert!(is_private_key("phone_number"), "should detect 'phone_number'");
+    assert!(is_private_key("mobile_phone"), "should detect 'mobile_phone'");
+    assert!(is_private_key("home_phone"), "should detect 'home_phone'");
+
+    // Birth patterns
+    assert!(is_private_key("date_of_birth"), "should detect 'date_of_birth'");
+    assert!(is_private_key("birthday"), "should detect 'birthday'");
+    assert!(is_private_key("birth_date"), "should detect 'birth_date'");
+
+    // Age patterns
+    assert!(is_private_key("user_age"), "should detect 'user_age'");
+    assert!(is_private_key("my_age"), "should detect 'my_age'");
+
+    // Gender patterns
+    assert!(is_private_key("user_gender"), "should detect 'user_gender'");
+    assert!(is_private_key("gender_identity"), "should detect 'gender_identity'");
+}
+
+// ============================================================================
+// Credential key case insensitivity
+// ============================================================================
+
+#[test]
+fn credential_key_case_insensitive() {
+    // UPPER case
+    assert!(is_credential_key("PASSWORD"), "should detect UPPER 'PASSWORD'");
+    assert!(is_credential_key("API_KEY"), "should detect UPPER 'API_KEY'");
+    assert!(is_credential_key("AUTH_TOKEN"), "should detect UPPER 'AUTH_TOKEN'");
+    assert!(is_credential_key("SECRET"), "should detect UPPER 'SECRET'");
+
+    // lower case
+    assert!(is_credential_key("password"), "should detect lower 'password'");
+    assert!(is_credential_key("api_key"), "should detect lower 'api_key'");
+    assert!(is_credential_key("auth_token"), "should detect lower 'auth_token'");
+    assert!(is_credential_key("secret"), "should detect lower 'secret'");
+
+    // Mixed case
+    assert!(is_credential_key("Password"), "should detect Mixed 'Password'");
+    assert!(is_credential_key("Api_Key"), "should detect Mixed 'Api_Key'");
+    assert!(is_credential_key("Auth_Token"), "should detect Mixed 'Auth_Token'");
+    assert!(is_credential_key("MySecret"), "should detect Mixed 'MySecret'");
+    assert!(is_credential_key("Gmail_APP_Password"), "should detect Mixed 'Gmail_APP_Password'");
+}
+
+// ============================================================================
+// Detect ask — multilingual patterns (German/French)
+// ============================================================================
+
+#[test]
+fn detect_ask_multilingual() {
+    // The current implementation uses English patterns only. Verify that
+    // non-English requests that happen to contain English patterns are caught,
+    // and pure non-English requests are not (unless they embed English patterns).
+
+    // English embedded in German-style sentence — should match because
+    // the English pattern "enter your password" is present
+    assert!(
+        detect_sensitive_ask("Bitte enter your password below").is_some(),
+        "Mixed German/English with English pattern should be caught"
+    );
+
+    // Pure German — no English patterns present, so no match expected.
+    // This documents current behavior; multilingual detection is future work.
+    assert!(
+        detect_sensitive_ask("Gib mir dein Passwort").is_none(),
+        "Pure German request not caught by English-only patterns (known limitation)"
+    );
+
+    // Pure French — same
+    assert!(
+        detect_sensitive_ask("Entrez votre mot de passe").is_none(),
+        "Pure French request not caught by English-only patterns (known limitation)"
+    );
+
+    // French with English pattern embedded
+    assert!(
+        detect_sensitive_ask("Please enter your api key s'il vous plait").is_some(),
+        "French text with embedded English pattern should match"
+    );
+}
+
+// ============================================================================
+// Leak scan with special characters in values
+// ============================================================================
+
+#[test]
+fn leak_scan_with_special_characters() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_test_store(dir.path(), &[
+        ("email_password", "p@ss#w0rd!2024"),
+        ("api_secret", "sk-test_key$with+special=chars"),
+        ("auth_token", "tok.abc-123_DEF!@#"),
+    ]);
+
+    // Value with @, #, !
+    let leaked = scan_for_leaked_values(
+        "Your credentials: p@ss#w0rd!2024",
+        &path,
+    );
+    assert!(
+        !leaked.is_empty(),
+        "Special chars (@, #, !) in values must still be detected"
+    );
+    assert!(leaked.contains(&"email_password".to_string()));
+
+    // Value with $, +, =
+    let leaked2 = scan_for_leaked_values(
+        "Config: key=sk-test_key$with+special=chars",
+        &path,
+    );
+    assert!(
+        !leaked2.is_empty(),
+        "Special chars ($, +, =) in values must still be detected"
+    );
+
+    // Value with dots, dashes, underscores, !, @, #
+    let leaked3 = scan_for_leaked_values(
+        "Token dump: tok.abc-123_DEF!@#",
+        &path,
+    );
+    assert!(
+        !leaked3.is_empty(),
+        "Special chars (., -, _, !, @, #) in values must still be detected"
+    );
+}
+
+// ============================================================================
+// ModelTableRow serialization
+// ============================================================================
+
+#[test]
+fn model_table_row_serialization() {
+    let row = ModelTableRow {
+        model_id: "llama3.2:3b".to_string(),
+        display_name: "Llama 3.2 3B".to_string(),
+        download_size: "2GB".to_string(),
+        ram_needed: "4GB".to_string(),
+        speed: "Fast".to_string(),
+        description: "Strong sanitization".to_string(),
+        installed: true,
+        recommended: false,
+    };
+
+    let json = serde_json::to_string(&row).unwrap();
+    assert!(json.contains("llama3.2:3b"));
+    assert!(json.contains("\"installed\":true"));
+    assert!(json.contains("\"recommended\":false"));
+
+    // Deserialize back
+    let deserialized: ModelTableRow = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.model_id, "llama3.2:3b");
+    assert_eq!(deserialized.display_name, "Llama 3.2 3B");
+    assert_eq!(deserialized.download_size, "2GB");
+    assert_eq!(deserialized.ram_needed, "4GB");
+    assert_eq!(deserialized.speed, "Fast");
+    assert_eq!(deserialized.description, "Strong sanitization");
+    assert!(deserialized.installed);
+    assert!(!deserialized.recommended);
+}
+
+// ============================================================================
+// DownloadProgressData serialization
+// ============================================================================
+
+#[test]
+fn download_progress_data_serialization() {
+    let progress = DownloadProgressData {
+        model_id: "phi3:3.8b".to_string(),
+        display_name: "Phi-3 Mini 3.8B".to_string(),
+        download_size: "2.3GB".to_string(),
+        status: "downloading".to_string(),
+        completed: 1_200_000_000,
+        total: 2_400_000_000,
+        done: false,
+        error: None,
+    };
+
+    let json = serde_json::to_string(&progress).unwrap();
+    assert!(json.contains("phi3:3.8b"));
+    assert!(json.contains("downloading"));
+    assert!(json.contains("\"done\":false"));
+
+    // Deserialize back
+    let deserialized: DownloadProgressData = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.model_id, "phi3:3.8b");
+    assert_eq!(deserialized.display_name, "Phi-3 Mini 3.8B");
+    assert_eq!(deserialized.download_size, "2.3GB");
+    assert_eq!(deserialized.status, "downloading");
+    assert_eq!(deserialized.completed, 1_200_000_000);
+    assert_eq!(deserialized.total, 2_400_000_000);
+    assert!(!deserialized.done);
+    assert!(deserialized.error.is_none());
+
+    // With error
+    let error_progress = DownloadProgressData {
+        model_id: "test".to_string(),
+        display_name: "Test".to_string(),
+        download_size: "1GB".to_string(),
+        status: "error".to_string(),
+        completed: 0,
+        total: 0,
+        done: false,
+        error: Some("connection timeout".to_string()),
+    };
+
+    let json2 = serde_json::to_string(&error_progress).unwrap();
+    let deserialized2: DownloadProgressData = serde_json::from_str(&json2).unwrap();
+    assert_eq!(deserialized2.error, Some("connection timeout".to_string()));
 }

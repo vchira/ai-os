@@ -191,4 +191,129 @@ mod tests {
         assert!(text.contains("Llama 3.2 3B"));
         assert!(text.contains("recommended"));
     }
+
+    #[test]
+    fn model_selection_to_text_table_format() {
+        let data = ModelSelectionData {
+            title: "Choose Local AI Model".into(),
+            description: "Your system: 16GB RAM. Select a model.".into(),
+            models: vec![
+                ModelTableRow {
+                    model_id: "qwen2.5:0.5b".into(),
+                    display_name: "Qwen 2.5 0.5B".into(),
+                    download_size: "400MB".into(),
+                    ram_needed: "1GB".into(),
+                    speed: "Ultra fast".into(),
+                    description: "Minimal".into(),
+                    installed: true,
+                    recommended: false,
+                },
+                ModelTableRow {
+                    model_id: "llama3.2:3b".into(),
+                    display_name: "Llama 3.2 3B".into(),
+                    download_size: "2GB".into(),
+                    ram_needed: "4GB".into(),
+                    speed: "Fast".into(),
+                    description: "Strong sanitization".into(),
+                    installed: false,
+                    recommended: true,
+                },
+            ],
+            selected: None,
+            system_ram_gb: 16,
+            has_gpu: false,
+        };
+        let text = data.to_text_table();
+
+        // Title and description on first lines
+        assert!(text.starts_with("Choose Local AI Model"));
+        assert!(text.contains("Your system: 16GB RAM"));
+
+        // Column headers present
+        assert!(text.contains("Model"));
+        assert!(text.contains("Size"));
+        assert!(text.contains("RAM"));
+        assert!(text.contains("Speed"));
+        assert!(text.contains("Status"));
+
+        // Separator line
+        assert!(text.contains("---"));
+
+        // Installed model shows checkmark
+        assert!(text.contains("\u{2705}"), "Installed model should show checkmark");
+
+        // Recommended model shows star + "recommended"
+        assert!(text.contains("\u{2b50} recommended"), "Recommended model should show star");
+
+        // Both model names present
+        assert!(text.contains("Qwen 2.5 0.5B"));
+        assert!(text.contains("Llama 3.2 3B"));
+    }
+
+    #[test]
+    fn download_progress_percentage() {
+        // 0% — initial state
+        let p0 = DownloadProgressData {
+            model_id: "test".into(),
+            display_name: "Test".into(),
+            download_size: "1GB".into(),
+            status: "pulling manifest".into(),
+            completed: 0,
+            total: 0,
+            done: false,
+            error: None,
+        };
+        assert_eq!(p0.fraction(), 0.0);
+        // When total is 0, progress_text should just return the status
+        assert_eq!(p0.progress_text(), "pulling manifest");
+
+        // 50%
+        let p50 = DownloadProgressData {
+            model_id: "test".into(),
+            display_name: "Test".into(),
+            download_size: "1GB".into(),
+            status: "downloading".into(),
+            completed: 524_288_000, // 500MB
+            total: 1_048_576_000,   // 1000MB
+            done: false,
+            error: None,
+        };
+        assert!((p50.fraction() - 0.5).abs() < 0.01);
+        let text50 = p50.progress_text();
+        assert!(text50.contains("50%"), "Should show 50%, got: {text50}");
+        assert!(text50.contains("500MB"), "Should show 500MB done, got: {text50}");
+        assert!(text50.contains("1000MB"), "Should show 1000MB total, got: {text50}");
+
+        // 100%
+        let p100 = DownloadProgressData {
+            model_id: "test".into(),
+            display_name: "Test".into(),
+            download_size: "2GB".into(),
+            status: "verifying".into(),
+            completed: 2_097_152_000,
+            total: 2_097_152_000,
+            done: true,
+            error: None,
+        };
+        assert!((p100.fraction() - 1.0).abs() < 0.01);
+        let text100 = p100.progress_text();
+        assert!(text100.contains("100%"), "Should show 100%, got: {text100}");
+    }
+
+    #[test]
+    fn model_table_row_default_not_installed() {
+        let row = ModelTableRow {
+            model_id: "test:1b".into(),
+            display_name: "Test 1B".into(),
+            download_size: "500MB".into(),
+            ram_needed: "1GB".into(),
+            speed: "Fast".into(),
+            description: "A test model".into(),
+            installed: false,
+            recommended: false,
+        };
+        assert!(!row.installed, "Default row should not be installed");
+        assert!(!row.recommended, "Default row should not be recommended");
+        assert_eq!(row.model_id, "test:1b");
+    }
 }

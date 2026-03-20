@@ -114,6 +114,7 @@ impl SetupConversation {
             machine_name: machine,
             country: s.country.clone(),
             installed_to_drive: s.install_to_drive,
+            sentinel_model: s.sentinel_model.clone(),
         };
         drop(s);
 

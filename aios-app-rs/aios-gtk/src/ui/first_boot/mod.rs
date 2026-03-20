@@ -8,6 +8,7 @@
 mod complete;
 mod identity;
 mod provider;
+mod sentinel;
 mod system;
 mod welcome;
 
@@ -78,6 +79,8 @@ pub struct SetupResult {
     pub country: Option<aios_core::installer::locale::CountryDefaults>,
     /// Whether installation to hard drive was performed.
     pub installed_to_drive: bool,
+    /// Selected Sentinel model (e.g., "llama3.2:3b"). Required.
+    pub sentinel_model: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +107,7 @@ enum SetupStep {
     AddBackup,
     EnterBackupKey { provider: String },
     ProviderOrder,
+    SentinelModel,
     Complete,
 }
 
@@ -142,6 +146,8 @@ struct SetupState {
     target_drive: Option<aios_core::installer::drives::DriveInfo>,
     /// Generated partition plan (from PartitionPlan step).
     partition_plan: Option<aios_core::installer::partition::PartitionPlan>,
+    /// Selected Sentinel model (e.g., "llama3.2:3b").
+    sentinel_model: String,
 }
 
 impl Default for SetupState {
@@ -162,6 +168,7 @@ impl Default for SetupState {
             install_to_drive: false,
             target_drive: None,
             partition_plan: None,
+            sentinel_model: String::new(),
         }
     }
 }
@@ -326,6 +333,10 @@ impl SetupConversation {
                     self.set_primary_order("openai");
                 }
             }
+            SetupStep::SentinelModel => {
+                // Sentinel model selection uses dropdown — ignore voice.
+                info!("Voice input ignored for Sentinel model selection step");
+            }
             SetupStep::Complete => {
                 // Any voice input after completion closes setup.
                 self.finish();
@@ -363,6 +374,7 @@ impl SetupConversation {
                 self.show_enter_api_key(provider.clone(), true);
             }
             SetupStep::ProviderOrder => self.show_provider_order(),
+            SetupStep::SentinelModel => self.show_sentinel_model(),
             SetupStep::Complete => self.show_complete(),
         }
     }
