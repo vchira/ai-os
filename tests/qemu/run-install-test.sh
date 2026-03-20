@@ -170,10 +170,10 @@ log "=== Phase 1: Live ISO Verification ==="
 run_test "Live ISO booted" "uname -a" "Linux"
 run_test "Running from live media" "findmnt -n -o FSTYPE / 2>/dev/null || echo overlay" "overlay"
 run_test "Virtual disk visible (vda)" "lsblk -d -n -o NAME | grep -q vda && echo ok" "ok"
-run_test "sgdisk available" "command -v sgdisk >/dev/null && echo ok" "ok"
-run_test "mkfs.ext4 available" "command -v mkfs.ext4 >/dev/null && echo ok" "ok"
-run_test "unsquashfs available" "command -v unsquashfs >/dev/null && echo ok" "ok"
-run_test "grub-install available" "command -v grub-install >/dev/null && echo ok" "ok"
+run_test "sgdisk available" "which sgdisk >/dev/null 2>&1 || sudo which sgdisk >/dev/null 2>&1 && echo ok" "ok"
+run_test "mkfs.ext4 available" "which mkfs.ext4 >/dev/null 2>&1 || sudo which mkfs.ext4 >/dev/null 2>&1 && echo ok" "ok"
+run_test "unsquashfs available" "which unsquashfs >/dev/null 2>&1 && echo ok" "ok"
+run_test "grub-install available" "which grub-install >/dev/null 2>&1 || sudo which grub-install >/dev/null 2>&1 && echo ok" "ok"
 run_test "Live squashfs exists" "test -f /lib/live/mount/medium/live/filesystem.squashfs && echo ok || test -f /run/live/medium/live/filesystem.squashfs && echo ok" "ok"
 
 # ─── Phase 2: Run the installer via SSH ───────────────────────
@@ -185,25 +185,31 @@ log "=== Phase 2: Run Installer ==="
 # the partitioning + copy + bootloader steps.
 log "Partitioning virtual disk..."
 ssh_cmd "sudo sgdisk --zap-all /dev/vda" 2>/dev/null
-ssh_cmd "sudo sgdisk -n 1:0:+512M -t 1:ef00 -c 1:'EFI' /dev/vda" 2>/dev/null
-ssh_cmd "sudo sgdisk -n 2:0:+2G -t 2:8200 -c 2:'Swap' /dev/vda" 2>/dev/null
-ssh_cmd "sudo sgdisk -n 3:0:0 -t 3:8300 -c 3:'Root' /dev/vda" 2>/dev/null
+# Partition 1: BIOS Boot (1MB) — required for GRUB on GPT disks
+ssh_cmd "sudo sgdisk -n 1:0:+1M -t 1:ef02 -c 1:'BIOS Boot' /dev/vda" 2>/dev/null
+# Partition 2: EFI System (512MB)
+ssh_cmd "sudo sgdisk -n 2:0:+512M -t 2:ef00 -c 2:'EFI' /dev/vda" 2>/dev/null
+# Partition 3: Swap (2GB)
+ssh_cmd "sudo sgdisk -n 3:0:+2G -t 3:8200 -c 3:'Swap' /dev/vda" 2>/dev/null
+# Partition 4: Root (rest of disk)
+ssh_cmd "sudo sgdisk -n 4:0:0 -t 4:8300 -c 4:'Root' /dev/vda" 2>/dev/null
 
-run_test "Partitions created" "lsblk /dev/vda -n -o NAME | wc -l" "3"
+run_test "Partitions created" "lsblk /dev/vda -n -o NAME | grep -c vda" "4"
 
 log "Formatting partitions..."
-ssh_cmd "sudo mkfs.fat -F 32 /dev/vda1" 2>/dev/null
-ssh_cmd "sudo mkswap /dev/vda2" 2>/dev/null
-ssh_cmd "sudo mkfs.ext4 -q -F /dev/vda3" 2>/dev/null
+# vda1 = BIOS Boot (no format needed)
+ssh_cmd "sudo mkfs.fat -F 32 /dev/vda2" 2>/dev/null
+ssh_cmd "sudo mkswap /dev/vda3" 2>/dev/null
+ssh_cmd "sudo mkfs.ext4 -q -F /dev/vda4" 2>/dev/null
 
-run_test "EFI partition formatted" "sudo blkid /dev/vda1 | grep -q vfat && echo ok" "ok"
-run_test "Root partition formatted" "sudo blkid /dev/vda3 | grep -q ext4 && echo ok" "ok"
+run_test "EFI partition formatted" "sudo blkid /dev/vda2 | grep -q vfat && echo ok" "ok"
+run_test "Root partition formatted" "sudo blkid /dev/vda4 | grep -q ext4 && echo ok" "ok"
 
 log "Mounting and copying filesystem..."
 ssh_cmd "sudo mkdir -p /mnt/aios-install"
-ssh_cmd "sudo mount /dev/vda3 /mnt/aios-install"
+ssh_cmd "sudo mount /dev/vda4 /mnt/aios-install"
 ssh_cmd "sudo mkdir -p /mnt/aios-install/boot/efi"
-ssh_cmd "sudo mount /dev/vda1 /mnt/aios-install/boot/efi"
+ssh_cmd "sudo mount /dev/vda2 /mnt/aios-install/boot/efi"
 
 # Find the squashfs
 SQUASHFS=$(ssh_cmd "ls /lib/live/mount/medium/live/filesystem.squashfs 2>/dev/null || ls /run/live/medium/live/filesystem.squashfs 2>/dev/null" || echo "")
@@ -216,9 +222,9 @@ else
 fi
 
 log "Writing fstab..."
-ROOT_UUID=$(ssh_cmd "sudo blkid -s UUID -o value /dev/vda3")
-EFI_UUID=$(ssh_cmd "sudo blkid -s UUID -o value /dev/vda1")
-SWAP_UUID=$(ssh_cmd "sudo blkid -s UUID -o value /dev/vda2")
+ROOT_UUID=$(ssh_cmd "sudo blkid -s UUID -o value /dev/vda4")
+EFI_UUID=$(ssh_cmd "sudo blkid -s UUID -o value /dev/vda2")
+SWAP_UUID=$(ssh_cmd "sudo blkid -s UUID -o value /dev/vda3")
 ssh_cmd "sudo bash -c 'cat > /mnt/aios-install/etc/fstab << FSTAB
 UUID=${ROOT_UUID}  /          ext4  errors=remount-ro  0  1
 UUID=${EFI_UUID}   /boot/efi  vfat  umask=0077         0  1
