@@ -202,7 +202,7 @@ pub fn is_credential_key(key: &str) -> bool {
         || lower.contains("app_password")
         || lower.contains("private_key")
         || lower.contains("auth")
-        || lower.contains("pin")
+        || lower == "pin" || lower.contains("pin_code") || lower.contains("_pin")
 }
 
 /// Scan text for leaked secure/private values.
