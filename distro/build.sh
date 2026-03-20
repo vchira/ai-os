@@ -148,6 +148,21 @@ if [ "${ARG}" = "--clean" ] && [ -d "${BUILD_DIR}" ]; then
         if [ -f chroot/usr/bin/whisper-cpp-cli ]; then
             cp chroot/usr/bin/whisper-cpp-cli /cache/external/ 2>/dev/null || true
         fi
+        # Ollama binary
+        if [ -f chroot/usr/bin/ollama ]; then
+            cp chroot/usr/bin/ollama /cache/external/ 2>/dev/null || true
+        fi
+        if [ -d chroot/usr/lib/ollama ]; then
+            tar cf /cache/external/ollama-libs.tar -C chroot/usr/lib ollama 2>/dev/null || true
+        fi
+        # Ollama models
+        if [ -d chroot/home/aios/.ollama/models ] && [ ! -f /cache/external/ollama-models.tar ]; then
+            tar cf /cache/external/ollama-models.tar -C chroot/home/aios/.ollama models 2>/dev/null || true
+        fi
+        # KWS models (infrastructure + pretrained wake words)
+        if [ -d chroot/opt/aios-app/models/kws/infrastructure ]; then
+            tar cf /cache/external/kws-models.tar -C chroot/opt/aios-app/models kws 2>/dev/null || true
+        fi
         # Bootstrap cache (debootstrap tarball — ~200 base packages)
         if [ -d cache/bootstrap ] && [ ! -f /cache/bootstrap.tar ]; then
             echo "[*] Saving bootstrap cache..."
@@ -179,21 +194,29 @@ if [ ! -f "${AIOS_BIN}" ]; then
 fi
 echo "[*] AiOS binary: $(du -h "${AIOS_BIN}" | cut -f1)"
 
-# ─── --code-rebuild: fast path — just replace binary in existing ISO ─
+# ─── --code-rebuild: fast path — just replace binary + autoconfig in existing ISO ─
 if [ "${ARG}" = "--code-rebuild" ]; then
-    echo "[*] Fast rebuild: replacing binary in existing chroot..."
+    echo "[*] Fast rebuild: patching existing ISO..."
 
-    if [ ! -d "${BUILD_DIR}/chroot" ]; then
-        echo "ERROR: No existing chroot. Run ./build.sh first (without --code-rebuild)."
-        exit 1
+    # Resolve autoconfig mount for Docker
+    AUTOCONFIG_MOUNT=""
+    if [ -n "${AUTOCONFIG_PATH}" ]; then
+        AUTOCONFIG_REAL="$(cd "$(dirname "${AUTOCONFIG_PATH}")" && pwd)/$(basename "${AUTOCONFIG_PATH}")"
+        if [ ! -f "${AUTOCONFIG_REAL}" ]; then
+            echo "ERROR: Autoconfig file not found: ${AUTOCONFIG_PATH}"
+            exit 1
+        fi
+        echo "[*] Will inject autoconfig: ${AUTOCONFIG_REAL}"
+        AUTOCONFIG_MOUNT="-v ${AUTOCONFIG_REAL}:/tmp/autoconfig.json:ro"
     fi
 
-    # Replace the binary inside the existing ISO directly.
-    # We unsquash the filesystem, replace the binary, re-squash, and rebuild the ISO.
+    # Replace the binary (and optionally autoconfig) inside the existing ISO.
+    # Unsquash the filesystem, patch files, re-squash, rebuild ISO.
     # This avoids live-build's state machine entirely.
     docker run --rm --privileged \
         -v "${REPO_DIR}:/work" \
         -v "${CACHE_VOL}:/cache" \
+        ${AUTOCONFIG_MOUNT} \
         "${IMAGE}" bash -c '
             set -e
             cd /work/distro/build
@@ -205,7 +228,7 @@ if [ "${ARG}" = "--code-rebuild" ]; then
                 exit 1
             fi
 
-            echo "[*] Patching binary in existing ISO: ${OLD_ISO}"
+            echo "[*] Patching ISO: ${OLD_ISO}"
 
             # Mount the ISO to extract the squashfs
             mkdir -p /tmp/iso_mount /tmp/iso_repack
@@ -213,7 +236,7 @@ if [ "${ARG}" = "--code-rebuild" ]; then
             cp -a /tmp/iso_mount/. /tmp/iso_repack/
             umount /tmp/iso_mount
 
-            # Unsquash, replace binary, re-squash
+            # Unsquash, patch files, re-squash
             SQFS="/tmp/iso_repack/live/filesystem.squashfs"
             if [ ! -f "${SQFS}" ]; then
                 echo "ERROR: squashfs not found in ISO"
@@ -224,7 +247,14 @@ if [ "${ARG}" = "--code-rebuild" ]; then
             unsquashfs -d /tmp/sqfs_root -f "${SQFS}"
             cp /work/aios-app-rs/target/release/aios /tmp/sqfs_root/usr/bin/aios
             chmod +x /tmp/sqfs_root/usr/bin/aios
-            echo "[*] Binary replaced in squashfs"
+            echo "[*] Binary replaced"
+
+            # Inject autoconfig if provided
+            if [ -f /tmp/autoconfig.json ]; then
+                mkdir -p /tmp/sqfs_root/opt/aios-app
+                cp /tmp/autoconfig.json /tmp/sqfs_root/opt/aios-app/autoconfig.json
+                echo "[*] Autoconfig injected"
+            fi
 
             rm "${SQFS}"
             mksquashfs /tmp/sqfs_root "${SQFS}" -comp xz -Xbcj x86 -b 1M -no-progress

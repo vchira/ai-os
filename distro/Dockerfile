@@ -20,3 +20,8 @@ RUN mkdir -p /cache/prefetch && \
     apt-get update -qq && \
     apt-get download $(cat /tmp/packages.list | grep -v '^#' | grep -v '^$' | tr '\n' ' ') 2>/dev/null || true && \
     apt-get clean
+
+# ─── Ollama binary + CPU libs (pre-downloaded on host) ────────
+# Downloaded from GitHub releases, extracted CPU-only (~43MB).
+COPY ollama/ /opt/ollama-dist/
+RUN chmod +x /opt/ollama-dist/ollama

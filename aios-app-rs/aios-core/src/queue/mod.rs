@@ -134,23 +134,27 @@ impl MessageQueue {
         let role = msg.role.to_string();
         let level = msg.level.map(|l| l.as_str().to_string());
 
-        self.db
-            .execute(
-                "INSERT INTO messages (timestamp, channel, role, source, content, level, tool_calls, tool_call_id, metadata)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    timestamp,
-                    channel,
-                    role,
-                    msg.source,
-                    msg.content,
-                    level,
-                    msg.tool_calls,
-                    msg.tool_call_id,
-                    msg.metadata,
-                ],
-            )
-            .expect("Failed to insert message");
+        match self.db.execute(
+            "INSERT INTO messages (timestamp, channel, role, source, content, level, tool_calls, tool_call_id, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                timestamp,
+                channel,
+                role,
+                msg.source,
+                msg.content,
+                level,
+                msg.tool_calls,
+                msg.tool_call_id,
+                msg.metadata,
+            ],
+        ) {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Failed to insert message into queue: {e}");
+                return 0;
+            }
+        }
 
         let id = self.db.last_insert_rowid();
 

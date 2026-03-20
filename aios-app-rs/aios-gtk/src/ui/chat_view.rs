@@ -271,6 +271,49 @@ impl ChatView {
         self.scroll_to_bottom();
     }
 
+    /// Update the last progress message in-place, or add one if none exists.
+    ///
+    /// Used for live download progress during Ollama model pulls.
+    /// The progress row is identified by the CSS class `progress-row`.
+    pub fn update_or_add_progress(&self, text: &str) {
+        // Try to find the existing progress row and update its label.
+        let mut child = self.container.last_child();
+        while let Some(widget) = child {
+            if widget.has_css_class("progress-row") {
+                // Found it — update the label inside.
+                if let Some(row) = widget.downcast_ref::<gtk::Box>() {
+                    if let Some(label_widget) = row.last_child() {
+                        if let Some(label) = label_widget.downcast_ref::<gtk::Label>() {
+                            label.set_text(text);
+                            return;
+                        }
+                    }
+                }
+            }
+            child = widget.prev_sibling();
+        }
+
+        // No progress row found — create one.
+        let row = gtk::Box::new(Orientation::Horizontal, 8);
+        row.add_css_class("message-row");
+        row.add_css_class("progress-row");
+        row.set_halign(Align::Start);
+        row.set_margin_start(8);
+
+        let spinner = gtk::Spinner::new();
+        spinner.set_spinning(true);
+        row.append(&spinner);
+
+        let label = gtk::Label::new(Some(text));
+        label.set_wrap(true);
+        label.set_xalign(0.0);
+        label.add_css_class("dim-label");
+        row.append(&label);
+
+        self.container.append(&row);
+        self.scroll_to_bottom();
+    }
+
     /// Append a rich "setup card" to the chat view.
     ///
     /// Setup cards are used during the first-boot conversation. They look like

@@ -123,15 +123,17 @@ pub const PROVIDERS: &[ProviderDef] = &[
     },
     ProviderDef {
         id: "ollama",
-        display_name: "Ollama",
+        display_name: "Local",
         api_key_config: "",
         model_config: "llm.ollama_model",
-        default_model: "llama3.2",
+        default_model: "llama3.1:8b",
         models: &[
-            ("Llama 3.2", "llama3.2"),
-            ("Llama 3.1", "llama3.1"),
-            ("Mistral 7B", "mistral"),
-            ("Phi-3", "phi3"),
+            ("Llama 3.2 1B", "llama3.2:1b"),
+            ("Llama 3.2 3B", "llama3.2:3b"),
+            ("Llama 3.1 8B", "llama3.1:8b"),
+            ("Llama 3.1 70B", "llama3.1:70b"),
+            ("Mistral 7B", "mistral:7b"),
+            ("Phi-3 3.8B", "phi3:3.8b"),
         ],
         needs_api_key: false,
         enabled_config: "llm.ollama_enabled",
@@ -167,12 +169,12 @@ pub fn is_configured(provider: &ProviderDef, config: &ConfigManager) -> bool {
         let key = config.get_str(provider.api_key_config, "");
         !key.is_empty() && key != "your-api-key-here"
     } else {
-        // Key-less provider (Ollama) — check enabled flag.
-        if provider.enabled_config.is_empty() {
-            false
-        } else {
-            config.get_bool(provider.enabled_config, false)
+        // Key-less provider (Ollama) — configured if explicitly enabled
+        // OR if it's the active provider (e.g. set via autoconfig).
+        if !provider.enabled_config.is_empty() && config.get_bool(provider.enabled_config, false) {
+            return true;
         }
+        config.get_str("llm.provider", "") == provider.id
     }
 }
 
@@ -225,14 +227,6 @@ pub fn mask_api_key(key: &str) -> String {
     format!("{}...{}", &key[..prefix_end], last4)
 }
 
-/// Return display names for configured providers, excluding Ollama.
-pub fn configured_display_names_excluding_ollama(config: &ConfigManager) -> Vec<String> {
-    PROVIDERS
-        .iter()
-        .filter(|p| p.id != "ollama" && is_configured(p, config))
-        .map(|p| p.display_name.to_string())
-        .collect()
-}
 
 /// Return the base API URL for a provider.
 ///
@@ -265,7 +259,8 @@ mod tests {
         assert_eq!(model_human_name("deepseek-reasoner"), "DeepSeek Reasoner");
         assert_eq!(model_human_name("claude-sonnet-4-20250514"), "Claude Sonnet 4");
         assert_eq!(model_human_name("gpt-4o"), "GPT-4o");
-        assert_eq!(model_human_name("llama-3.1-8b-instant"), "Llama 3.1 8B");
+        assert_eq!(model_human_name("llama-3.1-8b-instant"), "Llama 3.1 8B"); // Groq
+        assert_eq!(model_human_name("llama3.1:8b"), "Llama 3.1 8B"); // Local
     }
 
     #[test]
@@ -287,12 +282,14 @@ mod tests {
     }
 
     #[test]
-    fn configured_excluding_ollama() {
-        // Even with Ollama enabled in config, it should never appear.
-        let path = std::env::temp_dir().join("aios-test-excl-ollama.json");
-        let config = ConfigManager::with_path(path).unwrap();
-        let names = configured_display_names_excluding_ollama(&config);
-        assert!(!names.iter().any(|n| n == "Ollama"));
+    fn local_provider_configured_when_active() {
+        let path = std::env::temp_dir().join("aios-test-local-active.json");
+        let mut config = ConfigManager::with_path(path).unwrap();
+        let _ = config.set("llm.provider", serde_json::json!("ollama"));
+        let ollama = find_by_id("ollama").unwrap();
+        assert!(is_configured(ollama, &config));
+        let names = configured_display_names(&config);
+        assert!(names.contains(&"Local".to_string()));
     }
 
     #[test]

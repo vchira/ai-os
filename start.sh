@@ -28,6 +28,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Kill any running AiOS QEMU instance before building
+pkill -9 -f "qemu-system-x86_64.*aios" 2>/dev/null || true
+virsh --connect qemu:///system destroy aios-live 2>/dev/null || true
+virsh --connect qemu:///system undefine aios-live 2>/dev/null || true
+
 if [ "${ARG}" = "--nuke" ]; then
     echo "[*] NUKE: deleting everything and rebuilding from scratch..."
     "${SCRIPT_DIR}/clean.sh" --nuke
@@ -56,6 +61,17 @@ else
     if [ -z "${ISO}" ]; then
         echo "[*] No ISO found — building AiOS..."
         "${SCRIPT_DIR}/distro/build.sh" ${AUTOCONFIG_ARG}
+    elif [ -n "${AUTOCONFIG_ARG}" ]; then
+        # Only rebuild if autoconfig changed since last build
+        AUTOCONFIG_FILE="${AUTOCONFIG_ARG#--autoconfig }"
+        LAST_AUTOCONFIG="${SCRIPT_DIR}/.last-autoconfig.md5"
+        CURRENT_MD5=$(md5sum "${AUTOCONFIG_FILE}" 2>/dev/null | cut -d' ' -f1)
+        LAST_MD5=$(cat "${LAST_AUTOCONFIG}" 2>/dev/null || true)
+        if [ "${CURRENT_MD5}" != "${LAST_MD5}" ]; then
+            echo "[*] Autoconfig changed — fast rebuild to inject it..."
+            "${SCRIPT_DIR}/distro/build.sh" ${AUTOCONFIG_ARG} --code-rebuild
+            echo "${CURRENT_MD5}" > "${LAST_AUTOCONFIG}"
+        fi
     fi
 fi
 
@@ -75,10 +91,5 @@ else
         echo "[*] Debug mode on — after boot, check /tmp/aios-serial.log"
     fi
     echo "[*] Using QEMU/KVM"
-    # Kill any running AiOS QEMU instance first
-    pkill -9 -f "qemu-system-x86_64.*aios" 2>/dev/null || true
-    virsh --connect qemu:///system destroy aios-live 2>/dev/null || true
-    virsh --connect qemu:///system undefine aios-live 2>/dev/null || true
-    sleep 1
     cd "${SCRIPT_DIR}/distro" && exec ./run-vm.sh "${ISO}"
 fi

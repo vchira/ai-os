@@ -353,9 +353,9 @@ impl AiosApp {
         command_handler::apply_theme(theme);
     }
 
-    /// Get list of available providers (those with API keys configured, excluding Ollama).
+    /// Get list of available providers (those with API keys or locally enabled).
     fn available_providers(config: &ConfigManager) -> Vec<String> {
-        crate::providers::configured_display_names_excluding_ollama(config)
+        crate::providers::configured_display_names(config)
     }
 
     /// Wire UiPanelTool and tool executor into the LLM manager.

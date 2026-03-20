@@ -4,6 +4,9 @@
 //! Values are read from the [`ConfigManager`] on open and written back
 //! on change.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gtk4::prelude::*;
 use gtk4::{self as gtk};
 use libadwaita as adw;
@@ -127,7 +130,7 @@ pub fn show_settings(
 
 fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
     use crate::providers::{
-        PROVIDERS, configured_display_names_excluding_ollama, find_by_display_name,
+        PROVIDERS, configured_display_names, find_by_display_name,
         find_by_id, mask_api_key, is_configured,
     };
 
@@ -144,7 +147,7 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
         .description("Select provider and model for main AI")
         .build();
 
-    let configured = configured_display_names_excluding_ollama(config);
+    let configured = configured_display_names(config);
     let config_names: Vec<&str> = configured.iter().map(|s| s.as_str()).collect();
 
     // -- Main AI provider + model --
@@ -167,10 +170,16 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
     let main_model_row = build_model_combo("Main Model", &main_prov_id, config);
     assign_group.add(&main_model_row);
 
+    // Shared state between provider and model change handlers.
+    let prev_model_idx = Rc::new(Cell::new(main_model_row.selected()));
+    let reverting = Rc::new(Cell::new(false));
+    let from_provider_switch = Rc::new(Cell::new(false));
+
     // Wire Main AI provider change → update model dropdown + config.
     {
         let model_row = main_model_row.clone();
         let config_dir = ConfigManager::default_config_dir();
+        let switch_flag = from_provider_switch.clone();
         main_provider_row.connect_selected_notify(move |row| {
             let sel = row.selected() as usize;
             let model_ref = row.model().and_then(|m| m.downcast::<gtk::StringList>().ok());
@@ -180,11 +189,15 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
             if let Some(prov) = find_by_display_name(&name) {
                 if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
                     let _ = cfg.set("llm.provider", serde_json::json!(prov.id));
+                    if prov.id == "ollama" {
+                        let _ = cfg.set("llm.ollama_enabled", serde_json::json!(true));
+                    }
                 }
                 // Update model dropdown.
                 let model_names: Vec<&str> = prov.models.iter().map(|(n, _)| *n).collect();
                 let new_model_list = gtk::StringList::new(&model_names);
                 model_row.set_model(Some(&new_model_list));
+                switch_flag.set(true);
                 model_row.set_selected(0);
                 // Save default model.
                 if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
@@ -194,23 +207,146 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
         });
     }
 
-    // Wire Main model change → config.
+    // Wire Main model change → config + download check for Local models.
     {
         let prov_row = main_provider_row.clone();
         let config_dir = ConfigManager::default_config_dir();
+        let prev_idx = prev_model_idx.clone();
+        let revert_flag = reverting.clone();
+        let switch_flag = from_provider_switch.clone();
+
         main_model_row.connect_selected_notify(move |row| {
+            // Guard: skip if reverting from a declined download.
+            if revert_flag.get() {
+                revert_flag.set(false);
+                prev_idx.set(row.selected());
+                return;
+            }
+            // Guard: skip if triggered by provider switch (config already saved).
+            if switch_flag.get() {
+                switch_flag.set(false);
+                prev_idx.set(row.selected());
+                return;
+            }
+
             let sel = row.selected() as usize;
-            // Find which provider is selected to get its model list.
             let prov_sel = prov_row.selected() as usize;
             let prov_model = prov_row.model().and_then(|m| m.downcast::<gtk::StringList>().ok());
             let prov_name = prov_model
                 .and_then(|sl| if prov_sel < sl.n_items() as usize { sl.string(prov_sel as u32).map(|s| s.to_string()) } else { None })
                 .unwrap_or_default();
             if let Some(prov) = find_by_display_name(&prov_name) {
-                if let Some((_, slug)) = prov.models.get(sel) {
+                if let Some((human_name, slug)) = prov.models.get(sel) {
+                    // For Local (Ollama) provider, check if model is installed.
+                    if prov.id == "ollama" {
+                        let client = aios_llm::OllamaClient::new();
+                        let needs_download = client.is_running() && !client.is_model_installed(slug);
+
+                        if needs_download {
+                            let download_size = aios_llm::local::MODEL_CATALOG.iter()
+                                .find(|m| m.name == *slug)
+                                .map(|m| m.download_size)
+                                .unwrap_or("unknown size");
+
+                            let window = row.root()
+                                .and_then(|r| r.downcast::<gtk::Window>().ok());
+                            let win_ref: Option<&gtk::Window> =
+                                window.as_ref().map(|w| w as &gtk::Window);
+
+                            let dialog = adw::MessageDialog::new(
+                                win_ref,
+                                Some("Download Model?"),
+                                Some(&format!(
+                                    "Model '{}' is not installed.\nDownload it now? (~{})",
+                                    human_name, download_size
+                                )),
+                            );
+                            dialog.add_response("cancel", "No");
+                            dialog.add_response("download", "Yes, Download");
+                            dialog.set_response_appearance(
+                                "download",
+                                adw::ResponseAppearance::Suggested,
+                            );
+                            dialog.set_default_response(Some("cancel"));
+                            dialog.set_close_response("cancel");
+
+                            let config_dir_c = config_dir.clone();
+                            let model_config = prov.model_config.to_string();
+                            let slug_owned = slug.to_string();
+                            let prev = prev_idx.clone();
+                            let revert = revert_flag.clone();
+                            let row_ref = row.clone();
+
+                            dialog.connect_response(None, move |_dlg, response| {
+                                if response == "download" {
+                                    // Save config.
+                                    if let Ok(mut cfg) =
+                                        ConfigManager::with_path(config_dir_c.join("config.json"))
+                                    {
+                                        let _ = cfg.set(
+                                            &model_config,
+                                            serde_json::json!(&slug_owned),
+                                        );
+                                    }
+                                    prev.set(row_ref.selected());
+
+                                    // Start download in background.
+                                    let model_tag = slug_owned.clone();
+                                    let (tx, rx) =
+                                        std::sync::mpsc::channel::<Result<(), String>>();
+                                    std::thread::spawn(move || {
+                                        let cl = aios_llm::OllamaClient::new();
+                                        if let Err(e) = cl.ensure_running() {
+                                            let _ = tx.send(Err(e));
+                                            return;
+                                        }
+                                        let _ = tx.send(cl.pull_model(&model_tag, |_| {}));
+                                    });
+
+                                    row_ref.set_subtitle("Downloading...");
+                                    row_ref.set_sensitive(false);
+
+                                    let row_poll = row_ref.clone();
+                                    gtk::glib::timeout_add_local(
+                                        std::time::Duration::from_millis(500),
+                                        move || match rx.try_recv() {
+                                            Ok(Ok(())) => {
+                                                row_poll.set_subtitle("");
+                                                row_poll.set_sensitive(true);
+                                                gtk::glib::ControlFlow::Break
+                                            }
+                                            Ok(Err(e)) => {
+                                                row_poll.set_subtitle(&format!("Failed: {e}"));
+                                                row_poll.set_sensitive(true);
+                                                gtk::glib::ControlFlow::Break
+                                            }
+                                            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                                gtk::glib::ControlFlow::Continue
+                                            }
+                                            Err(_) => {
+                                                row_poll.set_subtitle("Download failed");
+                                                row_poll.set_sensitive(true);
+                                                gtk::glib::ControlFlow::Break
+                                            }
+                                        },
+                                    );
+                                } else {
+                                    // User declined — revert dropdown.
+                                    revert.set(true);
+                                    row_ref.set_selected(prev.get());
+                                }
+                            });
+
+                            dialog.present();
+                            return;
+                        }
+                    }
+
+                    // Non-Local or model already installed — save directly.
                     if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
                         let _ = cfg.set(prov.model_config, serde_json::json!(slug));
                     }
+                    prev_idx.set(sel as u32);
                 }
             }
         });

@@ -26,13 +26,16 @@ pub struct PromptInput {
     container: gtk::Box,
     entry: gtk::Entry,
     send_button: gtk::Button,
-    /// Mic status indicator (replaces push-to-talk).
-    /// Green = listening for wake word, red/grey = muted.
-    mic_indicator: gtk::Button,
+    /// Push-to-talk button: hold to record, release to transcribe + send.
+    ptt_button: gtk::Button,
     popover: gtk::Popover,
     list_box: gtk::ListBox,
     /// Shared callback invoked when the user submits text.
     on_submit_cb: Rc<RefCell<Option<Box<dyn Fn(String)>>>>,
+    /// PTT press callback.
+    on_ptt_press_cb: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    /// PTT release callback.
+    on_ptt_release_cb: Rc<RefCell<Option<Box<dyn Fn()>>>>,
 }
 
 impl PromptInput {
@@ -58,15 +61,17 @@ impl PromptInput {
         send_button.set_tooltip_text(Some("Send message"));
         container.append(&send_button);
 
-        // Mic status indicator (always-listening wake word).
-        // Green = listening, red = muted, grey = disabled.
-        let mic_indicator = gtk::Button::from_icon_name("audio-input-microphone-symbolic");
-        mic_indicator.add_css_class("circular");
-        mic_indicator.add_css_class("mic-muted"); // starts muted until configured
-        mic_indicator.set_tooltip_text(Some("Mic: muted (click to toggle)"));
-        container.append(&mic_indicator);
+        // Push-to-talk button: hold to record, release to send through STT.
+        let ptt_button = gtk::Button::from_icon_name("audio-input-microphone-symbolic");
+        ptt_button.add_css_class("circular");
+        ptt_button.set_tooltip_text(Some("Hold to talk (or press Super key)"));
+        container.append(&ptt_button);
 
         let on_submit_cb: Rc<RefCell<Option<Box<dyn Fn(String)>>>> =
+            Rc::new(RefCell::new(None));
+        let on_ptt_press_cb: Rc<RefCell<Option<Box<dyn Fn()>>>> =
+            Rc::new(RefCell::new(None));
+        let on_ptt_release_cb: Rc<RefCell<Option<Box<dyn Fn()>>>> =
             Rc::new(RefCell::new(None));
 
         // --- Autocomplete popover ---
@@ -90,10 +95,12 @@ impl PromptInput {
             container,
             entry,
             send_button,
-            mic_indicator,
+            ptt_button,
             popover,
             list_box,
             on_submit_cb,
+            on_ptt_press_cb,
+            on_ptt_release_cb,
         };
 
         prompt.connect_internal_signals();
@@ -132,20 +139,19 @@ impl PromptInput {
         }
     }
 
-    /// Update the mic indicator state.
-    #[allow(dead_code)]
-    pub fn set_mic_listening(&self, listening: bool) {
-        self.mic_indicator.remove_css_class("mic-listening");
-        self.mic_indicator.remove_css_class("mic-muted");
-        if listening {
-            self.mic_indicator.add_css_class("mic-listening");
-            self.mic_indicator.set_tooltip_text(Some(
-                "Mic: listening for wake word (click to mute)",
-            ));
-        } else {
-            self.mic_indicator.add_css_class("mic-muted");
-            self.mic_indicator.set_tooltip_text(Some("Mic: muted (click to toggle)"));
-        }
+    /// Register a callback for PTT press (start recording).
+    pub fn on_ptt_press(&self, callback: impl Fn() + 'static) {
+        *self.on_ptt_press_cb.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Register a callback for PTT release (stop recording + transcribe).
+    pub fn on_ptt_release(&self, callback: impl Fn() + 'static) {
+        *self.on_ptt_release_cb.borrow_mut() = Some(Box::new(callback));
+    }
+
+    /// Get the PTT button widget (for external Super key trigger).
+    pub fn ptt_button(&self) -> &gtk::Button {
+        &self.ptt_button
     }
 
     /// Commands that take no arguments and should execute immediately on selection.
@@ -188,22 +194,31 @@ impl PromptInput {
             entry.set_text("");
         });
 
-        // Mic indicator: toggle mute on click.
-        let mic = self.mic_indicator.clone();
-        self.mic_indicator.connect_clicked(move |btn| {
-            if btn.has_css_class("mic-listening") {
-                btn.remove_css_class("mic-listening");
-                btn.add_css_class("mic-muted");
-                btn.set_tooltip_text(Some("Mic: muted (click to toggle)"));
-                tracing::info!("Mic muted");
-            } else {
-                btn.remove_css_class("mic-muted");
-                btn.add_css_class("mic-listening");
-                btn.set_tooltip_text(Some("Mic: listening for wake word (click to mute)"));
-                tracing::info!("Mic listening");
+        // Push-to-talk: press to start recording, release to stop + transcribe.
+        let press_gesture = gtk::GestureClick::new();
+        press_gesture.set_button(1); // Left mouse button
+
+        let press_cb = self.on_ptt_press_cb.clone();
+        let ptt_btn_press = self.ptt_button.clone();
+        press_gesture.connect_pressed(move |_, _, _, _| {
+            ptt_btn_press.add_css_class("recording");
+            ptt_btn_press.set_icon_name("media-record-symbolic");
+            if let Some(ref f) = *press_cb.borrow() {
+                f();
             }
-            let _ = mic; // suppress unused
         });
+
+        let release_cb = self.on_ptt_release_cb.clone();
+        let ptt_btn_release = self.ptt_button.clone();
+        press_gesture.connect_released(move |_, _, _, _| {
+            ptt_btn_release.remove_css_class("recording");
+            ptt_btn_release.set_icon_name("audio-input-microphone-symbolic");
+            if let Some(ref f) = *release_cb.borrow() {
+                f();
+            }
+        });
+
+        self.ptt_button.add_controller(press_gesture);
     }
 
     /// Set up the slash-command autocomplete popover.

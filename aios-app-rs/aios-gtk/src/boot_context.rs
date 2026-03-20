@@ -202,7 +202,7 @@ pub(crate) fn finalize_boot(
     ui.prompt_input.widget().set_hexpand(true);
 
     // Update provider dropdown.
-    let configured = crate::providers::configured_display_names_excluding_ollama(
+    let configured = crate::providers::configured_display_names(
         &state.borrow().config,
     );
     let refs: Vec<&str> = configured.iter().map(|s| s.as_str()).collect();

@@ -59,6 +59,83 @@ if [ -d /cache/external ]; then
         mkdir -p config/includes.chroot/home/aios/.aios/models
         tar xf /cache/external/piper-voices.tar -C config/includes.chroot/home/aios/.aios/models 2>/dev/null || true
     fi
+    if [ -f /cache/external/ollama ]; then
+        mkdir -p config/includes.chroot/usr/bin
+        cp /cache/external/ollama config/includes.chroot/usr/bin/ollama
+        chmod +x config/includes.chroot/usr/bin/ollama
+    fi
+    if [ -f /cache/external/ollama-libs.tar ]; then
+        mkdir -p config/includes.chroot/usr/lib
+        tar xf /cache/external/ollama-libs.tar -C config/includes.chroot/usr 2>/dev/null || true
+    fi
+    if [ -f /cache/external/ollama-models.tar ]; then
+        echo "[*] Restoring cached Ollama models..."
+        mkdir -p config/includes.chroot/home/aios/.ollama
+        tar xf /cache/external/ollama-models.tar -C config/includes.chroot/home/aios/.ollama 2>/dev/null || true
+    fi
+    if [ -f /cache/external/kws-models.tar ]; then
+        echo "[*] Restoring cached KWS models..."
+        mkdir -p config/includes.chroot/opt/aios-app/models
+        tar xf /cache/external/kws-models.tar -C config/includes.chroot/opt/aios-app/models 2>/dev/null || true
+    fi
+fi
+
+# Install Ollama from Docker image (pre-downloaded on host, baked into image).
+if [ -d /opt/ollama-dist ] && [ -f /opt/ollama-dist/ollama ]; then
+    mkdir -p config/includes.chroot/usr/bin
+    cp /opt/ollama-dist/ollama config/includes.chroot/usr/bin/ollama
+    chmod +x config/includes.chroot/usr/bin/ollama
+    mkdir -p config/includes.chroot/usr/lib/ollama
+    cp -d /opt/ollama-dist/lib*.so* config/includes.chroot/usr/lib/ollama/ 2>/dev/null || true
+    echo "[*] Ollama installed from Docker image (CPU-only)"
+fi
+
+# Pre-download Ollama models (sentinel + main AI) if not cached.
+# Runs ollama temporarily to pull models, then packs them for the ISO.
+OLLAMA_BIN="/opt/ollama-dist/ollama"
+OLLAMA_LIBS="/opt/ollama-dist"
+OLLAMA_MODELS_TO_PULL="llama3.2:1b llama3.1:8b"
+if [ -f "${OLLAMA_BIN}" ] && [ ! -f /cache/external/ollama-models.tar ]; then
+    echo "[*] Pre-downloading Ollama models (first build only)..."
+    OLLAMA_MODEL_DIR="/cache/ollama-models"
+    mkdir -p "${OLLAMA_MODEL_DIR}"
+
+    # Start ollama serve temporarily.
+    OLLAMA_MODELS="${OLLAMA_MODEL_DIR}" \
+    LD_LIBRARY_PATH="${OLLAMA_LIBS}" \
+    HOME="/tmp" \
+        "${OLLAMA_BIN}" serve > /dev/null 2>&1 &
+    OLLAMA_PID=$!
+
+    # Wait for it to be ready.
+    for i in $(seq 1 20); do
+        if curl -s http://127.0.0.1:11434 > /dev/null 2>&1; then
+            break
+        fi
+        sleep 1
+    done
+
+    # Pull each model.
+    for model in ${OLLAMA_MODELS_TO_PULL}; do
+        echo "[*] Pulling ${model}..."
+        OLLAMA_MODELS="${OLLAMA_MODEL_DIR}" "${OLLAMA_BIN}" pull "${model}" 2>&1 || \
+            echo "WARN: Failed to pull ${model}"
+    done
+
+    # Stop ollama.
+    kill "${OLLAMA_PID}" 2>/dev/null
+    wait "${OLLAMA_PID}" 2>/dev/null || true
+
+    # Cache the models directory.
+    if [ -d "${OLLAMA_MODEL_DIR}/models" ]; then
+        tar cf /cache/external/ollama-models.tar -C "${OLLAMA_MODEL_DIR}" models
+        echo "[*] Ollama models cached ($(du -sh "${OLLAMA_MODEL_DIR}/models" | cut -f1))"
+        # Copy into includes.chroot for this build.
+        mkdir -p config/includes.chroot/home/aios/.ollama
+        tar xf /cache/external/ollama-models.tar -C config/includes.chroot/home/aios/.ollama
+    else
+        echo "WARN: No models downloaded — models dir not found"
+    fi
 fi
 
 # Force full chroot rebuild if our marker is missing
@@ -242,6 +319,11 @@ BUILDCFG
 # Copy autoconfig.json into ISO if it exists (for unattended setup)
 if [ -f /work/autoconfig.json ]; then
     cp /work/autoconfig.json config/includes.chroot/opt/aios-app/autoconfig.json
+    # Also copy directly into chroot for incremental builds (lb build skips
+    # re-copying includes.chroot if the chroot already exists)
+    if [ -d chroot/opt/aios-app ]; then
+        cp /work/autoconfig.json chroot/opt/aios-app/autoconfig.json
+    fi
     echo "[*] Autoconfig baked into ISO"
 fi
 
@@ -414,15 +496,11 @@ else
 fi
 
 # ── Ollama — local AI model runtime for Sentinel (security + summarization) ──
-# Download and install the Ollama binary. It's used by the Sentinel system
-# to run local AI models for security sanitization and TTS summarization.
-echo "[AiOS] Installing Ollama for local AI inference..."
-OLLAMA_URL="https://ollama.com/download/ollama-linux-amd64"
-if curl -fsSL -o /usr/bin/ollama "${OLLAMA_URL}" 2>/dev/null; then
-    chmod +x /usr/bin/ollama
+# Ollama binary + CPU libs are pre-installed via includes.chroot (baked into Docker image).
+if [ -x /usr/bin/ollama ]; then
     echo "[AiOS] Ollama installed to /usr/bin/ollama"
 else
-    echo "WARN: Failed to download Ollama — Sentinel will not be available"
+    echo "WARN: Ollama binary not found — Sentinel will not be available"
 fi
 
 # Ollama systemd service — started on demand by AiOS, not at boot.
@@ -950,40 +1028,54 @@ echo "[AiOS] Setting up KWS models..."
 mkdir -p /opt/aios-app/models/kws/infrastructure
 mkdir -p /opt/aios-app/models/kws/pretrained
 
-# Download openWakeWord v0.5.1 infrastructure models (embedding + mel + VAD)
+# Download openWakeWord v0.5.1 infrastructure models (skip if already present from cache)
 OWW_BASE="https://github.com/dscripka/openWakeWord/releases/download/v0.5.1"
-wget -q -O /opt/aios-app/models/kws/infrastructure/embedding_model.onnx \
-    "${OWW_BASE}/embedding_model.onnx" 2>/dev/null || \
-    echo "WARN: Failed to download embedding_model.onnx"
-wget -q -O /opt/aios-app/models/kws/infrastructure/melspectrogram.onnx \
-    "${OWW_BASE}/melspectrogram.onnx" 2>/dev/null || \
-    echo "WARN: Failed to download melspectrogram.onnx"
-wget -q -O /opt/aios-app/models/kws/infrastructure/silero_vad.onnx \
-    "${OWW_BASE}/silero_vad.onnx" 2>/dev/null || \
-    echo "WARN: Failed to download silero_vad.onnx"
+if [ -s /opt/aios-app/models/kws/infrastructure/melspectrogram.onnx ] && \
+   [ -s /opt/aios-app/models/kws/infrastructure/embedding_model.onnx ]; then
+    echo "[AiOS] KWS infrastructure models already present (from cache)"
+else
+    echo "[AiOS] Downloading KWS infrastructure models..."
+    wget -q -O /opt/aios-app/models/kws/infrastructure/embedding_model.onnx \
+        "${OWW_BASE}/embedding_model.onnx" || \
+        echo "WARN: Failed to download embedding_model.onnx"
+    wget -q -O /opt/aios-app/models/kws/infrastructure/melspectrogram.onnx \
+        "${OWW_BASE}/melspectrogram.onnx" || \
+        echo "WARN: Failed to download melspectrogram.onnx"
+    wget -q -O /opt/aios-app/models/kws/infrastructure/silero_vad.onnx \
+        "${OWW_BASE}/silero_vad.onnx" || \
+        echo "WARN: Failed to download silero_vad.onnx"
+fi
 
-# Download official openWakeWord wake word model
-wget -q -O /opt/aios-app/models/kws/pretrained/hey_jarvis.onnx \
-    "${OWW_BASE}/hey_jarvis_v0.1.onnx" 2>/dev/null || \
-    echo "WARN: Failed to download hey_jarvis.onnx"
+# Download pretrained wake word models (skip if already present from cache)
+if [ -s /opt/aios-app/models/kws/pretrained/hey_jarvis.onnx ]; then
+    echo "[AiOS] KWS pretrained models already present (from cache)"
+else
+    echo "[AiOS] Downloading KWS pretrained wake word models..."
+    # Official openWakeWord model
+    wget -q -O /opt/aios-app/models/kws/pretrained/hey_jarvis.onnx \
+        "${OWW_BASE}/hey_jarvis_v0.1.onnx" || \
+        echo "WARN: Failed to download hey_jarvis.onnx"
 
-# Download community wake word models from home-assistant-wakewords-collection
-HA_WW_BASE="https://raw.githubusercontent.com/fwartner/home-assistant-wakewords-collection/main/en"
-wget -q -O /opt/aios-app/models/kws/pretrained/computer.onnx "$HA_WW_BASE/computer/computer_v2.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/ok_computer.onnx "$HA_WW_BASE/ok_computer/ok_computer.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/hey_friday.onnx "$HA_WW_BASE/hey_friday/hey_friday!.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/jarvis.onnx "$HA_WW_BASE/jarvis/jarvis_v2.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/ok_jarvis.onnx "$HA_WW_BASE/ok_jarvis/ok_jarvis.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/skynet.onnx "$HA_WW_BASE/skynet/Skynet.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/terminator.onnx "$HA_WW_BASE/terminator/Terminator.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/hey_house.onnx "$HA_WW_BASE/hey_house/hey_house.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/ok_home.onnx "$HA_WW_BASE/ok_home/ok_home.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/home_assistant.onnx "$HA_WW_BASE/home_assistant/Home_assistant.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/mr_anderson.onnx "$HA_WW_BASE/mr_anderson/Mr._Anderson.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/mr_smith.onnx "$HA_WW_BASE/mr_smith/mr_smith.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/hey_dick_head.onnx "$HA_WW_BASE/hey_dick_head/hey_dick_head.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/oi_fuckwhit.onnx "$HA_WW_BASE/oi_fuckwhit/oi_fuckwhit_v2.onnx" 2>/dev/null || true
-wget -q -O /opt/aios-app/models/kws/pretrained/yo_homie.onnx "$HA_WW_BASE/yo_homie/yo_homie.onnx" 2>/dev/null || true
+    # Community wake word models from home-assistant-wakewords-collection
+    HA_WW_BASE="https://raw.githubusercontent.com/fwartner/home-assistant-wakewords-collection/main/en"
+    wget -q -O /opt/aios-app/models/kws/pretrained/computer.onnx "$HA_WW_BASE/computer/computer_v2.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/ok_computer.onnx "$HA_WW_BASE/ok_computer/ok_computer.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/hey_friday.onnx "$HA_WW_BASE/hey_friday/hey_friday!.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/jarvis.onnx "$HA_WW_BASE/jarvis/jarvis_v2.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/ok_jarvis.onnx "$HA_WW_BASE/ok_jarvis/ok_jarvis.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/skynet.onnx "$HA_WW_BASE/skynet/Skynet.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/terminator.onnx "$HA_WW_BASE/terminator/Terminator.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/hey_house.onnx "$HA_WW_BASE/hey_house/hey_house.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/ok_home.onnx "$HA_WW_BASE/ok_home/ok_home.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/home_assistant.onnx "$HA_WW_BASE/home_assistant/Home_assistant.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/mr_anderson.onnx "$HA_WW_BASE/mr_anderson/Mr._Anderson.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/mr_smith.onnx "$HA_WW_BASE/mr_smith/mr_smith.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/hey_dick_head.onnx "$HA_WW_BASE/hey_dick_head/hey_dick_head.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/oi_fuckwhit.onnx "$HA_WW_BASE/oi_fuckwhit/oi_fuckwhit_v2.onnx" || true
+    wget -q -O /opt/aios-app/models/kws/pretrained/yo_homie.onnx "$HA_WW_BASE/yo_homie/yo_homie.onnx" || true
+    # Remove 0-byte files from failed downloads
+    find /opt/aios-app/models/kws/pretrained -name "*.onnx" -empty -delete 2>/dev/null || true
+fi
 
 # Copy pre-trained default wake word (built on dev machine and baked into ISO)
 if [ -f /opt/aios-app/models/kws/pretrained/hey_assistant.onnx ]; then
@@ -996,6 +1088,18 @@ fi
 # mkdir -p ~/.aios/models/kws/{infrastructure,pretrained,custom}
 # cp -n /opt/aios-app/models/kws/infrastructure/* ~/.aios/models/kws/infrastructure/
 # cp -n /opt/aios-app/models/kws/pretrained/* ~/.aios/models/kws/pretrained/
+# Verify downloads
+KWS_OK=true
+for f in melspectrogram.onnx embedding_model.onnx; do
+    if [ ! -s /opt/aios-app/models/kws/infrastructure/$f ]; then
+        echo "ERROR: KWS infrastructure model missing or empty: $f"
+        KWS_OK=false
+    fi
+done
+if [ "$KWS_OK" = true ]; then
+    echo "[AiOS] KWS infrastructure models OK ($(ls -1 /opt/aios-app/models/kws/infrastructure/*.onnx | wc -l) files)"
+fi
+echo "[AiOS] KWS pretrained models: $(ls -1 /opt/aios-app/models/kws/pretrained/*.onnx 2>/dev/null | wc -l) files"
 echo "[AiOS] KWS models setup complete."
 
 # ── AiOS config (API keys from build config, injected before chroot) ──
@@ -1159,8 +1263,7 @@ cat > /home/aios/.config/labwc/rc.xml << RCEOF
     <keybind key="A-Return"><action name="Execute"><command>foot --title "System Prompt"</command></action></keybind>
     <keybind key="A-F11"><action name="ToggleFullscreen"/></keybind>
     <keybind key="Print"><action name="Execute"><command>grim</command></action></keybind>
-    <!-- Super key or Ctrl+Space opens AiOS -->
-    <keybind key="Super_L"><action name="Execute"><command>/usr/bin/aios</command></action></keybind>
+    <!-- Ctrl+Space opens AiOS (Super key is used for push-to-talk) -->
     <keybind key="C-space"><action name="Execute"><command>/usr/bin/aios</command></action></keybind>
     <!-- Alt-Tab window switcher -->
     <keybind key="A-Tab"><action name="NextWindow"/></keybind>
@@ -1552,8 +1655,6 @@ menuentry "AiOS Debug Mode" {
 }
 GRUBEOF
 
-rm -f *.iso 2>/dev/null || true
-
 echo "[*] Building AiOS ISO..."
 lb build 2>&1 | tee build.log
 
@@ -1584,6 +1685,15 @@ if [ -f chroot/usr/bin/labwc ]; then
 fi
 if [ -f chroot/usr/bin/whisper-cpp-cli ]; then
     cp chroot/usr/bin/whisper-cpp-cli /cache/external/ 2>/dev/null || true
+fi
+if [ -f chroot/usr/bin/ollama ]; then
+    cp chroot/usr/bin/ollama /cache/external/ 2>/dev/null || true
+fi
+if [ -d chroot/usr/lib/ollama ]; then
+    tar cf /cache/external/ollama-libs.tar -C chroot/usr/lib ollama 2>/dev/null || true
+fi
+if [ -d chroot/home/aios/.ollama/models ] && [ ! -f /cache/external/ollama-models.tar ]; then
+    tar cf /cache/external/ollama-models.tar -C chroot/home/aios/.ollama models 2>/dev/null || true
 fi
 
 ISO=$(find . -maxdepth 1 -name "*.iso" -type f | head -1)

@@ -473,6 +473,9 @@ pub(crate) fn apply_autoconfig(
         &auto.ai.main_provider
     };
     let _ = config.set("llm.provider", serde_json::json!(main_provider));
+    if main_provider == "ollama" {
+        let _ = config.set("llm.ollama_enabled", serde_json::json!(true));
+    }
     if !auto.ai.main_model.is_empty() {
         let model_key = format!("llm.{main_provider}_model");
         let _ = config.set(&model_key, serde_json::json!(auto.ai.main_model));
@@ -505,52 +508,15 @@ pub(crate) fn apply_autoconfig(
         ),
     );
 
-    // 4b. Download Sentinel model if configured in autoconfig.
+    // 4b. Download Ollama models (sentinel + main AI if local provider).
     if !auto.ai.sentinel_model.is_empty() {
-        chat_view.add_level_message(
-            MessageLevel::Info,
-            &format!("Downloading Sentinel model: **{}**...\nThis may take a few minutes.", auto.ai.sentinel_model),
-        );
-        // Force GTK to render the message before blocking on download.
-        while gtk4::glib::MainContext::default().iteration(false) {}
-
-        let model = auto.ai.sentinel_model.clone();
-        let client = aios_llm::OllamaClient::new();
-        if let Err(e) = client.ensure_running() {
-            warn!("Failed to start Ollama: {e}");
-            chat_view.add_level_message(MessageLevel::Warning, &format!("Ollama not available: {e}. Sentinel model not installed."));
-        } else if client.is_model_installed(&model) {
-            info!("Sentinel model {model} already installed");
-            chat_view.add_level_message(MessageLevel::Success, &format!("Sentinel model **{model}** already installed."));
-        } else {
-            // Download in background thread, poll status.
-            let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-            let model_clone = model.clone();
-            std::thread::spawn(move || {
-                let client = aios_llm::OllamaClient::new();
-                let result = client.pull_model(&model_clone, |p| {
-                    if p.total > 0 {
-                        let pct = (p.completed as f64 / p.total as f64 * 100.0) as u32;
-                        tracing::debug!("Sentinel download: {pct}% — {}", p.status);
-                    }
-                });
-                let _ = tx.send(result);
-            });
-            // Block until download completes (autoconfig is unattended).
-            match rx.recv() {
-                Ok(Ok(())) => {
-                    info!("Sentinel model {model} downloaded successfully");
-                    chat_view.add_level_message(MessageLevel::Success, &format!("Sentinel model **{model}** installed."));
-                }
-                Ok(Err(e)) => {
-                    warn!("Sentinel model download failed: {e}");
-                    chat_view.add_level_message(MessageLevel::Warning, &format!("Sentinel download failed: {e}"));
-                }
-                Err(_) => {
-                    warn!("Sentinel download thread disconnected");
-                }
-            }
-        }
+        autoconfig_download_model(&chat_view, "Sentinel", &auto.ai.sentinel_model);
+    }
+    if main_provider == "ollama"
+        && !auto.ai.main_model.is_empty()
+        && auto.ai.main_model != auto.ai.sentinel_model
+    {
+        autoconfig_download_model(&chat_view, "Main AI", &auto.ai.main_model);
     }
 
     info!("Autoconfig applied -- finalizing boot");
@@ -615,7 +581,7 @@ pub(crate) fn connect_common_signals(
             // Refresh title bar provider dropdown after settings close.
             let config_dir = ConfigManager::default_config_dir();
             if let Ok(cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                let names = crate::providers::configured_display_names_excluding_ollama(&cfg);
+                let names = crate::providers::configured_display_names(&cfg);
                 let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
                 main_window::update_provider_dropdown(&refresh_win, &name_refs);
             }
@@ -757,6 +723,114 @@ pub(crate) fn show_hostname_conflict_card(chat_view: &ChatView) {
         ),
         Some(input_box.upcast_ref()),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Autoconfig model download helper
+// ---------------------------------------------------------------------------
+
+/// Download an Ollama model during autoconfig, showing status in the chat view.
+///
+/// `label` is a human-readable role (e.g. "Sentinel", "Main AI") used in status messages.
+fn autoconfig_download_model(
+    chat_view: &crate::ui::chat_view::ChatView,
+    label: &str,
+    model: &str,
+) {
+    use aios_core::types::MessageLevel;
+
+    chat_view.add_level_message(
+        MessageLevel::Info,
+        &format!("Downloading {label} model: **{model}**...\nThis may take a few minutes."),
+    );
+    while gtk4::glib::MainContext::default().iteration(false) {}
+
+    let client = aios_llm::OllamaClient::new();
+    if let Err(e) = client.ensure_running() {
+        warn!("Failed to start Ollama for {label}: {e}");
+        chat_view.add_level_message(
+            MessageLevel::Warning,
+            &format!("Ollama not available: {e}. {label} model not installed."),
+        );
+        return;
+    }
+    if client.is_model_installed(model) {
+        info!("{label} model {model} already installed");
+        chat_view.add_level_message(
+            MessageLevel::Success,
+            &format!("{label} model **{model}** already installed."),
+        );
+        return;
+    }
+
+    // Channel for completion, plus a shared progress string for the UI.
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    let progress_text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let progress_writer = progress_text.clone();
+    let model_owned = model.to_string();
+    let label_owned = label.to_string();
+    std::thread::spawn(move || {
+        let client = aios_llm::OllamaClient::new();
+        let lbl = label_owned;
+        let pw = progress_writer;
+        let result = client.pull_model(&model_owned, |p| {
+            if p.total > 0 {
+                let pct = (p.completed as f64 / p.total as f64 * 100.0) as u32;
+                let mb_done = p.completed / (1024 * 1024);
+                let mb_total = p.total / (1024 * 1024);
+                let msg = format!("{lbl}: {pct}% ({mb_done}/{mb_total} MB) — {}", p.status);
+                if let Ok(mut guard) = pw.lock() {
+                    *guard = msg;
+                }
+            }
+        });
+        let _ = tx.send(result);
+    });
+
+    // Poll the channel without blocking the GTK main loop.
+    // Show live download progress in the chat.
+    let label_str = label.to_string();
+    let model_str = model.to_string();
+    let cv = chat_view.clone();
+    let mut last_progress = String::new();
+    loop {
+        // Process pending GTK events so the UI stays responsive.
+        while gtk4::glib::MainContext::default().iteration(false) {}
+
+        // Update progress display.
+        if let Ok(guard) = progress_text.lock() {
+            if !guard.is_empty() && *guard != last_progress {
+                last_progress = guard.clone();
+                cv.update_or_add_progress(&last_progress);
+            }
+        }
+
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                info!("{label_str} model {model_str} downloaded successfully");
+                cv.update_or_add_progress(&format!(
+                    "{label_str} model **{model_str}** installed."
+                ));
+                break;
+            }
+            Ok(Err(e)) => {
+                warn!("{label_str} model download failed: {e}");
+                cv.add_level_message(
+                    MessageLevel::Warning,
+                    &format!("{label_str} download failed: {e}"),
+                );
+                break;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // Still downloading — sleep briefly and keep pumping GTK events.
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                warn!("{label_str} download thread disconnected");
+                break;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

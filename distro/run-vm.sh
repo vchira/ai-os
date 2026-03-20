@@ -101,7 +101,7 @@ qemu-system-x86_64 \
     -name aios-live \
     -machine q35,accel=kvm \
     -cpu host \
-    -m 4096 \
+    -m 8192 \
     -smp 4 \
     -cdrom "${ISO}" \
     -drive file="${DISK_IMG}",format=qcow2,if=virtio,id=disk0 \

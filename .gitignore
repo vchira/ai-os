@@ -25,6 +25,9 @@ autoconfig-*.json
 # AiOS runtime data (local to each machine)
 .aios/
 
+# Pre-downloaded binaries (downloaded on host, baked into Docker image)
+distro/ollama/
+
 # OS files
 .DS_Store
 Thumbs.db

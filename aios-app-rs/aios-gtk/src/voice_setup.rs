@@ -9,6 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gtk4::glib;
+use gtk4::prelude::*;
 use libadwaita as adw;
 use tracing::{info, warn};
 
@@ -129,6 +130,7 @@ pub(crate) fn setup_kws_and_voice(
 
     // Start voice listener.
     let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
+    let ptt_stt_tx = stt_tx.clone(); // Clone for push-to-talk.
     let audio_level = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let _voice_handle = start_voice_listener(
         stt_tx,
@@ -177,6 +179,142 @@ pub(crate) fn setup_kws_and_voice(
         }
         info!("Speaker toggled: {active}");
     });
+
+    // Push-to-talk: mic button + Super key.
+    setup_push_to_talk(prompt_input, window, ptt_stt_tx);
+}
+
+// ---------------------------------------------------------------------------
+// Push-to-talk
+// ---------------------------------------------------------------------------
+
+/// Set up push-to-talk on the mic button and Super key.
+///
+/// Press to start recording, release to stop + transcribe via Whisper STT.
+/// Results are sent through `stt_tx` and picked up by the existing STT poll.
+fn setup_push_to_talk(
+    prompt_input: &PromptInput,
+    window: &adw::ApplicationWindow,
+    stt_tx: std::sync::mpsc::Sender<String>,
+) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let capture: Rc<RefCell<Option<aios_voice::audio::capture::AudioCapture>>> =
+        Rc::new(RefCell::new(None));
+
+    // --- PTT press: start recording ---
+    let capture_for_press = capture.clone();
+    prompt_input.on_ptt_press(move || {
+        info!("PTT: recording started");
+        let mut cap = aios_voice::audio::capture::AudioCapture::new();
+        if let Err(e) = cap.start_recording() {
+            warn!("PTT: failed to start recording: {e}");
+            return;
+        }
+        *capture_for_press.borrow_mut() = Some(cap);
+    });
+
+    // --- PTT release: stop recording, transcribe, send ---
+    let capture_for_release = capture.clone();
+    let tx_for_release = stt_tx.clone();
+    prompt_input.on_ptt_release(move || {
+        let cap = capture_for_release.borrow_mut().take();
+        if let Some(mut cap) = cap {
+            let samples = cap.stop_recording();
+            info!("PTT: recording stopped, {} samples captured", samples.len());
+            if samples.len() < 1600 {
+                // Less than 0.1s of audio — ignore.
+                info!("PTT: too short, ignoring");
+                return;
+            }
+            let tx = tx_for_release.clone();
+            std::thread::spawn(move || {
+                match crate::voice_listener::transcribe_with_whisper(&samples) {
+                    Ok(text) => {
+                        let text = text.trim().to_string();
+                        if !text.is_empty() {
+                            info!("PTT: transcribed: {}", &text[..text.len().min(50)]);
+                            let _ = tx.send(text);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("PTT: transcription failed: {e}");
+                    }
+                }
+            });
+        }
+    });
+
+    // --- Super key: press to start, release to stop ---
+    let ptt_btn = prompt_input.ptt_button().clone();
+    let capture_for_super = capture.clone();
+    let tx_for_super = stt_tx;
+    let key_controller = gtk4::EventControllerKey::new();
+    let ptt_active = Rc::new(std::cell::Cell::new(false));
+    let ptt_active_pressed = ptt_active.clone();
+    let ptt_active_released = ptt_active.clone();
+    let ptt_btn_release = ptt_btn.clone();
+
+    let capture_super_press = capture_for_super.clone();
+    key_controller.connect_key_pressed(move |_, key, _, _| {
+        if key != gtk4::gdk::Key::Super_L && key != gtk4::gdk::Key::Super_R {
+            return gtk4::glib::Propagation::Proceed;
+        }
+        if ptt_active_pressed.get() {
+            // Already recording (key repeat) — ignore.
+            return gtk4::glib::Propagation::Stop;
+        }
+        ptt_active_pressed.set(true);
+        ptt_btn.add_css_class("recording");
+        ptt_btn.set_icon_name("media-record-symbolic");
+        info!("PTT (Super): recording started");
+        let mut cap = aios_voice::audio::capture::AudioCapture::new();
+        if let Err(e) = cap.start_recording() {
+            warn!("PTT (Super): failed to start recording: {e}");
+            return gtk4::glib::Propagation::Stop;
+        }
+        *capture_super_press.borrow_mut() = Some(cap);
+        gtk4::glib::Propagation::Stop
+    });
+
+    key_controller.connect_key_released(move |_, key, _, _| {
+        if key != gtk4::gdk::Key::Super_L && key != gtk4::gdk::Key::Super_R {
+            return;
+        }
+        if !ptt_active_released.get() {
+            return;
+        }
+        ptt_active_released.set(false);
+        ptt_btn_release.remove_css_class("recording");
+        ptt_btn_release.set_icon_name("audio-input-microphone-symbolic");
+
+        let cap = capture_for_super.borrow_mut().take();
+        if let Some(mut cap) = cap {
+            let samples = cap.stop_recording();
+            info!("PTT (Super): recording stopped, {} samples", samples.len());
+            if samples.len() < 1600 {
+                return;
+            }
+            let tx = tx_for_super.clone();
+            std::thread::spawn(move || {
+                match crate::voice_listener::transcribe_with_whisper(&samples) {
+                    Ok(text) => {
+                        let text = text.trim().to_string();
+                        if !text.is_empty() {
+                            info!("PTT (Super): transcribed: {}", &text[..text.len().min(50)]);
+                            let _ = tx.send(text);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("PTT (Super): transcription failed: {e}");
+                    }
+                }
+            });
+        }
+    });
+
+    window.add_controller(key_controller);
 }
 
 // ---------------------------------------------------------------------------
