@@ -508,6 +508,9 @@ pub(crate) fn apply_autoconfig(
         ),
     );
 
+    // Present window now so the user sees boot status + download progress.
+    window.present();
+
     // 4b. Download Ollama models (sentinel + main AI if local provider).
     if !auto.ai.sentinel_model.is_empty() {
         autoconfig_download_model(&chat_view, "Sentinel", &auto.ai.sentinel_model);
@@ -522,9 +525,6 @@ pub(crate) fn apply_autoconfig(
     info!("Autoconfig applied -- finalizing boot");
 
     // 5. Finalize boot — init LLM, tools, channels, voice.
-    // Present window first so the user sees boot status immediately,
-    // then finalize in idle to wire up the prompt and tools.
-    window.present();
 
     let ui = crate::boot_context::BootUi {
         chat_view,
