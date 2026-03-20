@@ -837,10 +837,33 @@ fn autoconfig_download_model(
 
         match rx.try_recv() {
             Ok(Ok(())) => {
-                info!("{label_str} model {model_str} downloaded successfully");
-                cv.update_or_add_progress(&format!(
-                    "{label_str} model **{model_str}** installed."
-                ));
+                // Verify the model is actually installed before claiming success.
+                let verify_client = aios_llm::OllamaClient::new();
+                if verify_client.is_model_installed(&model_str) {
+                    info!("{label_str} model {model_str} downloaded and verified");
+                    cv.update_or_add_progress(&format!(
+                        "{label_str} model **{model_str}** installed."
+                    ));
+                } else {
+                    warn!("{label_str} model {model_str}: pull reported OK but model not found!");
+                    cv.add_level_message(
+                        MessageLevel::Warning,
+                        &format!("{label_str} model **{model_str}** download incomplete. Retrying..."),
+                    );
+                    // Retry once.
+                    let retry_client = aios_llm::OllamaClient::new();
+                    let _ = retry_client.pull_model(&model_str, |_| {});
+                    if retry_client.is_model_installed(&model_str) {
+                        cv.update_or_add_progress(&format!(
+                            "{label_str} model **{model_str}** installed (retry)."
+                        ));
+                    } else {
+                        cv.add_level_message(
+                            MessageLevel::Error,
+                            &format!("{label_str} model **{model_str}** failed to install."),
+                        );
+                    }
+                }
                 break;
             }
             Ok(Err(e)) => {

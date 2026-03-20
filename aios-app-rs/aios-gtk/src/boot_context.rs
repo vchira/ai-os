@@ -201,12 +201,17 @@ pub(crate) fn finalize_boot(
     ui.prompt_input.widget().set_sensitive(true);
     ui.prompt_input.widget().set_hexpand(true);
 
-    // Update provider dropdown.
+    // Update provider dropdown and select the active provider.
     let configured = crate::providers::configured_display_names(
         &state.borrow().config,
     );
     let refs: Vec<&str> = configured.iter().map(|s| s.as_str()).collect();
     main_window::update_provider_dropdown(&ui.window, &refs);
+
+    let active_id = state.borrow().config.get_str("llm.provider", "claude");
+    if let Some(def) = crate::providers::find_by_id(&active_id) {
+        main_window::select_active_provider(&ui.window, def.display_name);
+    }
 
     // Connect all GTK signals.
     first_boot_flow::connect_common_signals(&state, &ui.chat_view, &ui.prompt_input, &ui.window);

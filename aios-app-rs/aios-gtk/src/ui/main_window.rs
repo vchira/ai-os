@@ -411,6 +411,24 @@ pub fn update_provider_dropdown(window: &adw::ApplicationWindow, providers: &[&s
     }
 }
 
+/// Select the active provider in the dropdown by display name.
+pub fn select_active_provider(window: &adw::ApplicationWindow, display_name: &str) {
+    if let Some(dropdown) = find_widget_by_name::<gtk::DropDown>(window.upcast_ref(), PROVIDER_DROPDOWN_NAME) {
+        if let Some(model) = dropdown.model() {
+            for i in 0..model.n_items() {
+                if let Some(item) = model.item(i) {
+                    if let Some(s) = item.downcast_ref::<gtk::StringObject>() {
+                        if s.string() == display_name {
+                            dropdown.set_selected(i);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Signal connectors
 // ---------------------------------------------------------------------------
