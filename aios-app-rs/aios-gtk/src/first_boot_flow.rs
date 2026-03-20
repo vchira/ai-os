@@ -248,17 +248,28 @@ pub(crate) fn run_first_boot_setup(
             return;
         }
 
-        // Finalize boot — init LLM, tools, channels, voice.
-        let config = load_config();
-        let ui = crate::boot_context::BootUi {
-            chat_view: chat_view_ref.clone(),
-            prompt_input: prompt_ref.clone(),
-            channel_overlay: channel_overlay_ref.clone(),
-            window: window_ref.clone(),
-            vu_meter: vu_meter_for_transition.clone(),
-        };
-        crate::boot_context::finalize_boot(config, rt_ref.clone(), queue_for_transition.clone(), &ui, None);
-        chat_view_ref.add_message("system", &t("setup.type_message"));
+        // Finalize boot in an idle callback to avoid panicking inside
+        // the on_complete GTK closure (GTK signal handlers abort on panic).
+        let rt_for_boot = rt_ref.clone();
+        let queue_for_boot = queue_for_transition.clone();
+        let cv = chat_view_ref.clone();
+        let pi = prompt_ref.clone();
+        let co = channel_overlay_ref.clone();
+        let win = window_ref.clone();
+        let vu = vu_meter_for_transition.clone();
+        gtk4::glib::idle_add_local_once(move || {
+            let config = load_config();
+            let ui = crate::boot_context::BootUi {
+                chat_view: cv.clone(),
+                prompt_input: pi,
+                channel_overlay: co,
+                window: win.clone(),
+                vu_meter: vu,
+            };
+            crate::boot_context::finalize_boot(config, rt_for_boot, queue_for_boot, &ui, None);
+            cv.add_message("system", &t("setup.type_message"));
+            win.queue_draw();
+        });
     });
 
     // During setup, prompt feeds into the setup conversation.

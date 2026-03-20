@@ -1537,23 +1537,26 @@ impl SetupConversation {
     // -- Step 2: Choose Provider --------------------------------------------
 
     fn show_choose_provider(&self) {
+        use crate::providers::PROVIDERS;
+
         // If only one provider has a key in config, auto-select it.
         if let Some(ref config) = *self.config.borrow() {
-            let has_claude = !config.get_str("llm.claude_api_key", "").is_empty();
-            let has_openai = {
-                let k = config.get_str("llm.openai_api_key", "");
-                !k.is_empty() && k != "your-api-key-here"
-            };
-            if has_claude && !has_openai {
+            let configured: Vec<&str> = PROVIDERS
+                .iter()
+                .filter(|p| p.needs_api_key && {
+                    let k = config.get_str(p.api_key_config, "");
+                    !k.is_empty() && k != "your-api-key-here"
+                })
+                .map(|p| p.id)
+                .collect();
+            if configured.len() == 1 {
+                let id = configured[0];
+                let display = crate::providers::find_by_id(id)
+                    .map(|p| p.display_name)
+                    .unwrap_or(id);
                 self.chat_view.add_message("system",
-                    &t("setup.provider.auto_claude"));
-                self.select_provider("claude");
-                return;
-            }
-            if has_openai && !has_claude {
-                self.chat_view.add_message("system",
-                    &t("setup.provider.auto_chatgpt"));
-                self.select_provider("openai");
+                    &format!("Auto-selected {display} (API key found in config)"));
+                self.select_provider(id);
                 return;
             }
         }
@@ -1561,20 +1564,28 @@ impl SetupConversation {
         let input_box = gtk::Box::new(Orientation::Vertical, 8);
         input_box.set_margin_top(8);
 
-        // Claude button.
-        let claude_btn = Self::make_provider_button(
-            &t("setup.provider.claude_name"),
-            &t("setup.provider.claude_desc"),
-        );
+        // Build dropdown with all providers that need API keys (exclude Ollama).
+        let provider_names: Vec<String> = PROVIDERS
+            .iter()
+            .filter(|p| p.needs_api_key)
+            .map(|p| format!("{} — {}", p.display_name, Self::provider_description(p.id)))
+            .collect();
+        let provider_ids: Vec<&str> = PROVIDERS
+            .iter()
+            .filter(|p| p.needs_api_key)
+            .map(|p| p.id)
+            .collect();
+        let name_refs: Vec<&str> = provider_names.iter().map(|s| s.as_str()).collect();
 
-        input_box.append(&claude_btn);
+        let dropdown_list = gtk::StringList::new(&name_refs);
+        let dropdown = gtk::DropDown::new(Some(dropdown_list), gtk::Expression::NONE);
+        dropdown.set_hexpand(true);
+        input_box.append(&dropdown);
 
-        // ChatGPT button.
-        let openai_btn = Self::make_provider_button(
-            &t("setup.provider.chatgpt_name"),
-            &t("setup.provider.chatgpt_desc"),
-        );
-        input_box.append(&openai_btn);
+        let select_btn = gtk::Button::with_label("Select");
+        select_btn.add_css_class("suggested-action");
+        select_btn.set_halign(Align::End);
+        input_box.append(&select_btn);
 
         let handle = self.chat_view.add_setup_card(
             "network-server-symbolic",
@@ -1584,44 +1595,32 @@ impl SetupConversation {
         );
 
         let this = self.clone();
-        let h = handle.clone();
-        claude_btn.connect_clicked(move |_| {
-            if let Some(ref h) = h { h.dismiss(&t("setup.provider.claude_name")); }
-            this.select_provider("claude");
-        });
-
-        let this = self.clone();
-        openai_btn.connect_clicked(move |_| {
-            if let Some(ref h) = handle { h.dismiss(&t("setup.provider.chatgpt_name")); }
-            this.select_provider("openai");
+        let ids = provider_ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        select_btn.connect_clicked(move |_| {
+            let sel = dropdown.selected() as usize;
+            if let Some(id) = ids.get(sel) {
+                let display = crate::providers::find_by_id(id)
+                    .map(|p| p.display_name)
+                    .unwrap_or(id.as_str());
+                if let Some(ref h) = handle { h.dismiss(display); }
+                this.select_provider(id);
+            }
         });
 
         self.speak(&t("setup.provider.tts"));
     }
 
-    /// Create a styled provider selection button.
-    fn make_provider_button(name: &str, description: &str) -> gtk::Button {
-        let content = gtk::Box::new(Orientation::Vertical, 2);
-        content.set_margin_top(4);
-        content.set_margin_bottom(4);
-        content.set_margin_start(8);
-        content.set_margin_end(8);
-
-        let name_label = gtk::Label::new(Some(name));
-        name_label.add_css_class("heading");
-        name_label.set_halign(Align::Start);
-        content.append(&name_label);
-
-        let desc_label = gtk::Label::new(Some(description));
-        desc_label.add_css_class("dim-label");
-        desc_label.set_halign(Align::Start);
-        desc_label.set_wrap(true);
-        content.append(&desc_label);
-
-        let btn = gtk::Button::new();
-        btn.set_child(Some(&content));
-        btn.add_css_class("setup-provider-button");
-        btn
+    /// Short description for each provider (used in the setup dropdown).
+    fn provider_description(id: &str) -> &'static str {
+        match id {
+            "claude" => "Advanced reasoning and analysis",
+            "openai" => "GPT-4o with broad general knowledge",
+            "deepseek" => "Strong reasoning, very affordable",
+            "mistral" => "European AI, fast and multilingual",
+            "groq" => "Ultra-fast inference (Llama, Mixtral)",
+            "gemini" => "Google AI with large context window",
+            _ => "LLM provider",
+        }
     }
 
     /// Handle provider selection (from button click or voice).
@@ -1632,11 +1631,9 @@ impl SetupConversation {
         }
 
         // Show a user-style confirmation message.
-        let display = match provider {
-            "claude" => t("setup.provider.claude_name"),
-            "openai" => t("setup.provider.chatgpt_name"),
-            other => other.to_string(),
-        };
+        let display = crate::providers::find_by_id(provider)
+            .map(|p| p.display_name.to_string())
+            .unwrap_or_else(|| provider.to_string());
         self.chat_view.add_message("user", &display);
 
         let next = SetupStep::EnterApiKey {
@@ -1648,6 +1645,9 @@ impl SetupConversation {
     // -- Step 3 / Step 7: Enter API Key ------------------------------------
 
     fn show_enter_api_key(&self, provider: String, is_backup: bool) {
+        let display_name = crate::providers::find_by_id(&provider)
+            .map(|p| p.display_name)
+            .unwrap_or(provider.as_str());
         let (title, tutorial) = match provider.as_str() {
             "claude" => (
                 t("setup.api_key.title_claude"),
@@ -1658,7 +1658,7 @@ impl SetupConversation {
                 t("setup.api_key.tutorial_chatgpt"),
             ),
             _ => (
-                t_fmt("setup.api_key.title_generic", &[("provider", &provider)]),
+                t_fmt("setup.api_key.title_generic", &[("provider", display_name)]),
                 t("setup.api_key.tutorial_generic"),
             ),
         };
@@ -1673,17 +1673,14 @@ impl SetupConversation {
             .build();
         entry.add_css_class("setup-input");
 
-        // Pre-fill from config if an API key already exists.
+        // Pre-fill from config if an API key already exists (using PROVIDERS lookup).
         if let Some(ref config) = *self.config.borrow() {
-            let config_key = match provider.as_str() {
-                "claude" => "llm.claude_api_key",
-                "openai" => "llm.openai_api_key",
-                _ => "",
-            };
-            if !config_key.is_empty() {
-                let existing = config.get_str(config_key, "");
-                if !existing.is_empty() && existing != "your-api-key-here" {
-                    entry.set_text(&existing);
+            if let Some(prov_def) = crate::providers::find_by_id(&provider) {
+                if prov_def.needs_api_key && !prov_def.api_key_config.is_empty() {
+                    let existing = config.get_str(prov_def.api_key_config, "");
+                    if !existing.is_empty() && existing != "your-api-key-here" {
+                        entry.set_text(&existing);
+                    }
                 }
             }
         }
