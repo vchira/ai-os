@@ -545,6 +545,46 @@ pub(crate) fn apply_autoconfig(
     match result {
         Ok(()) => {
             info!("Boot finalized successfully");
+
+            // Warm up the LLM if it's a local model (Ollama needs to load weights).
+            let provider = load_config().get_str("llm.provider", "");
+            if provider == "ollama" {
+                let model = load_config().get_str("llm.ollama_model", "llama3.2");
+                chat_view.update_or_add_progress(
+                    &format!("Loading AI model **{model}** into memory... (first time takes ~20s)")
+                );
+                while gtk4::glib::MainContext::default().iteration(false) {}
+
+                let (tx, rx) = std::sync::mpsc::channel::<bool>();
+                let model_c = model.clone();
+                std::thread::spawn(move || {
+                    // Send a tiny prompt to force model loading.
+                    let _ = std::process::Command::new("curl")
+                        .args([
+                            "-s", "http://localhost:11434/api/generate",
+                            "-d", &format!("{{\"model\":\"{model_c}\",\"prompt\":\"hi\",\"stream\":false}}"),
+                        ])
+                        .output();
+                    let _ = tx.send(true);
+                });
+
+                loop {
+                    while gtk4::glib::MainContext::default().iteration(false) {}
+                    match rx.try_recv() {
+                        Ok(_) => {
+                            chat_view.update_or_add_progress(
+                                &format!("AI model **{model}** ready.")
+                            );
+                            break;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
+                    }
+                }
+            }
+
             // Only now show the prompt input + settings button.
             ui.prompt_input.widget().set_visible(true);
             ui.prompt_input.widget().set_sensitive(true);
