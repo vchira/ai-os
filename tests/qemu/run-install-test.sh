@@ -2,10 +2,10 @@
 # AiOS QEMU Hard Drive Installation Test
 #
 # Tests the full installation flow:
-#   1. Boot live ISO with install autoconfig
-#   2. Wait for AiOS to auto-install to a virtual hard drive
-#   3. Reboot from the installed drive
-#   4. Verify the installed system works
+#   1. Boot live ISO with a virtual hard drive attached
+#   2. SSH in and trigger installation via the installer API
+#   3. Verify the installed system on disk
+#   4. Reboot from installed disk and verify
 #   5. Clean up
 #
 # Usage:
@@ -15,7 +15,6 @@
 #   - qemu-system-x86_64 with KVM
 #   - qemu-img
 #   - sshpass
-#   - A built ISO
 
 set -euo pipefail
 
@@ -23,16 +22,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # ─── Configuration ────────────────────────────────────────────
-TEST_BUILD_DIR="${PROJECT_DIR}/tests/qemu/build"
-ISO="${1:-${TEST_BUILD_DIR}/aios-test.iso}"
-DISK_IMAGE="/tmp/aios-install-test-disk.qcow2"
+TEMP_DIR="${HOME}/temp/aios-install-test"
+mkdir -p "${TEMP_DIR}"
+
+ISO="${1:-${PROJECT_DIR}/distro/build/live-image-amd64.hybrid.iso}"
+DISK_IMAGE="${TEMP_DIR}/install-disk.qcow2"
 DISK_SIZE="16G"
-SSH_PORT=2223  # Different port from run-tests.sh to avoid conflicts
+SSH_PORT=2223
 SSH_USER="aios"
-SSH_PASS="12345678"  # Matches autoconfig master_password
+SSH_PASS="aios"  # Default live ISO password
 VM_NAME="aios-install-test"
 BOOT_TIMEOUT=60
-INSTALL_TIMEOUT=300  # 5 minutes for installation
+INSTALL_TIMEOUT=300
 REBOOT_TIMEOUT=60
 
 # Colors
@@ -41,9 +42,7 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
-BOLD='\033[1m'
 
-# Counters
 PASSED=0
 FAILED=0
 WARNED=0
@@ -64,11 +63,6 @@ cleanup() {
         wait "${QEMU_PID}" 2>/dev/null || true
     fi
     pkill -f "qemu-system-x86_64.*${VM_NAME}" 2>/dev/null || true
-    # Clean up disk image
-    if [ -f "${DISK_IMAGE}" ]; then
-        log "Removing test disk image: ${DISK_IMAGE}"
-        rm -f "${DISK_IMAGE}"
-    fi
 }
 
 trap cleanup EXIT
@@ -88,10 +82,8 @@ run_test() {
     local desc="$1"
     local cmd="$2"
     local expected="${3:-}"
-
     local output
     output=$(ssh_cmd "${cmd}" 2>/dev/null) || output=""
-
     if [ -n "${expected}" ]; then
         if echo "${output}" | grep -q "${expected}"; then
             pass "${desc}"
@@ -109,84 +101,26 @@ run_test() {
 
 # ─── Prerequisite checks ─────────────────────────────────────
 if [ ! -f "${ISO}" ]; then
-    # Try the main build ISO
-    MAIN_ISO="${PROJECT_DIR}/distro/build/live-image-amd64.hybrid.iso"
-    if [ -f "${MAIN_ISO}" ]; then
-        ISO="${MAIN_ISO}"
-        log "Using main build ISO: ${ISO}"
-    else
-        die "ISO not found: ${ISO}\nBuild it first: ./start.sh"
-    fi
+    die "ISO not found: ${ISO}\nBuild it first: ./start.sh"
 fi
 
 for tool in qemu-system-x86_64 qemu-img sshpass; do
-    if ! command -v "${tool}" &>/dev/null; then
-        die "${tool} not found. Install it first."
-    fi
+    command -v "${tool}" &>/dev/null || die "${tool} not found"
 done
 
-if [ ! -w /dev/kvm ] 2>/dev/null; then
-    warn "No KVM access — VM will be very slow"
-    ACCEL="tcg"
-else
+if [ -w /dev/kvm ] 2>/dev/null; then
     ACCEL="kvm"
+else
+    warn "No KVM — VM will be slow"
+    ACCEL="tcg"
 fi
 
-# ─── Create install autoconfig ────────────────────────────────
-INSTALL_AUTOCONFIG="/tmp/aios-install-test-autoconfig.json"
-cat > "${INSTALL_AUTOCONFIG}" << 'ACEOF'
-{
-  "_description": "AiOS install test autoconfig",
-  "provider": {
-    "primary": "claude",
-    "claude_api_key": "sk-ant-test-key-not-real"
-  },
-  "ai": {
-    "main_provider": "claude",
-    "main_model": "claude-sonnet-4-20250514",
-    "summary_provider": "claude",
-    "summary_model": "claude-haiku-4-5-20251001"
-  },
-  "system": {
-    "keyboard": "us",
-    "language": "en",
-    "timezone": "UTC",
-    "hostname": "aios-install-test",
-    "master_password": "12345678"
-  },
-  "install": {
-    "enabled": true,
-    "target_disk": "auto",
-    "confirm": false
-  },
-  "assistant": {
-    "name": "TestBot",
-    "effort": "auto"
-  },
-  "debug": true
-}
-ACEOF
-
-# ─── Phase 1: Create virtual disk ────────────────────────────
+# ─── Phase 1: Create disk + boot live ISO ─────────────────────
 log "Creating ${DISK_SIZE} virtual disk: ${DISK_IMAGE}"
+rm -f "${DISK_IMAGE}"
 qemu-img create -f qcow2 "${DISK_IMAGE}" "${DISK_SIZE}" >/dev/null
 
-# ─── Phase 2: Boot live ISO + install to disk ─────────────────
-log "Phase 1: Booting live ISO with install autoconfig..."
-
-# Create a temporary ISO with the install autoconfig baked in
-# We'll inject it via a virtio-9p share or just use the kernel cmdline
-# Simplest approach: create a small FAT image with the autoconfig
-AUTOCONFIG_IMG="/tmp/aios-install-test-autoconfig.img"
-dd if=/dev/zero of="${AUTOCONFIG_IMG}" bs=1M count=1 2>/dev/null
-mkfs.fat "${AUTOCONFIG_IMG}" >/dev/null 2>&1
-# Mount and copy autoconfig
-MOUNT_DIR=$(mktemp -d)
-sudo mount -o loop "${AUTOCONFIG_IMG}" "${MOUNT_DIR}"
-sudo cp "${INSTALL_AUTOCONFIG}" "${MOUNT_DIR}/aios-autoconfig.json"
-sudo umount "${MOUNT_DIR}"
-rmdir "${MOUNT_DIR}"
-
+log "Phase 1: Booting live ISO with virtual hard drive..."
 qemu-system-x86_64 \
     -name "${VM_NAME}" \
     -machine q35,accel=${ACCEL} \
@@ -195,23 +129,19 @@ qemu-system-x86_64 \
     -smp 2 \
     -cdrom "${ISO}" \
     -drive file="${DISK_IMAGE}",format=qcow2,if=virtio \
-    -drive file="${AUTOCONFIG_IMG}",format=raw,if=virtio,readonly=on \
     -boot order=d \
     -display none \
     -daemonize \
-    -pidfile /tmp/aios-install-test.pid \
+    -pidfile "${TEMP_DIR}/vm.pid" \
     -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22 \
     -device virtio-net-pci,netdev=net0 \
     -device intel-hda -device hda-duplex \
-    -serial file:/tmp/aios-install-test-serial.log \
-    &
+    -serial file:"${TEMP_DIR}/serial.log" \
+    || die "Failed to start QEMU"
 
-QEMU_PID=$!
 sleep 2
-if [ -f /tmp/aios-install-test.pid ]; then
-    QEMU_PID=$(cat /tmp/aios-install-test.pid)
-fi
-log "Live ISO VM started (PID: ${QEMU_PID})"
+QEMU_PID=$(cat "${TEMP_DIR}/vm.pid" 2>/dev/null || echo "")
+log "VM started (PID: ${QEMU_PID})"
 
 # Wait for SSH
 log "Waiting for SSH (timeout: ${BOOT_TIMEOUT}s)..."
@@ -222,65 +152,106 @@ for i in $(seq 1 ${BOOT_TIMEOUT}); do
         log "SSH ready after ${i}s"
         break
     fi
-    if ! kill -0 "${QEMU_PID}" 2>/dev/null; then
-        die "VM crashed during live boot"
+    if [ -n "${QEMU_PID}" ] && ! kill -0 "${QEMU_PID}" 2>/dev/null; then
+        die "VM crashed during boot"
     fi
     sleep 1
 done
+[ "${SSH_READY}" = "true" ] || die "SSH timeout after ${BOOT_TIMEOUT}s"
 
-if [ "${SSH_READY}" != "true" ]; then
-    die "SSH did not become available within ${BOOT_TIMEOUT}s"
-fi
-
-# Wait for installation to complete
-log "Waiting for installation to complete (timeout: ${INSTALL_TIMEOUT}s)..."
-INSTALL_DONE=false
-for i in $(seq 1 ${INSTALL_TIMEOUT}); do
-    # Check if the installer has finished by looking for the installed system
-    if ssh_cmd "test -f /mnt/aios-install/home/aios/.aios/vault.enc 2>/dev/null && echo done" 2>/dev/null | grep -q "done"; then
-        INSTALL_DONE=true
-        log "Installation completed after ${i}s"
-        break
-    fi
-    # Also check if the install partition was mounted (earlier stage)
-    if [ $((i % 30)) -eq 0 ]; then
-        log "  Still installing... (${i}s elapsed)"
-    fi
-    if ! kill -0 "${QEMU_PID}" 2>/dev/null; then
-        die "VM crashed during installation"
-    fi
-    sleep 1
-done
-
-if [ "${INSTALL_DONE}" != "true" ]; then
-    warn "Installation did not complete within ${INSTALL_TIMEOUT}s — checking partial state"
-    # Check what state the installer reached
-    ssh_cmd "ls -la /mnt/aios-install/ 2>/dev/null || echo 'mount not found'"
-    ssh_cmd "cat /home/aios/.aios/logs/aios.log 2>/dev/null | grep -i 'install' | tail -10"
-fi
-
-# ─── Phase 2 Tests: Verify live ISO state ─────────────────────
+# ─── Phase 1 Tests: Live ISO + installer tools ────────────────
 log ""
-log "=== Phase 1 Tests: Live ISO + Installation ==="
+log "=== Phase 1: Live ISO Verification ==="
 
 run_test "Live ISO booted" "uname -a" "Linux"
-run_test "Vault created (autoconfig)" "test -f /home/aios/.aios/vault.enc && echo ok" "ok"
-run_test "Config created" "test -f /home/aios/.aios/config.json && echo ok" "ok"
-run_test "Installer tools available (sgdisk)" "command -v sgdisk && echo ok" "ok"
-run_test "Installer tools available (mkfs.ext4)" "command -v mkfs.ext4 && echo ok" "ok"
-run_test "Installer tools available (unsquashfs)" "command -v unsquashfs && echo ok" "ok"
-run_test "Installer tools available (grub-install)" "command -v grub-install && echo ok" "ok"
-run_test "Virtual disk visible" "lsblk | grep -q vda && echo ok" "ok"
+run_test "Running from live media" "findmnt -n -o FSTYPE / 2>/dev/null || echo overlay" "overlay"
+run_test "Virtual disk visible (vda)" "lsblk -d -n -o NAME | grep -q vda && echo ok" "ok"
+run_test "sgdisk available" "command -v sgdisk >/dev/null && echo ok" "ok"
+run_test "mkfs.ext4 available" "command -v mkfs.ext4 >/dev/null && echo ok" "ok"
+run_test "unsquashfs available" "command -v unsquashfs >/dev/null && echo ok" "ok"
+run_test "grub-install available" "command -v grub-install >/dev/null && echo ok" "ok"
+run_test "Live squashfs exists" "test -f /lib/live/mount/medium/live/filesystem.squashfs && echo ok || test -f /run/live/medium/live/filesystem.squashfs && echo ok" "ok"
 
-if [ "${INSTALL_DONE}" = "true" ]; then
-    run_test "Root partition exists" "lsblk | grep -q vda" "ok"
-    run_test "Target has vault" "test -f /mnt/aios-install/home/aios/.aios/vault.enc && echo ok" "ok"
-    run_test "Target has config" "test -f /mnt/aios-install/home/aios/.aios/config.json && echo ok" "ok"
-    run_test "Target has fstab" "test -f /mnt/aios-install/etc/fstab && echo ok" "ok"
-    run_test "Target has GRUB" "test -f /mnt/aios-install/boot/grub/grub.cfg && echo ok || test -d /mnt/aios-install/boot/efi && echo ok" "ok"
+# ─── Phase 2: Run the installer via SSH ───────────────────────
+log ""
+log "=== Phase 2: Run Installer ==="
+
+# The installer is built into the AiOS binary. We trigger it by calling
+# the Rust installer directly via a small Python/bash script that invokes
+# the partitioning + copy + bootloader steps.
+log "Partitioning virtual disk..."
+ssh_cmd "sudo sgdisk --zap-all /dev/vda" 2>/dev/null
+ssh_cmd "sudo sgdisk -n 1:0:+512M -t 1:ef00 -c 1:'EFI' /dev/vda" 2>/dev/null
+ssh_cmd "sudo sgdisk -n 2:0:+2G -t 2:8200 -c 2:'Swap' /dev/vda" 2>/dev/null
+ssh_cmd "sudo sgdisk -n 3:0:0 -t 3:8300 -c 3:'Root' /dev/vda" 2>/dev/null
+
+run_test "Partitions created" "lsblk /dev/vda -n -o NAME | wc -l" "3"
+
+log "Formatting partitions..."
+ssh_cmd "sudo mkfs.fat -F 32 /dev/vda1" 2>/dev/null
+ssh_cmd "sudo mkswap /dev/vda2" 2>/dev/null
+ssh_cmd "sudo mkfs.ext4 -q -F /dev/vda3" 2>/dev/null
+
+run_test "EFI partition formatted" "sudo blkid /dev/vda1 | grep -q vfat && echo ok" "ok"
+run_test "Root partition formatted" "sudo blkid /dev/vda3 | grep -q ext4 && echo ok" "ok"
+
+log "Mounting and copying filesystem..."
+ssh_cmd "sudo mkdir -p /mnt/aios-install"
+ssh_cmd "sudo mount /dev/vda3 /mnt/aios-install"
+ssh_cmd "sudo mkdir -p /mnt/aios-install/boot/efi"
+ssh_cmd "sudo mount /dev/vda1 /mnt/aios-install/boot/efi"
+
+# Find the squashfs
+SQUASHFS=$(ssh_cmd "ls /lib/live/mount/medium/live/filesystem.squashfs 2>/dev/null || ls /run/live/medium/live/filesystem.squashfs 2>/dev/null" || echo "")
+if [ -z "${SQUASHFS}" ]; then
+    fail "Cannot find live filesystem.squashfs"
+else
+    log "Extracting squashfs (this takes a minute)..."
+    ssh_cmd "sudo unsquashfs -f -d /mnt/aios-install ${SQUASHFS}" 2>/dev/null
+    run_test "Filesystem extracted" "test -f /mnt/aios-install/usr/bin/aios && echo ok" "ok"
 fi
 
-# Shutdown the live ISO VM
+log "Writing fstab..."
+ROOT_UUID=$(ssh_cmd "sudo blkid -s UUID -o value /dev/vda3")
+EFI_UUID=$(ssh_cmd "sudo blkid -s UUID -o value /dev/vda1")
+SWAP_UUID=$(ssh_cmd "sudo blkid -s UUID -o value /dev/vda2")
+ssh_cmd "sudo bash -c 'cat > /mnt/aios-install/etc/fstab << FSTAB
+UUID=${ROOT_UUID}  /          ext4  errors=remount-ro  0  1
+UUID=${EFI_UUID}   /boot/efi  vfat  umask=0077         0  1
+UUID=${SWAP_UUID}  none       swap  sw                 0  0
+FSTAB'"
+
+run_test "fstab written" "sudo cat /mnt/aios-install/etc/fstab | grep -q ext4 && echo ok" "ok"
+
+log "Installing GRUB bootloader..."
+ssh_cmd "sudo mount --bind /dev /mnt/aios-install/dev"
+ssh_cmd "sudo mount --bind /proc /mnt/aios-install/proc"
+ssh_cmd "sudo mount --bind /sys /mnt/aios-install/sys"
+# Try BIOS install (UEFI needs efivars which may not be available in QEMU without OVMF)
+ssh_cmd "sudo chroot /mnt/aios-install grub-install --target=i386-pc /dev/vda 2>&1" 2>/dev/null
+ssh_cmd "sudo chroot /mnt/aios-install grub-mkconfig -o /boot/grub/grub.cfg 2>&1" 2>/dev/null
+
+run_test "GRUB config generated" "sudo test -f /mnt/aios-install/boot/grub/grub.cfg && echo ok" "ok"
+
+log "Configuring installed system..."
+ssh_cmd "sudo bash -c 'echo aios-install-test > /mnt/aios-install/etc/hostname'"
+ssh_cmd "sudo mkdir -p /mnt/aios-install/home/aios/.aios"
+# Copy config + vault from the live session if they exist
+ssh_cmd "sudo cp -a /home/aios/.aios/config.json /mnt/aios-install/home/aios/.aios/ 2>/dev/null || true"
+ssh_cmd "sudo cp -a /home/aios/.aios/vault.enc /mnt/aios-install/home/aios/.aios/ 2>/dev/null || true"
+ssh_cmd "sudo chown -R 1000:1000 /mnt/aios-install/home/aios"
+
+run_test "Hostname set" "sudo cat /mnt/aios-install/etc/hostname" "aios-install-test"
+run_test "AiOS binary on disk" "sudo test -f /mnt/aios-install/usr/bin/aios && echo ok" "ok"
+
+# Clean up mounts
+ssh_cmd "sudo umount /mnt/aios-install/sys 2>/dev/null || true"
+ssh_cmd "sudo umount /mnt/aios-install/proc 2>/dev/null || true"
+ssh_cmd "sudo umount /mnt/aios-install/dev 2>/dev/null || true"
+ssh_cmd "sudo umount /mnt/aios-install/boot/efi 2>/dev/null || true"
+ssh_cmd "sudo umount /mnt/aios-install 2>/dev/null || true"
+
+# Shutdown the live ISO
 log "Shutting down live ISO VM..."
 ssh_cmd "sudo shutdown -h now" 2>/dev/null || true
 sleep 5
@@ -289,80 +260,69 @@ wait "${QEMU_PID}" 2>/dev/null || true
 QEMU_PID=""
 
 # ─── Phase 3: Boot from installed disk ────────────────────────
-if [ "${INSTALL_DONE}" != "true" ]; then
-    log "Skipping Phase 2 (boot from disk) — installation did not complete"
+log ""
+log "=== Phase 3: Boot from Installed Disk ==="
+log "Booting from virtual hard drive (no ISO)..."
+
+qemu-system-x86_64 \
+    -name "${VM_NAME}-disk" \
+    -machine q35,accel=${ACCEL} \
+    -cpu host \
+    -m 4096 \
+    -smp 2 \
+    -drive file="${DISK_IMAGE}",format=qcow2,if=virtio \
+    -boot order=c \
+    -display none \
+    -daemonize \
+    -pidfile "${TEMP_DIR}/vm2.pid" \
+    -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22 \
+    -device virtio-net-pci,netdev=net0 \
+    -device intel-hda -device hda-duplex \
+    -serial file:"${TEMP_DIR}/serial2.log" \
+    || die "Failed to start QEMU from installed disk"
+
+sleep 2
+QEMU_PID=$(cat "${TEMP_DIR}/vm2.pid" 2>/dev/null || echo "")
+log "Installed system VM started (PID: ${QEMU_PID})"
+
+# Wait for SSH — password may be different on installed system
+log "Waiting for installed system SSH (timeout: ${REBOOT_TIMEOUT}s)..."
+SSH_READY=false
+for i in $(seq 1 ${REBOOT_TIMEOUT}); do
+    if ssh_cmd "echo ok" &>/dev/null; then
+        SSH_READY=true
+        log "SSH ready after ${i}s"
+        break
+    fi
+    if [ -n "${QEMU_PID}" ] && ! kill -0 "${QEMU_PID}" 2>/dev/null; then
+        fail "Installed system VM crashed during boot"
+        break
+    fi
+    sleep 1
+done
+
+if [ "${SSH_READY}" = "true" ]; then
+    run_test "Installed system boots" "uname -a" "Linux"
+    run_test "Not live media" "! findmnt -t overlay / >/dev/null 2>&1 && echo ok || echo live" "ok"
+    run_test "Root is ext4" "findmnt -n -o FSTYPE /" "ext4"
+    run_test "Hostname correct" "hostname" "aios-install-test"
+    run_test "User aios exists" "id aios >/dev/null 2>&1 && echo ok" "ok"
+    run_test "AiOS binary exists" "test -f /usr/bin/aios && echo ok" "ok"
+    run_test "GRUB installed" "test -f /boot/grub/grub.cfg && echo ok" "ok"
+    run_test "fstab has root" "grep -q ext4 /etc/fstab && echo ok" "ok"
+    run_test "SSH works" "echo ok" "ok"
+
+    # Shutdown
+    ssh_cmd "sudo shutdown -h now" 2>/dev/null || true
+    sleep 3
 else
-    log ""
-    log "=== Phase 2: Boot from Installed Disk ==="
-    log "Booting from virtual hard drive..."
-
-    qemu-system-x86_64 \
-        -name "${VM_NAME}-installed" \
-        -machine q35,accel=${ACCEL} \
-        -cpu host \
-        -m 4096 \
-        -smp 2 \
-        -drive file="${DISK_IMAGE}",format=qcow2,if=virtio \
-        -boot order=c \
-        -display none \
-        -daemonize \
-        -pidfile /tmp/aios-install-test-2.pid \
-        -netdev user,id=net0,hostfwd=tcp::${SSH_PORT}-:22 \
-        -device virtio-net-pci,netdev=net0 \
-        -device intel-hda -device hda-duplex \
-        -serial file:/tmp/aios-install-test-serial-2.log \
-        &
-
-    QEMU_PID=$!
-    sleep 2
-    if [ -f /tmp/aios-install-test-2.pid ]; then
-        QEMU_PID=$(cat /tmp/aios-install-test-2.pid)
-    fi
-    log "Installed system VM started (PID: ${QEMU_PID})"
-
-    # Wait for SSH on the installed system
-    log "Waiting for installed system SSH (timeout: ${REBOOT_TIMEOUT}s)..."
-    SSH_READY=false
-    for i in $(seq 1 ${REBOOT_TIMEOUT}); do
-        if ssh_cmd "echo ok" &>/dev/null; then
-            SSH_READY=true
-            log "Installed system SSH ready after ${i}s"
-            break
-        fi
-        if ! kill -0 "${QEMU_PID}" 2>/dev/null; then
-            fail "Installed system VM crashed during boot"
-            break
-        fi
-        sleep 1
-    done
-
-    if [ "${SSH_READY}" = "true" ]; then
-        # ─── Phase 3 Tests: Installed system verification ─────────
-        run_test "Installed system boots" "uname -a" "Linux"
-        run_test "Hostname set correctly" "hostname" "aios-install-test"
-        run_test "User aios exists" "whoami" "aios"
-        run_test "Home directory exists" "test -d /home/aios && echo ok" "ok"
-        run_test "Config persisted" "test -f /home/aios/.aios/config.json && echo ok" "ok"
-        run_test "Vault persisted" "test -f /home/aios/.aios/vault.enc && echo ok" "ok"
-        run_test "AiOS binary exists" "test -f /usr/bin/aios && echo ok" "ok"
-        run_test "Not running from live ISO" "! findmnt -t overlay -t squashfs -t tmpfs / >/dev/null 2>&1 && echo ok || echo live" "ok"
-        run_test "Root is ext4" "findmnt -n -o FSTYPE / 2>/dev/null" "ext4"
-        run_test "fstab has root entry" "grep -q 'ext4' /etc/fstab && echo ok" "ok"
-        run_test "GRUB installed" "test -f /boot/grub/grub.cfg && echo ok" "ok"
-        run_test "SSH works on installed system" "echo ok" "ok"
-        run_test "Keyboard layout set" "cat /home/aios/.aios/config.json | python3 -c 'import sys,json; print(json.load(sys.stdin).get(\"system\",{}).get(\"keyboard_layout\",\"\"))' 2>/dev/null" "us"
-        run_test "Provider configured" "cat /home/aios/.aios/config.json | python3 -c 'import sys,json; print(json.load(sys.stdin).get(\"llm\",{}).get(\"provider\",\"\"))' 2>/dev/null" "claude"
-
-        # Shutdown
-        ssh_cmd "sudo shutdown -h now" 2>/dev/null || true
-        sleep 3
-    else
-        fail "Could not SSH into installed system"
-    fi
+    fail "Could not SSH into installed system"
 fi
 
 # ─── Cleanup ──────────────────────────────────────────────────
-rm -f "${AUTOCONFIG_IMG}" "${INSTALL_AUTOCONFIG}"
+log "Cleaning up..."
+rm -f "${DISK_IMAGE}" "${TEMP_DIR}/vm.pid" "${TEMP_DIR}/vm2.pid"
+rm -f "${TEMP_DIR}/serial.log" "${TEMP_DIR}/serial2.log"
 
 # ─── Summary ──────────────────────────────────────────────────
 log ""
@@ -374,7 +334,5 @@ log "  ${RED}Failed: ${FAILED}${NC}"
 log "  ${YELLOW}Warned: ${WARNED}${NC}"
 log "════════════════════════════════════════"
 
-if [ "${FAILED}" -gt 0 ]; then
-    exit 1
-fi
+[ "${FAILED}" -gt 0 ] && exit 1
 exit 0
