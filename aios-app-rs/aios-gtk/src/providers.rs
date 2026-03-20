@@ -176,7 +176,8 @@ pub fn is_configured(provider: &ProviderDef, config: &ConfigManager) -> bool {
     }
 }
 
-/// Return display names for all configured providers.
+/// Return display names for all configured providers (including Ollama).
+#[allow(dead_code)]
 pub fn configured_display_names(config: &ConfigManager) -> Vec<String> {
     PROVIDERS
         .iter()

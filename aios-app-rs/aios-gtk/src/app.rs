@@ -73,6 +73,7 @@ pub struct AiosApp {
 
 impl AiosApp {
     /// Create a new AiosApp with the given subsystems.
+    #[allow(dead_code)]
     pub(crate) fn new(
         config: ConfigManager,
         llm: LlmManager,

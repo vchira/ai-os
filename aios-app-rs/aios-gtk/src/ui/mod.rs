@@ -15,5 +15,3 @@ pub mod panel_renderer;
 pub mod permission_dialog;
 pub mod prompt_input;
 pub mod settings_dialog;
-#[allow(unused)]
-pub mod setup_conversation;

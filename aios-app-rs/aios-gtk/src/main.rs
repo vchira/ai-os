@@ -11,7 +11,6 @@ mod first_boot_flow;
 mod llm_handler;
 mod message_loop;
 mod providers;
-mod setup;
 mod tts;
 mod ui;
 mod voice_listener;
