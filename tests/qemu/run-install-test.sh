@@ -28,7 +28,7 @@ mkdir -p "${TEMP_DIR}"
 ISO="${1:-${PROJECT_DIR}/distro/build/live-image-amd64.hybrid.iso}"
 DISK_IMAGE="${TEMP_DIR}/install-disk.qcow2"
 DISK_SIZE="16G"
-SSH_PORT=2223
+SSH_PORT=2233  # Use high port to avoid conflicts with run-tests.sh (2222) and dev VM
 SSH_USER="aios"
 SSH_PASS="aios"  # Default live ISO password
 VM_NAME="aios-install-test"
@@ -114,6 +114,10 @@ else
     warn "No KVM — VM will be slow"
     ACCEL="tcg"
 fi
+
+# ─── Kill any leftover VMs from previous runs ─────────────────
+pkill -f "qemu-system-x86_64.*${VM_NAME}" 2>/dev/null || true
+sleep 1
 
 # ─── Phase 1: Create disk + boot live ISO ─────────────────────
 log "Creating ${DISK_SIZE} virtual disk: ${DISK_IMAGE}"
