@@ -24,11 +24,21 @@ pub(crate) fn build_boot_status(config: &ConfigManager) -> String {
 
     let web_enabled = config.get_bool("channels.web.enabled", true);
     let web_port = config.get_str("channels.web.port", "80");
+    let hostname = std::fs::read_to_string("/etc/hostname")
+        .unwrap_or_else(|_| "aios".into())
+        .trim()
+        .to_string();
     if web_enabled {
+        // Show both hostname.local and aios.local (CNAME alias).
+        let url = if web_port == "80" {
+            format!("http://{hostname}.local (also http://aios.local)")
+        } else {
+            format!("http://{hostname}.local:{web_port} (also http://aios.local:{web_port})")
+        };
         status.add(StatusLine::new(
             &t("boot.status.web_channel"),
             true,
-            format!("http://aios.local:{web_port}"),
+            url,
         ));
     } else {
         status.add(StatusLine::new(

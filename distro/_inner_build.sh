@@ -298,17 +298,39 @@ loadkeys "${KB_CONSOLE}" 2>/dev/null || true
 # ── Avahi mDNS — makes http://aios.local work on the LAN ──
 systemctl enable avahi-daemon 2>/dev/null || true
 mkdir -p /etc/avahi/services
+
+# Publish the web service so it's discoverable.
 cat > /etc/avahi/services/aios-web.service << AVEOF
 <?xml version="1.0" standalone='no'?>
 <!DOCTYPE service-group SYSTEM "avahi-service.dtd">
 <service-group>
-  <name>Assistant Web Interface</name>
+  <name>AiOS Web Interface</name>
   <service>
     <type>_http._tcp</type>
     <port>80</port>
   </service>
 </service-group>
 AVEOF
+
+# Add a CNAME alias so http://aios.local always works, regardless of the
+# actual hostname (which may be "assistant", user-chosen, etc.).
+# Uses avahi-publish-cname via a small systemd service.
+cat > /etc/systemd/system/avahi-alias-aios.service << 'ALIASEOF'
+[Unit]
+Description=Publish aios.local mDNS CNAME alias
+After=avahi-daemon.service
+Requires=avahi-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/avahi-publish -a -R aios.local $(hostname -I | awk '{print $1}')
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+ALIASEOF
+systemctl enable avahi-alias-aios.service 2>/dev/null || true
 
 # ── SPICE agent for clipboard sharing with host ──
 # spice-vdagentd must run as a system service BEFORE the user session starts.
