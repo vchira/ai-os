@@ -254,13 +254,16 @@ impl SttEngine for WhisperStt {
     }
 }
 
-/// Return the default model directory: `~/.aios/models/whisper/`.
+/// Return the model directory: system path (ISO) first, then user home.
 fn dirs_model_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    PathBuf::from(home)
-        .join(".aios")
-        .join("models")
-        .join("whisper")
+    // Check system path first (ISO / installed system).
+    let system_dir = PathBuf::from("/opt/aios-app/models/whisper");
+    if system_dir.join("ggml-tiny.bin").exists() {
+        return system_dir;
+    }
+    // Fall back to user home.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/aios".to_string());
+    PathBuf::from(home).join(".aios/models/whisper")
 }
 
 // ---------------------------------------------------------------------------

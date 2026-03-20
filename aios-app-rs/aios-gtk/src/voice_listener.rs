@@ -355,60 +355,35 @@ pub(crate) fn start_voice_listener(
     })
 }
 
-/// Transcribe audio samples using whisper-cpp-cli.
+/// Transcribe audio samples using the `WhisperStt` engine from `aios-voice`.
+///
+/// Uses the proper `SttEngine` trait instead of shelling out directly.
+/// Model path resolution handles both system (ISO) and user home paths.
 pub(crate) fn transcribe_with_whisper(samples: &[f32]) -> Result<String, String> {
-    let tmp_path = "/tmp/aios-stt-input.wav";
-    let sample_rate: u32 = 16000;
-    let num_samples = samples.len() as u32;
-    let data_size = num_samples * 2;
+    use aios_voice::stt::{SttBackend, create_stt_engine};
 
-    let mut buf: Vec<u8> = Vec::with_capacity(44 + data_size as usize);
-    buf.extend_from_slice(b"RIFF");
-    buf.extend_from_slice(&(36 + data_size).to_le_bytes());
-    buf.extend_from_slice(b"WAVE");
-    buf.extend_from_slice(b"fmt ");
-    buf.extend_from_slice(&16u32.to_le_bytes());
-    buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    buf.extend_from_slice(&1u16.to_le_bytes()); // mono
-    buf.extend_from_slice(&sample_rate.to_le_bytes());
-    buf.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    buf.extend_from_slice(&2u16.to_le_bytes());
-    buf.extend_from_slice(&16u16.to_le_bytes());
-    buf.extend_from_slice(b"data");
-    buf.extend_from_slice(&data_size.to_le_bytes());
+    let mut engine = create_stt_engine(SttBackend::Whisper);
 
-    for &s in samples {
-        let sample = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        buf.extend_from_slice(&sample.to_le_bytes());
+    // Try to load a model in preference order: configured size, then fallbacks.
+    // The engine's transcribe() has lazy-loading built in, but we attempt an
+    // explicit load for better error reporting.
+    let model_sizes = ["medium", "base", "small", "tiny", "large"];
+    let mut loaded = false;
+    for size in &model_sizes {
+        if engine.load_model(size).is_ok() {
+            loaded = true;
+            break;
+        }
+    }
+    if !loaded {
+        tracing::warn!("No whisper model found — transcribe will attempt lazy fallback");
     }
 
-    std::fs::write(tmp_path, &buf).map_err(|e| format!("Failed to write WAV: {e}"))?;
+    let result = engine
+        .transcribe(samples, None)
+        .map_err(|e| format!("Whisper transcription failed: {e}"))?;
 
-    let output = std::process::Command::new("whisper-cpp-cli")
-        .args(["-m", "/home/aios/.aios/models/whisper/ggml-tiny.bin"])
-        .args(["-f", tmp_path])
-        .args(["--no-timestamps", "-nt"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .output()
-        .map_err(|e| format!("whisper-cpp-cli not available: {e}"))?;
-
-    let _ = std::fs::remove_file(tmp_path);
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("whisper failed: {stderr}"));
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string();
-
-    Ok(text)
+    Ok(result.text)
 }
 
 /// Strip the wake phrase from the beginning of transcribed text.
