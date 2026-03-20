@@ -412,6 +412,52 @@ pub fn sentinel_check(client: &OllamaClient, model: &str, ai_response: &str) -> 
 }
 
 // ---------------------------------------------------------------------------
+// Model selection builder
+// ---------------------------------------------------------------------------
+
+/// Build the model selection data from the catalog + installed models.
+///
+/// This is the bridge between the Ollama client (aios-llm) and the
+/// channel-agnostic UI component (aios-core).
+pub fn build_model_selection() -> aios_core::ui_components::ModelSelectionData {
+    use aios_core::ui_components::{ModelSelectionData, ModelTableRow};
+
+    let ram = detect_ram_gb();
+    let has_gpu = has_nvidia_gpu();
+    let recommended = recommend_model();
+
+    let client = OllamaClient::new();
+    let installed = client.list_models().unwrap_or_default();
+    let installed_names: Vec<String> = installed.iter().map(|m| m.name.clone()).collect();
+
+    let models = MODEL_CATALOG
+        .iter()
+        .map(|m| ModelTableRow {
+            model_id: m.name.to_string(),
+            display_name: m.display_name.to_string(),
+            download_size: m.download_size.to_string(),
+            ram_needed: m.ram_needed.to_string(),
+            speed: m.speed.to_string(),
+            description: m.description.to_string(),
+            installed: installed_names.iter().any(|n| n.starts_with(m.name)),
+            recommended: m.name == recommended.name,
+        })
+        .collect();
+
+    ModelSelectionData {
+        title: "Choose Local AI Model".to_string(),
+        description: format!(
+            "Your system: {ram}GB RAM{}. Select a model for Sentinel (security + summarization).",
+            if has_gpu { " + GPU" } else { "" }
+        ),
+        models,
+        selected: None,
+        system_ram_gb: ram,
+        has_gpu,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -20,6 +20,7 @@ pub mod secure;
 pub mod selftest;
 pub mod system_monitor;
 pub mod types;
+pub mod ui_components;
 pub mod upgrade;
 
 // Re-export the most commonly used items at the crate root.
