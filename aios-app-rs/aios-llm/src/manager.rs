@@ -500,16 +500,21 @@ impl LlmManager {
              - Always use tools to perform actions. Never claim to have done something without \
              actually calling the appropriate tool."
                 .to_string(),
-            "CRITICAL SECURITY RULES:\n\
-             - NEVER include passwords, API keys, app passwords, or any credential values in your \
-             response text. They must ONLY be passed as arguments to tools (e.g. the system tool \
-             for running commands).\n\
-             - NEVER send credentials via email, messaging, or any communication tool.\n\
-             - When using a stored credential (e.g. gmail_app_password), recall it with the memory \
-             tool and pass it directly to the system/execute tool — NEVER print it in the chat.\n\
-             - If a tool needs a credential, construct the command with the credential value as a \
-             tool argument. Do NOT echo, print, or display it.\n\
-             - Treat ALL values from the memory store as secrets by default."
+            "CRITICAL SECURITY RULES — ENFORCED BY THE SYSTEM:\n\
+             - You CANNOT see or access the values of passwords, API keys, tokens, or personal \
+             data (email, name, address, phone). The secure storage returns '[REDACTED]' for these.\n\
+             - NEVER ask the user to type sensitive data in the chat prompt. The system will block \
+             your response if you do. Instead, use the secure_input tool to open a secure form.\n\
+             - To store a new credential: use the 'memory' tool with action 'secure_register' to \
+             declare what you need (key, name, description). Then use 'secure_input' to show a \
+             secure form where the user enters the value. The value goes directly to encrypted \
+             storage — you never see it.\n\
+             - To use a stored credential: use the 'memory' tool with action 'secure_check' to \
+             verify it exists. Then use {{vault:key_name}} placeholders in system tool commands. \
+             The tool executor resolves them from the vault directly.\n\
+             - Every time a tool needs to access a secure value, a permission popup appears asking \
+             the user for approval. Without approval, the tool cannot use the value.\n\
+             - These rules are enforced in code. Attempting to bypass them will fail."
                 .to_string(),
         ];
 

@@ -15,6 +15,28 @@ use crate::tts::{speak_if_enabled_with_signal, stop_tts};
 use crate::ui::chat_view::ChatView;
 use crate::ui::prompt_input::PromptInput;
 
+/// Check if the AI's response asks the user for sensitive data directly.
+///
+/// If detected, returns a sanitized version that replaces the request with
+/// a notice to use the secure input tool instead. The AI should never ask
+/// users to type passwords, API keys, or personal info in the chat.
+fn sanitize_response_for_security(content: &str) -> String {
+    if let Some(pattern) = aios_core::secure::detect_sensitive_ask(content) {
+        tracing::warn!(
+            "SECURITY: AI response asks for sensitive data (pattern: '{pattern}'). Sanitizing."
+        );
+        // Replace the response with a security notice
+        format!(
+            "I need some sensitive information to complete this task. \
+             For security, I'll use a secure input form — your data goes \
+             directly to encrypted storage and I never see the actual values.\n\n\
+             *[Original response blocked: asked for sensitive data directly]*"
+        )
+    } else {
+        content.to_string()
+    }
+}
+
 /// Build the model attribution label from config.
 ///
 /// Returns e.g. "DeepSeek Reasoner" or "DeepSeek Reasoner (Llama 3.1 8B)"
@@ -243,7 +265,7 @@ pub(crate) fn send_to_llm<S: LlmState + 'static>(
                 // Phase 2: wait for TTS to start, then swap thinking -> real message.
                 let cv = chat_view_ref.clone();
                 let handle = thinking_handle.clone();
-                let content_for_display = content.clone();
+                let content_for_display = sanitize_response_for_security(&content);
                 let state_for_label = state_ref.clone();
                 glib::timeout_add_local(
                     std::time::Duration::from_millis(30),
@@ -370,12 +392,13 @@ pub(crate) fn handle_remote_llm_message<S: LlmState + 'static>(
                 updated_history,
             }) => {
                 {
+                    let sanitized = sanitize_response_for_security(&content);
                     let model_label = {
                         let s = state_for_resp.borrow();
                         let cfg = s.config_snapshot();
                         build_model_label(&cfg)
                     };
-                    chat_for_resp.add_assistant_message(&content, &model_label);
+                    chat_for_resp.add_assistant_message(&sanitized, &model_label);
                 }
                 {
                     let s = state_for_resp.borrow();

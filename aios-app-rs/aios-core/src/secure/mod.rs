@@ -8,9 +8,11 @@
 
 pub mod auth;
 pub mod permission;
+pub mod registry;
 pub mod vault;
 
 // Re-export the primary public types.
 pub use auth::{AuthManager, AuthResult, Authenticator, PasswordAuthenticator};
 pub use permission::{PermissionGrant, PermissionManager, PermissionRequest};
+pub use registry::{SecureEntry, SecureKind, SecureRegistry, detect_sensitive_ask};
 pub use vault::{SecretEntry, SecretKind, Vault};
