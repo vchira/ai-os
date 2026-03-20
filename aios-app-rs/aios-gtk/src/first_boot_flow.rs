@@ -525,21 +525,47 @@ pub(crate) fn apply_autoconfig(
     info!("Autoconfig applied -- finalizing boot");
 
     // 5. Finalize boot — init LLM, tools, channels, voice.
-
+    // Run synchronously (not idle_add) so we can catch panics.
     let ui = crate::boot_context::BootUi {
-        chat_view,
+        chat_view: chat_view.clone(),
         prompt_input,
         channel_overlay,
         window: window.clone(),
         vu_meter: vu_meter_autoconfig,
     };
 
-    gtk4::glib::idle_add_local_once(move || {
-        let config = load_config();
+    let config = load_config();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::boot_context::finalize_boot(config, rt, queue, &ui, None);
-        ui.chat_view.add_message("system", &t("setup.type_message"));
-        ui.window.queue_draw();
-    });
+    }));
+    match result {
+        Ok(()) => {
+            info!("Boot finalized successfully");
+            // Only now show the prompt input + settings button.
+            ui.prompt_input.widget().set_visible(true);
+            ui.prompt_input.widget().set_sensitive(true);
+            main_window::set_settings_button_visible(&window, true);
+        }
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            tracing::error!("finalize_boot panicked: {msg}");
+            chat_view.add_level_message(
+                aios_core::types::MessageLevel::Error,
+                &format!("Boot error: {msg}"),
+            );
+            // Show prompt even on error so user can type /help.
+            ui.prompt_input.widget().set_visible(true);
+            ui.prompt_input.widget().set_sensitive(true);
+        }
+    }
+    ui.chat_view.add_message("system", &t("setup.type_message"));
+    ui.window.queue_draw();
 }
 
 // ---------------------------------------------------------------------------

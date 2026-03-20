@@ -887,6 +887,13 @@ echo -e "${BOLD}═════════════════════�
 TESTEOF
 chmod +x /usr/bin/aios-test
 
+# ── Diagnostic script ──
+if [ -f /work/scripts/aios-diag.sh ]; then
+    cp /work/scripts/aios-diag.sh /usr/bin/aios-diag
+    chmod +x /usr/bin/aios-diag
+    echo "[AiOS] Diagnostic script installed"
+fi
+
 # ── Hostname collision check script ──
 cat > /usr/bin/aios-hostname-check << 'HCEOF'
 #!/bin/bash
