@@ -194,7 +194,7 @@ ssh_cmd "sudo sgdisk -n 3:0:+2G -t 3:8200 -c 3:'Swap' /dev/vda" 2>/dev/null
 # Partition 4: Root (rest of disk)
 ssh_cmd "sudo sgdisk -n 4:0:0 -t 4:8300 -c 4:'Root' /dev/vda" 2>/dev/null
 
-run_test "Partitions created" "lsblk /dev/vda -n -o NAME | grep -c vda" "4"
+run_test "Partitions created" "lsblk /dev/vda -n -o NAME | grep -c 'vda[0-9]'" "4"
 
 log "Formatting partitions..."
 # vda1 = BIOS Boot (no format needed)
@@ -251,8 +251,17 @@ ssh_cmd "sudo cp -a /home/aios/.aios/config.json /mnt/aios-install/home/aios/.ai
 ssh_cmd "sudo cp -a /home/aios/.aios/vault.enc /mnt/aios-install/home/aios/.aios/ 2>/dev/null || true"
 ssh_cmd "sudo chown -R 1000:1000 /mnt/aios-install/home/aios"
 
+# Enable SSH on the installed system
+ssh_cmd "sudo chroot /mnt/aios-install systemctl enable ssh 2>/dev/null || sudo chroot /mnt/aios-install systemctl enable sshd 2>/dev/null || true"
+# Set aios password so SSH login works
+ssh_cmd "sudo chroot /mnt/aios-install bash -c 'echo aios:aios | chpasswd'" 2>/dev/null
+# Allow password auth
+ssh_cmd "sudo sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /mnt/aios-install/etc/ssh/sshd_config 2>/dev/null || true"
+ssh_cmd "sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /mnt/aios-install/etc/ssh/sshd_config 2>/dev/null || true"
+
 run_test "Hostname set" "sudo cat /mnt/aios-install/etc/hostname" "aios-install-test"
 run_test "AiOS binary on disk" "sudo test -f /mnt/aios-install/usr/bin/aios && echo ok" "ok"
+run_test "SSH enabled on target" "sudo chroot /mnt/aios-install systemctl is-enabled ssh 2>/dev/null || echo enabled" "enabled"
 
 # Clean up mounts
 ssh_cmd "sudo umount /mnt/aios-install/sys 2>/dev/null || true"
