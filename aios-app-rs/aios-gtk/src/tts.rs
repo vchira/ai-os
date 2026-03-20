@@ -103,7 +103,8 @@ pub(crate) fn summarize_for_tts(raw: &str, cfg: &SentinelConfig) -> String {
         String::new()
     };
 
-    if !cfg.api_key.is_empty() {
+    // Ollama doesn't need an API key — proceed if provider is ollama or key is set.
+    if !cfg.api_key.is_empty() || cfg.provider_id == "ollama" {
         let prompt = format!(
             "Summarize the following AI assistant response in exactly ONE short spoken sentence (max 30 words). \
              No markdown, no special characters, no asterisks, no hashtags — just plain spoken English. \
@@ -142,10 +143,13 @@ pub(crate) fn summarize_for_tts(raw: &str, cfg: &SentinelConfig) -> String {
                     "messages": [{"role": "user", "content": prompt}]
                 });
                 let base = crate::providers::provider_api_url(&cfg.provider_id);
-                client
+                let mut req = client
                     .post(format!("{base}/v1/chat/completions"))
-                    .header("Authorization", format!("Bearer {}", cfg.api_key))
-                    .header("content-type", "application/json")
+                    .header("content-type", "application/json");
+                if !cfg.api_key.is_empty() {
+                    req = req.header("Authorization", format!("Bearer {}", cfg.api_key));
+                }
+                req
                     .body(body.to_string())
                     .send()
                     .ok()

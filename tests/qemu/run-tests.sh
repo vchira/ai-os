@@ -318,6 +318,13 @@ run_test "At least 10 pretrained models" "count=\$(ls /opt/aios-app/models/kws/p
 run_test "Wake word config is enabled" "cat /home/aios/.aios/config.json | python3 -c 'import sys,json; c=json.load(sys.stdin); print(c.get(\"voice\",{}).get(\"wake_enabled\",False))' 2>/dev/null" "True"
 run_test "STT config is enabled" "cat /home/aios/.aios/config.json | python3 -c 'import sys,json; c=json.load(sys.stdin); print(c.get(\"voice\",{}).get(\"stt_enabled\",False))' 2>/dev/null" "True"
 
+# -- 8b. Ollama + Sentinel --
+echo -e "\n${BOLD}── Ollama + Sentinel ──${NC}"
+run_test "Ollama binary exists" "test -f /usr/bin/ollama && echo ok" "ok"
+run_test "Ollama binary is executable" "test -x /usr/bin/ollama && echo ok" "ok"
+run_test "Ollama systemd service exists" "test -f /etc/systemd/system/ollama.service && echo ok" "ok"
+run_test "Sentinel config key exists" "cat /home/aios/.aios/config.json | python3 -c 'import sys,json; c=json.load(sys.stdin); print(\"sentinel_model\" in c.get(\"llm\",{}))' 2>/dev/null" "True"
+
 # -- 9. Whisper STT models --
 echo -e "\n${BOLD}── STT Models ──${NC}"
 run_test "Whisper model exists" "test -f /home/aios/.aios/models/whisper/ggml-tiny.bin && echo ok || test -f /opt/aios-app/models/whisper/ggml-tiny.bin && echo ok" "ok"
