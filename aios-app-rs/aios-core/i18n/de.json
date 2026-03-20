@@ -14,7 +14,7 @@
   "boot.status.web_channel": "Web-Kanal",
   "boot.status.signal": "Signal",
   "boot.status.main_ai": "Haupt-KI",
-  "boot.status.summarizer": "Zusammenfasser",
+  "boot.status.sentinel": "Wächter",
   "boot.status.audio_output": "Audioausgabe (TTS)",
   "boot.status.audio_input": "Audioeingabe (STT)",
   "boot.status.keyboard": "Tastatur",

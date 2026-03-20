@@ -118,18 +118,15 @@ pub(crate) fn finalize_boot(
     ui: &BootUi,
     boot_status_text: Option<String>,
 ) {
-    // Migrate legacy "auto" summary provider.
+    // Migrate legacy tts_summary_provider/tts_summary_model → sentinel_model.
     let mut config = config;
     {
-        let summary_prov = config.get_str("llm.tts_summary_provider", "");
-        if summary_prov == "auto" || summary_prov.is_empty() {
-            let main = config.get_str("llm.provider", "claude");
-            let main_model_key = format!("llm.{main}_model");
-            let main_model = config.get_str(&main_model_key, "");
-            let _ = config.set("llm.tts_summary_provider", serde_json::json!(main));
-            if !main_model.is_empty() {
-                let _ = config.set("llm.tts_summary_model", serde_json::json!(main_model));
-            }
+        let legacy_prov = config.get_str("llm.tts_summary_provider", "");
+        if !legacy_prov.is_empty() {
+            // Old config detected — clear legacy keys; sentinel_model stays empty
+            // until the user explicitly installs a local model.
+            let _ = config.set("llm.tts_summary_provider", serde_json::json!(""));
+            let _ = config.set("llm.tts_summary_model", serde_json::json!(""));
         }
     }
 

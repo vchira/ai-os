@@ -86,23 +86,16 @@ pub(crate) fn build_boot_status(config: &ConfigManager) -> String {
         },
     ));
 
-    // -- Summarizer --
-    let sum_provider_id = config.get_str("llm.tts_summary_provider", "claude");
-    let sum_def = crate::providers::find_by_id(&sum_provider_id);
-    let sum_has_key = sum_def
-        .map(|p| crate::providers::is_configured(p, config))
-        .unwrap_or(false);
-    let sum_model = config.get_str("llm.tts_summary_model", "");
-    let sum_display = sum_def
-        .map(|p| p.display_name)
-        .unwrap_or_else(|| sum_provider_id.as_str());
+    // -- Sentinel --
+    let sentinel_model = config.get_str("llm.sentinel_model", "");
+    let sentinel_available = !sentinel_model.is_empty();
     status.add(StatusLine::new(
-        &t("boot.status.summarizer"),
-        sum_has_key,
-        if sum_has_key {
-            format!("{sum_display} ({sum_model})")
+        &t("boot.status.sentinel"),
+        sentinel_available,
+        if sentinel_available {
+            format!("{sentinel_model} (local, Ollama)")
         } else {
-            t("boot.status.no_api_key").to_string()
+            "no local model installed".to_string()
         },
     ));
 

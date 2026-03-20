@@ -377,30 +377,21 @@ pub(crate) fn apply_autoconfig(
     .collect::<Vec<_>>()
     .join("\n");
 
-    // Resolve Main AI and Summarizer display info.
+    // Resolve Main AI and Sentinel display info.
     let main_prov_display = crate::providers::find_by_id(&auto.ai.main_provider)
         .map(|p| p.display_name)
         .unwrap_or(auto.ai.main_provider.as_str());
     let main_model_human = crate::providers::model_human_name(&auto.ai.main_model);
-    let sum_prov_id = if auto.ai.summary_provider.is_empty() {
-        &auto.ai.main_provider
+    let sentinel_model_display = if auto.ai.sentinel_model.is_empty() {
+        "not configured".to_string()
     } else {
-        &auto.ai.summary_provider
+        auto.ai.sentinel_model.clone()
     };
-    let sum_model_id = if auto.ai.summary_model.is_empty() {
-        &auto.ai.main_model
-    } else {
-        &auto.ai.summary_model
-    };
-    let sum_prov_display = crate::providers::find_by_id(sum_prov_id)
-        .map(|p| p.display_name)
-        .unwrap_or(sum_prov_id.as_str());
-    let sum_model_human = crate::providers::model_human_name(sum_model_id);
 
     let autoconfig_msg = format!(
         "**Autoconfig detected** \u{2014} applying unattended configuration:\n\n\
          **Main AI:** {main_prov_display} \u{2014} {main_model_human}\n\
-         **Summarizer:** {sum_prov_display} \u{2014} {sum_model_human}\n\
+         **Sentinel:** {sentinel_model_display}\n\
          {api_key_lines}\n\
          **Keyboard:** {}\n\
          **Language:** {}\n\
@@ -470,7 +461,7 @@ pub(crate) fn apply_autoconfig(
     let _ = config.set("llm.groq_api_key", serde_json::json!(auto.provider.groq_api_key));
     let _ = config.set("llm.gemini_api_key", serde_json::json!(auto.provider.gemini_api_key));
 
-    // AI model selection — main AI and TTS summarizer.
+    // AI model selection — main AI and Sentinel.
     let main_provider = if auto.ai.main_provider.is_empty() {
         &auto.provider.primary
     } else {
@@ -481,21 +472,8 @@ pub(crate) fn apply_autoconfig(
         let model_key = format!("llm.{main_provider}_model");
         let _ = config.set(&model_key, serde_json::json!(auto.ai.main_model));
     }
-    // Always set summarizer — fall back to main provider if not specified.
-    if auto.ai.summary_provider.is_empty() {
-        let _ = config.set("llm.tts_summary_provider", serde_json::json!(main_provider));
-        let main_model = if auto.ai.main_model.is_empty() {
-            crate::providers::find_by_id(main_provider)
-                .map(|p| p.default_model.to_string())
-                .unwrap_or_default()
-        } else {
-            auto.ai.main_model.clone()
-        };
-        let _ = config.set("llm.tts_summary_model", serde_json::json!(main_model));
-    } else {
-        let _ = config.set("llm.tts_summary_provider", serde_json::json!(auto.ai.summary_provider));
-        let _ = config.set("llm.tts_summary_model", serde_json::json!(auto.ai.summary_model));
-    }
+    // Set sentinel model — if empty, leave empty (user must install during setup).
+    let _ = config.set("llm.sentinel_model", serde_json::json!(auto.ai.sentinel_model));
 
     let _ = config.set("assistant.name", serde_json::json!(auto.assistant.name));
     let _ = config.set(
@@ -511,7 +489,7 @@ pub(crate) fn apply_autoconfig(
             "**Autoconfig applied successfully!**\n\n\
              Vault created, API keys stored, system configured.\n\
              Main AI: **{main_prov_display} \u{2014} {main_model_human}** | \
-             Summarizer: **{sum_prov_display} \u{2014} {sum_model_human}** | \
+             Sentinel: **{sentinel_model_display}** | \
              Keyboard: **{}** | Mode: **{}**",
             auto.system.keyboard,
             if auto.install.enabled {

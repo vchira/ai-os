@@ -413,6 +413,39 @@ else
     echo "WARN: AiOS binary not found at /opt/aios-app/aios"
 fi
 
+# ── Ollama — local AI model runtime for Sentinel (security + summarization) ──
+# Download and install the Ollama binary. It's used by the Sentinel system
+# to run local AI models for security sanitization and TTS summarization.
+echo "[AiOS] Installing Ollama for local AI inference..."
+OLLAMA_URL="https://ollama.com/download/ollama-linux-amd64"
+if curl -fsSL -o /usr/bin/ollama "${OLLAMA_URL}" 2>/dev/null; then
+    chmod +x /usr/bin/ollama
+    echo "[AiOS] Ollama installed to /usr/bin/ollama"
+else
+    echo "WARN: Failed to download Ollama — Sentinel will not be available"
+fi
+
+# Ollama systemd service — started on demand by AiOS, not at boot.
+cat > /etc/systemd/system/ollama.service << 'OLLAMAEOF'
+[Unit]
+Description=Ollama Local AI Model Server
+After=network.target
+
+[Service]
+Type=simple
+User=aios
+ExecStart=/usr/bin/ollama serve
+Restart=on-failure
+RestartSec=3
+Environment="HOME=/home/aios"
+Environment="OLLAMA_MODELS=/home/aios/.ollama/models"
+
+[Install]
+WantedBy=multi-user.target
+OLLAMAEOF
+# Do NOT enable at boot — AiOS starts it on demand when Sentinel is needed.
+echo "[AiOS] Ollama systemd service created (not enabled at boot)"
+
 # ── AiOS update script (for remote push updates) ──
 cat > /usr/bin/aios-update << 'UPDEOF'
 #!/bin/bash

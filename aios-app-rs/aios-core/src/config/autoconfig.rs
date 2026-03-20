@@ -26,7 +26,7 @@ pub struct AutoConfig {
     #[serde(default)]
     pub install: InstallConfig,
 
-    /// AI model selection (main AI + TTS summarizer).
+    /// AI model selection (main AI + Sentinel).
     #[serde(default)]
     pub ai: AiModelConfig,
 
@@ -39,7 +39,7 @@ pub struct AutoConfig {
     pub debug: bool,
 }
 
-/// AI model configuration — separate main AI and TTS summarizer.
+/// AI model configuration — separate main AI and Sentinel (local security model).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AiModelConfig {
     /// Provider for the main AI (conversations, tools). Defaults to the primary provider.
@@ -48,12 +48,9 @@ pub struct AiModelConfig {
     /// Model for the main AI. Empty = provider default.
     #[serde(default)]
     pub main_model: String,
-    /// Provider for TTS summary (one-sentence summary of long answers). Must be fast+cheap.
+    /// Local Sentinel model (e.g. "llama3.2:3b"). Empty = not configured.
     #[serde(default)]
-    pub summary_provider: String,
-    /// Model for TTS summary. Empty = cheapest available.
-    #[serde(default)]
-    pub summary_model: String,
+    pub sentinel_model: String,
 }
 
 impl Default for AiModelConfig {
@@ -61,8 +58,7 @@ impl Default for AiModelConfig {
         Self {
             main_provider: String::new(),
             main_model: String::new(),
-            summary_provider: String::new(),
-            summary_model: String::new(),
+            sentinel_model: String::new(),
         }
     }
 }

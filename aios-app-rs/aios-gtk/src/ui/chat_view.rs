@@ -195,7 +195,7 @@ impl ChatView {
 
     /// Append an assistant message with model attribution in the role label.
     ///
-    /// Renders as: "Assistant — DeepSeek Reasoner" or with summarizer in parens.
+    /// Renders as: "Assistant — DeepSeek Reasoner" or with sentinel in parens.
     pub fn add_assistant_message(&self, content: &str, model_label: &str) {
         let row = gtk::Box::new(Orientation::Vertical, 2);
         row.add_css_class("message-row");

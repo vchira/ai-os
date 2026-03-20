@@ -15,35 +15,36 @@ use crate::tts::{speak_if_enabled_with_signal, stop_tts};
 use crate::ui::chat_view::ChatView;
 use crate::ui::prompt_input::PromptInput;
 
-/// Check if the AI's response asks the user for sensitive data directly.
+/// Three-layer security sanitization for AI responses (mandatory).
 ///
-/// If detected, returns a sanitized version that replaces the request with
-/// a notice to use the secure input tool instead. The AI should never ask
-/// users to type passwords, API keys, or personal info in the chat.
+/// 1. Pattern matching (instant) — catches obvious asks for sensitive data
+/// 2. Value leak scan (instant) — catches stored secrets verbatim in text
+/// 3. Sentinel local model (0.5-2s) — catches smart rephrasing
+///
+/// If Sentinel is not installed but secrets exist, responses are BLOCKED.
 fn sanitize_response_for_security(content: &str) -> String {
-    // Check 1: Does the AI ask the user to type sensitive data?
+    // Check 1: Pattern matching (instant)
     if let Some(pattern) = aios_core::secure::detect_sensitive_ask(content) {
         tracing::warn!(
-            "SECURITY: AI response asks for sensitive data (pattern: '{pattern}'). Sanitizing."
+            "SECURITY [pattern]: blocked — '{pattern}'"
         );
         return format!(
             "I need some sensitive information to complete this task. \
              For security, I'll use a secure input form — your data goes \
              directly to encrypted storage and I never see the actual values.\n\n\
-             *[Original response blocked: asked for sensitive data directly]*"
+             *[Response blocked: asked for sensitive data directly]*"
         );
     }
 
-    // Check 2: Does the response contain any stored secure values?
+    // Check 2: Value leak scan (instant)
     let mem_path = aios_core::config::ConfigManager::default_config_dir().join("memory.json");
     let leaked = aios_core::secure::scan_for_leaked_values(content, &mem_path);
     if !leaked.is_empty() {
         tracing::warn!(
-            "SECURITY: AI response contains leaked secure values: {:?}. Redacting.",
+            "SECURITY [leak]: redacting {:?}",
             leaked
         );
         let mut redacted = content.to_string();
-        // Load actual values to redact them
         if let Ok(store_str) = std::fs::read_to_string(&mem_path) {
             if let Ok(store) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&store_str) {
                 for key in &leaked {
@@ -56,25 +57,64 @@ fn sanitize_response_for_security(content: &str) -> String {
         return redacted;
     }
 
+    // Check 3: Sentinel local model (mandatory when configured)
+    let sentinel_model = aios_core::config::ConfigManager::new()
+        .map(|c| c.get_str("llm.sentinel_model", ""))
+        .unwrap_or_default();
+
+    if !sentinel_model.is_empty() {
+        let client = aios_llm::OllamaClient::new();
+        if client.is_running() {
+            if !aios_llm::local::sentinel_check(&client, &sentinel_model, content) {
+                tracing::warn!("SECURITY [sentinel]: local model blocked response");
+                return format!(
+                    "I need some sensitive information to complete this task. \
+                     For security, I'll use a secure input form — your data goes \
+                     directly to encrypted storage and I never see the actual values.\n\n\
+                     *[Response blocked by Sentinel security model]*"
+                );
+            }
+        } else {
+            tracing::warn!("SECURITY: Sentinel configured but Ollama not running — blocking");
+            return "\u{26a0}\u{fe0f} Sentinel security model is not running. \
+                    Start Ollama or check Settings > AI.\n\n\
+                    *[Response blocked: Sentinel required]*"
+                .to_string();
+        }
+    } else {
+        // No Sentinel — only block if secrets are stored (new installs can chat freely).
+        let has_secrets = std::fs::read_to_string(&mem_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<std::collections::BTreeMap<String, String>>(&s).ok())
+            .map(|store| store.keys().any(|k| aios_core::secure::is_credential_key(k)))
+            .unwrap_or(false);
+        if has_secrets {
+            tracing::warn!("SECURITY: secrets stored but no Sentinel — blocking");
+            return "\u{26a0}\u{fe0f} Sentinel security model required. \
+                    You have stored credentials but no local model to protect them.\n\
+                    Install a Sentinel model in Settings > AI.\n\n\
+                    *[Response blocked: install Sentinel to continue]*"
+                .to_string();
+        }
+    }
+
     content.to_string()
 }
 
 /// Build the model attribution label from config.
 ///
-/// Returns e.g. "DeepSeek Reasoner" or "DeepSeek Reasoner (Llama 3.1 8B)"
-/// if the summarizer differs from the main model.
+/// Returns e.g. "DeepSeek Reasoner" or "DeepSeek Reasoner (Sentinel: llama3.2:3b)"
+/// if a sentinel model is configured.
 fn build_model_label(config: &aios_core::config::ConfigManager) -> String {
     let provider_id = config.get_str("llm.provider", "claude");
     let model_key = format!("llm.{provider_id}_model");
     let model_slug = config.get_str(&model_key, "");
     let main_name = crate::providers::model_human_name(&model_slug);
 
-    let sum_provider = config.get_str("llm.tts_summary_provider", "");
-    let sum_model = config.get_str("llm.tts_summary_model", "");
+    let sentinel_model = config.get_str("llm.sentinel_model", "");
 
-    if !sum_provider.is_empty() && (sum_provider != provider_id || sum_model != model_slug) {
-        let sum_name = crate::providers::model_human_name(&sum_model);
-        format!("{main_name} ({sum_name})")
+    if !sentinel_model.is_empty() {
+        format!("{main_name} (Sentinel: {sentinel_model})")
     } else {
         main_name
     }

@@ -137,11 +137,11 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
         .build();
 
     // -----------------------------------------------------------------------
-    // Section A: AI Model Assignment — Main AI + Summarizer
+    // Section A: AI Model Assignment — Main AI + Sentinel
     // -----------------------------------------------------------------------
     let assign_group = adw::PreferencesGroup::builder()
         .title("AI Model Assignment")
-        .description("Select provider and model for main AI and TTS summarizer")
+        .description("Select provider and model for main AI")
         .build();
 
     let configured = configured_display_names_excluding_ollama(config);
@@ -216,75 +216,32 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
         });
     }
 
-    // -- Summarizer provider + model --
-    let sum_provider_list = gtk::StringList::new(&config_names);
-    let sum_provider_row = adw::ComboRow::builder()
-        .title("TTS Summarizer")
-        .subtitle("Generates one-sentence TTS summaries of long answers")
-        .model(&sum_provider_list)
+    // -- Sentinel (Local Security Model) --
+    let sentinel_group = adw::PreferencesGroup::builder()
+        .title("Sentinel (Local Security Model)")
+        .description("Local model for security tasks (e.g. llama3.2:3b via Ollama)")
         .build();
-    let sum_prov_id = config.get_str("llm.tts_summary_provider", "claude");
-    let sum_prov_display = find_by_id(&sum_prov_id)
-        .map(|p| p.display_name)
-        .unwrap_or("Claude");
-    if let Some(idx) = config_names.iter().position(|n| *n == sum_prov_display) {
-        sum_provider_row.set_selected(idx as u32);
-    }
-    assign_group.add(&sum_provider_row);
 
-    let sum_model_slug = config.get_str("llm.tts_summary_model", "");
-    let sum_model_row = build_model_combo_for_summary(&sum_prov_id, &sum_model_slug);
-    assign_group.add(&sum_model_row);
+    let sentinel_model = config.get_str("llm.sentinel_model", "");
+    let sentinel_row = adw::EntryRow::builder()
+        .title("Sentinel Model")
+        .text(&sentinel_model)
+        .build();
+    sentinel_group.add(&sentinel_row);
 
-    // Wire Summarizer provider change → update model dropdown + config.
+    // Wire Sentinel model change → config.
     {
-        let model_row = sum_model_row.clone();
         let config_dir = ConfigManager::default_config_dir();
-        sum_provider_row.connect_selected_notify(move |row| {
-            let sel = row.selected() as usize;
-            let model_ref = row.model().and_then(|m| m.downcast::<gtk::StringList>().ok());
-            let name = model_ref
-                .and_then(|sl| if sel < sl.n_items() as usize { sl.string(sel as u32).map(|s| s.to_string()) } else { None })
-                .unwrap_or_else(|| "Claude".to_string());
-            if let Some(prov) = find_by_display_name(&name) {
-                if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                    let _ = cfg.set("llm.tts_summary_provider", serde_json::json!(prov.id));
-                }
-                let model_names: Vec<&str> = prov.models.iter().map(|(n, _)| *n).collect();
-                let new_model_list = gtk::StringList::new(&model_names);
-                model_row.set_model(Some(&new_model_list));
-                model_row.set_selected(0);
-                if let Some((_, slug)) = prov.models.first() {
-                    if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                        let _ = cfg.set("llm.tts_summary_model", serde_json::json!(slug));
-                    }
-                }
-            }
-        });
-    }
-
-    // Wire Summarizer model change → config.
-    {
-        let prov_row = sum_provider_row.clone();
-        let config_dir = ConfigManager::default_config_dir();
-        sum_model_row.connect_selected_notify(move |row| {
-            let sel = row.selected() as usize;
-            let prov_sel = prov_row.selected() as usize;
-            let prov_model = prov_row.model().and_then(|m| m.downcast::<gtk::StringList>().ok());
-            let prov_name = prov_model
-                .and_then(|sl| if prov_sel < sl.n_items() as usize { sl.string(prov_sel as u32).map(|s| s.to_string()) } else { None })
-                .unwrap_or_default();
-            if let Some(prov) = find_by_display_name(&prov_name) {
-                if let Some((_, slug)) = prov.models.get(sel) {
-                    if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
-                        let _ = cfg.set("llm.tts_summary_model", serde_json::json!(slug));
-                    }
-                }
+        sentinel_row.connect_changed(move |row| {
+            let text = row.text().to_string();
+            if let Ok(mut cfg) = ConfigManager::with_path(config_dir.join("config.json")) {
+                let _ = cfg.set("llm.sentinel_model", serde_json::json!(text));
             }
         });
     }
 
     page.add(&assign_group);
+    page.add(&sentinel_group);
 
     // -----------------------------------------------------------------------
     // Section B: API Keys — only configured providers, with add/delete
@@ -295,7 +252,6 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
         .build();
 
     let main_prov_id_for_delete = config.get_str("llm.provider", "claude");
-    let sum_prov_id_for_delete = config.get_str("llm.tts_summary_provider", "claude");
 
     for prov in PROVIDERS.iter().filter(|p| p.needs_api_key) {
         let stored = config.get_str(prov.api_key_config, "");
@@ -313,13 +269,10 @@ fn build_ai_page(config: &ConfigManager) -> adw::PreferencesPage {
         delete_btn.add_css_class("destructive-action");
         delete_btn.set_valign(gtk::Align::Center);
 
-        // Disable delete if in use by Main AI or Summarizer.
+        // Disable delete if in use by Main AI.
         if prov.id == main_prov_id_for_delete.as_str() {
             delete_btn.set_sensitive(false);
             delete_btn.set_tooltip_text(Some("In use by Main AI"));
-        } else if prov.id == sum_prov_id_for_delete.as_str() {
-            delete_btn.set_sensitive(false);
-            delete_btn.set_tooltip_text(Some("In use by Summarizer"));
         }
 
         let config_dir = ConfigManager::default_config_dir();
@@ -432,21 +385,6 @@ fn build_model_combo(title: &str, provider_id: &str, config: &ConfigManager) -> 
         row.set_model(Some(&model_list));
         let cur = current_model(prov, config);
         let idx = prov.models.iter().position(|(_, slug)| *slug == cur.as_str()).unwrap_or(0);
-        row.set_selected(idx as u32);
-    }
-    row
-}
-
-/// Build a model ComboRow for the Summarizer, selecting by slug.
-fn build_model_combo_for_summary(provider_id: &str, model_slug: &str) -> adw::ComboRow {
-    use crate::providers::find_by_id;
-
-    let row = adw::ComboRow::builder().title("Summarizer Model").build();
-    if let Some(prov) = find_by_id(provider_id) {
-        let model_names: Vec<&str> = prov.models.iter().map(|(name, _)| *name).collect();
-        let model_list = gtk::StringList::new(&model_names);
-        row.set_model(Some(&model_list));
-        let idx = prov.models.iter().position(|(_, slug)| *slug == model_slug).unwrap_or(0);
         row.set_selected(idx as u32);
     }
     row

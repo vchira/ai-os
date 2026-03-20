@@ -79,8 +79,8 @@ pub(crate) fn prepare_tts_text_short(raw: &str) -> Option<String> {
     None
 }
 
-/// Configuration for the TTS summarizer LLM call.
-pub(crate) struct SummarizerConfig {
+/// Configuration for the TTS sentinel LLM call.
+pub(crate) struct SentinelConfig {
     pub api_key: String,
     pub model: String,
     pub provider_id: String,
@@ -89,9 +89,9 @@ pub(crate) struct SummarizerConfig {
 /// Summarize a long response using the configured LLM provider.
 /// Falls back to sentence truncation if API call fails.
 ///
-/// Uses the configured TTS summary provider (default: Claude).
+/// Uses the configured sentinel/main provider for summarization.
 /// The provider/model/key are read from config by the caller.
-pub(crate) fn summarize_for_tts(raw: &str, cfg: &SummarizerConfig) -> String {
+pub(crate) fn summarize_for_tts(raw: &str, cfg: &SentinelConfig) -> String {
     let (plain, code_blocks) = strip_for_tts(raw);
 
     let code_mention = if code_blocks > 0 {
@@ -215,20 +215,30 @@ pub(crate) fn speak_if_enabled_with_signal(
         return;
     }
 
-    // Long responses: summarize with configured provider
+    // Long responses: summarize with configured provider.
+    // Use sentinel_model if configured, otherwise fall back to main provider.
     let raw = text.to_string();
-    let sum_provider = config.get_str("llm.tts_summary_provider", "claude");
-    let sum_model = config.get_str("llm.tts_summary_model", "claude-sonnet-4-20250514");
+    let sentinel_model = config.get_str("llm.sentinel_model", "");
+    let (sum_provider, sum_model) = if !sentinel_model.is_empty() {
+        // Sentinel is a local Ollama model — use it for summarization.
+        ("ollama".to_string(), sentinel_model)
+    } else {
+        // Fall back to main cloud provider.
+        let prov = config.get_str("llm.provider", "claude");
+        let model_key = format!("llm.{prov}_model");
+        let model = config.get_str(&model_key, "");
+        (prov, model)
+    };
     let api_key = crate::providers::find_by_id(&sum_provider)
         .map(|p| config.get_str(p.api_key_config, ""))
         .unwrap_or_default();
-    let summarizer_cfg = SummarizerConfig {
+    let sentinel_cfg = SentinelConfig {
         api_key,
         model: sum_model,
         provider_id: sum_provider,
     };
     std::thread::spawn(move || {
-        let speak_text = summarize_for_tts(&raw, &summarizer_cfg);
+        let speak_text = summarize_for_tts(&raw, &sentinel_cfg);
         do_tts_with_signal(&speak_text, tts_started);
     });
 }

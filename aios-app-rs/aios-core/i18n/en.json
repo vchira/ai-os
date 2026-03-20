@@ -14,7 +14,7 @@
   "boot.status.web_channel": "Web Channel",
   "boot.status.signal": "Signal",
   "boot.status.main_ai": "Main AI",
-  "boot.status.summarizer": "Summarizer",
+  "boot.status.sentinel": "Sentinel",
   "boot.status.audio_output": "Audio Output (TTS)",
   "boot.status.audio_input": "Audio Input (STT)",
   "boot.status.keyboard": "Keyboard",
