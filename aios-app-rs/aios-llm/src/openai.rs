@@ -148,13 +148,19 @@ impl OpenAIProvider {
 
     /// Local Ollama (no API key needed).
     pub fn ollama(model: Option<String>) -> Self {
-        Self::with_base_url(
+        let mut p = Self::with_base_url(
             "",
             Some(model.unwrap_or_else(|| "llama3.2".to_string())),
             None,
             "http://localhost:11434",
             "ollama",
-        )
+        );
+        // Ollama needs a longer timeout for first inference (model loading).
+        p.client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        p
     }
 
     /// Convert internal AiOS tool schemas to OpenAI function-calling format.
@@ -401,8 +407,8 @@ impl OpenAIProvider {
 
     /// Send the HTTP request to the OpenAI API and check for errors.
     async fn do_request(&self, body: &Value) -> Result<reqwest::Response> {
-        if self.api_key.is_empty() {
-            return Err(LlmError::NoApiKey("openai".into()));
+        if self.api_key.is_empty() && !self.api_url.contains("localhost") {
+            return Err(LlmError::NoApiKey(self.provider_name.clone()));
         }
 
         let resp = self
