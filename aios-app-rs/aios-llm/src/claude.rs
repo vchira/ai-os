@@ -181,12 +181,15 @@ impl ClaudeProvider {
                 }
                 Role::Assistant if !msg.tool_calls.is_empty() => {
                     // Mixed content: optional text + tool_use blocks.
+                    // Claude rejects empty text content blocks.
                     let mut content = Vec::new();
                     if let Some(text) = &msg.content {
-                        content.push(serde_json::json!({
-                            "type": "text",
-                            "text": text,
-                        }));
+                        if !text.is_empty() {
+                            content.push(serde_json::json!({
+                                "type": "text",
+                                "text": text,
+                            }));
+                        }
                     }
                     for tc in &msg.tool_calls {
                         content.push(serde_json::json!({
@@ -203,9 +206,14 @@ impl ClaudeProvider {
                 }
                 _ => {
                     // Plain user or assistant text message.
+                    // Claude rejects empty text content blocks — skip them.
+                    let text = msg.content.as_deref().unwrap_or("");
+                    if text.is_empty() {
+                        continue;
+                    }
                     out.push(serde_json::json!({
                         "role": msg.role.to_string(),
-                        "content": msg.content.as_deref().unwrap_or(""),
+                        "content": text,
                     }));
                 }
             }
