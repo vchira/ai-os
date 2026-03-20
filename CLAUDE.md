@@ -340,12 +340,49 @@ Large files are never sent to the LLM. The `process_data` tool processes locally
 | Zero-copy | Variable | Process data locally, send results |
 | **Combined estimate** | **70-90%** | Compared to sending everything every time |
 
-## Security
+## Security & Privacy — Zero Trust Architecture
+
+**AiOS is developed by an Austrian company. EU GDPR compliance is mandatory. Private data must NEVER leak to cloud AI models. Security and zero trust come first.**
+
+### Core Principles
+
+1. **AI models NEVER see secret values** — passwords, API keys, tokens are stored in the encrypted vault. The AI only sees metadata (key name, description). Values are redacted as `[SECURE]` or `[PRIVATE]`.
+2. **Sentinel model (mandatory)** — every AI response is checked by a local-only AI model (Ollama) before the user sees it. No response bypasses Sentinel. If Sentinel is not installed, responses are blocked.
+3. **Private data stays local** — personal data (email, name, address, phone) is stored in the vault and NEVER sent to cloud models. Tools can use it locally with user permission.
+4. **Secure data is invisible** — passwords and tokens can NEVER be displayed after entry. Not to the user, not to the AI, not in logs.
+5. **Three-layer sanitization** — (1) pattern matching (instant), (2) value leak scanning (instant), (3) Sentinel LLM check (local model). All three run on every response.
+
+### Data Classification
+
+| Level | Examples | AI can see? | Displayed? | Cloud API? |
+|-------|----------|------------|------------|------------|
+| **Normal** | Favorite color, notes | Yes | Yes | Yes |
+| **Private** | Email, name, address, phone | Key only | By tools with permission | NEVER |
+| **Secure** | Passwords, API keys, tokens | Key only | NEVER after entry | NEVER |
+
+### Sentinel — Local Security Model
+
+- Mandatory local AI model running via Ollama on the device
+- Checks every AI response for: credential requests, data leaks, privacy violations
+- Also handles TTS summarization (replaces cloud summarizer)
+- Cannot be skipped during first boot setup
+- Models: Qwen 0.5B to Llama 70B, auto-recommended by hardware
 
 ### Encrypted Vault
 - Master password → Argon2id key derivation → AES-256-GCM encryption
 - Stores API keys, passwords, logins, personal info
 - File: `~/.aios/vault.enc` (16-byte salt + 12-byte nonce + ciphertext)
+
+### Secure Registry
+- Metadata about secrets (name, description, kind) — AI can read this
+- Actual values live in vault — AI cannot read these
+- File: `~/.aios/secure_registry.json`
+
+### UI Panel Field Protection
+- Fields marked `protection: "secure"` → value goes to vault, AI gets `[SECURE]`
+- Fields marked `protection: "private"` → value goes to vault, AI gets `[PRIVATE]`
+- Secure fields: red border + 🔒 SECURE badge
+- Private fields: blue border + 👤 PRIVATE badge
 
 ### Authentication Framework
 - Pluggable `Authenticator` trait — password built-in, voice/biometric/hardware key extensible
