@@ -119,11 +119,11 @@ pub(crate) fn start_voice_listener(
             let level = ((rms / 0.1) * 100.0).min(100.0) as u32;
             audio_level.store(level, Ordering::Relaxed);
 
-            // Debug: log audio level periodically (every ~3 seconds)
+            // Log audio level periodically (every ~3 seconds)
             static FRAME_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let frame = FRAME_COUNT.fetch_add(1, Ordering::Relaxed);
-            if frame % 100 == 0 {
-                debug!("Audio: {} samples, rms={:.4}, level={}, wake_on={}",
+            if frame % 100 == 0 && level > 0 {
+                info!("Audio: {} samples, rms={:.4}, level={}, wake_on={}",
                     samples.len(), rms, level, wake_enabled.load(Ordering::Relaxed));
             }
 
@@ -194,9 +194,9 @@ pub(crate) fn start_voice_listener(
                                 triggered: false,
                             });
 
-                        // Log KWS confidence periodically for debugging.
-                        if frame % 100 == 0 && result.confidence > 0.01 {
-                            debug!("KWS confidence: {:.3} (threshold triggers at >=0.5)", result.confidence);
+                        // Log KWS confidence for debugging.
+                        if result.confidence > 0.05 {
+                            info!("KWS confidence: {:.3}", result.confidence);
                         }
 
                         // Parallel Whisper fallback: also accumulate speech for

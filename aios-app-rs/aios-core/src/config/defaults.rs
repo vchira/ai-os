@@ -45,7 +45,7 @@ pub const DEFAULTS_JSON: &str = r#"{
         "wake_word": "hey jarvis",
         "wake_enabled": true,
         "wake_word_source": "pretrained",
-        "wake_threshold": 0.8
+        "wake_threshold": 0.3
     },
     "ui": {
         "theme": "dark",
