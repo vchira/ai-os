@@ -189,6 +189,69 @@ pub fn detect_sensitive_ask(text: &str) -> Option<&'static str> {
         .copied()
 }
 
+/// Check if a memory key likely holds a credential/secret value.
+pub fn is_credential_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    lower.contains("password")
+        || lower.contains("passwd")
+        || lower.contains("secret")
+        || lower.contains("token")
+        || lower.contains("api_key")
+        || lower.contains("apikey")
+        || lower.contains("credential")
+        || lower.contains("app_password")
+        || lower.contains("private_key")
+        || lower.contains("auth")
+        || lower.contains("pin")
+}
+
+/// Scan text for leaked secure/private values.
+///
+/// Checks if any stored secure or private value appears verbatim in the text.
+/// This catches cases where a tool result or AI response accidentally includes
+/// a raw credential or personal data value.
+///
+/// Returns a list of leaked key names. An empty list means the text is clean.
+pub fn scan_for_leaked_values(text: &str, memory_path: &std::path::Path) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    // Load the memory store to get actual values.
+    let store: std::collections::BTreeMap<String, String> = std::fs::read_to_string(memory_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    let mut leaked = Vec::new();
+    for (key, value) in &store {
+        // Only check credential/private keys, and only values long enough to
+        // avoid false positives (short values like "yes" or "80" would match everywhere).
+        if value.len() >= 6 && is_credential_key(key) && text.contains(value.as_str()) {
+            leaked.push(key.clone());
+        }
+    }
+    leaked
+}
+
+/// Check if a key name indicates private (non-secure) personal data.
+pub fn is_private_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    lower.contains("email")
+        || lower.contains("e_mail")
+        || lower.contains("name")
+        || lower.contains("address")
+        || lower.contains("phone")
+        || lower.contains("birth")
+        || lower.contains("age")
+        || lower.contains("gender")
+}
+
+/// Check if a key is either credential (secure) or private.
+pub fn is_protected_key(key: &str) -> bool {
+    is_credential_key(key) || is_private_key(key)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------

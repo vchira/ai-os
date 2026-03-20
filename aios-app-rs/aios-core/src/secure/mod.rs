@@ -14,5 +14,8 @@ pub mod vault;
 // Re-export the primary public types.
 pub use auth::{AuthManager, AuthResult, Authenticator, PasswordAuthenticator};
 pub use permission::{PermissionGrant, PermissionManager, PermissionRequest};
-pub use registry::{SecureEntry, SecureKind, SecureRegistry, detect_sensitive_ask};
+pub use registry::{
+    SecureEntry, SecureKind, SecureRegistry, detect_sensitive_ask,
+    scan_for_leaked_values, is_credential_key, is_private_key, is_protected_key,
+};
 pub use vault::{SecretEntry, SecretKind, Vault};

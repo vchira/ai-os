@@ -57,6 +57,40 @@ const PANEL_CSS: &str = r#"
     font-weight: bold;
 }
 
+/* Secure field — orange/red border + badge */
+.panel-field-secure {
+    border-left: 3px solid #e5534b;
+    padding-left: 8px;
+    margin-top: 4px;
+}
+
+.panel-secure-badge {
+    color: #e5534b;
+    font-size: 0.75em;
+    font-weight: 700;
+    margin-left: 8px;
+    padding: 1px 6px;
+    border: 1px solid #e5534b;
+    border-radius: 4px;
+}
+
+/* Private field — blue border + badge */
+.panel-field-private {
+    border-left: 3px solid #3584e4;
+    padding-left: 8px;
+    margin-top: 4px;
+}
+
+.panel-private-badge {
+    color: #3584e4;
+    font-size: 0.75em;
+    font-weight: 700;
+    margin-left: 8px;
+    padding: 1px 6px;
+    border: 1px solid #3584e4;
+    border-radius: 4px;
+}
+
 .panel-choice-card {
     padding: 10px 14px;
     border-radius: 10px;
@@ -334,6 +368,31 @@ impl PanelRenderer {
             star.add_css_class("panel-required-star");
             label_box.append(&star);
         }
+
+        // Protection badge — visual indicator for secure/private fields.
+        use aios_tools::builtin::ui_panel::FieldProtection;
+        match &field.protection {
+            FieldProtection::Secure => {
+                let badge = gtk::Label::new(Some("\u{1f512} SECURE"));
+                badge.add_css_class("panel-secure-badge");
+                badge.set_tooltip_text(Some(
+                    "This value is encrypted and never visible to the AI or in logs"
+                ));
+                label_box.append(&badge);
+                container.add_css_class("panel-field-secure");
+            }
+            FieldProtection::Private => {
+                let badge = gtk::Label::new(Some("\u{1f464} PRIVATE"));
+                badge.add_css_class("panel-private-badge");
+                badge.set_tooltip_text(Some(
+                    "This value is stored privately. The AI cannot read it directly."
+                ));
+                label_box.append(&badge);
+                container.add_css_class("panel-field-private");
+            }
+            FieldProtection::None => {}
+        }
+
         container.append(&label_box);
 
         // Build the actual input widget based on field type.

@@ -21,20 +21,42 @@ use crate::ui::prompt_input::PromptInput;
 /// a notice to use the secure input tool instead. The AI should never ask
 /// users to type passwords, API keys, or personal info in the chat.
 fn sanitize_response_for_security(content: &str) -> String {
+    // Check 1: Does the AI ask the user to type sensitive data?
     if let Some(pattern) = aios_core::secure::detect_sensitive_ask(content) {
         tracing::warn!(
             "SECURITY: AI response asks for sensitive data (pattern: '{pattern}'). Sanitizing."
         );
-        // Replace the response with a security notice
-        format!(
+        return format!(
             "I need some sensitive information to complete this task. \
              For security, I'll use a secure input form — your data goes \
              directly to encrypted storage and I never see the actual values.\n\n\
              *[Original response blocked: asked for sensitive data directly]*"
-        )
-    } else {
-        content.to_string()
+        );
     }
+
+    // Check 2: Does the response contain any stored secure values?
+    let mem_path = aios_core::config::ConfigManager::default_config_dir().join("memory.json");
+    let leaked = aios_core::secure::scan_for_leaked_values(content, &mem_path);
+    if !leaked.is_empty() {
+        tracing::warn!(
+            "SECURITY: AI response contains leaked secure values: {:?}. Redacting.",
+            leaked
+        );
+        let mut redacted = content.to_string();
+        // Load actual values to redact them
+        if let Ok(store_str) = std::fs::read_to_string(&mem_path) {
+            if let Ok(store) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&store_str) {
+                for key in &leaked {
+                    if let Some(val) = store.get(key) {
+                        redacted = redacted.replace(val, &format!("[REDACTED:{key}]"));
+                    }
+                }
+            }
+        }
+        return redacted;
+    }
+
+    content.to_string()
 }
 
 /// Build the model attribution label from config.

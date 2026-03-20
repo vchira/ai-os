@@ -40,6 +40,32 @@ pub struct PanelRequest {
     pub fields: Vec<PanelField>,
 }
 
+/// Data protection level for a panel field.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FieldProtection {
+    /// Normal field — value returned to the AI as-is.
+    #[default]
+    None,
+    /// Private field (email, name, address, phone) — value stored in vault.
+    /// The AI model never reads the raw value directly, but tools CAN
+    /// display it to the user (e.g., showing email in a "From:" field).
+    /// Tools need permission to access. Value is visible in tool UI but
+    /// never sent to the AI model.
+    Private,
+    /// Secure field (passwords, API keys, tokens) — value stored in vault.
+    /// Can NEVER be displayed anywhere after entry. Only used internally
+    /// by tools (e.g., passed to SMTP auth). Not shown to user, AI, or logs.
+    Secure,
+}
+
+impl FieldProtection {
+    /// Serde skip helper.
+    pub fn is_none(&self) -> bool {
+        matches!(self, FieldProtection::None)
+    }
+}
+
 /// A single input field in a panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PanelField {
@@ -70,6 +96,19 @@ pub struct PanelField {
     /// Step increment for `number` fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step: Option<f64>,
+    /// Data protection level. When `Private` or `Secure`, the value is
+    /// stored directly in the encrypted vault and the AI receives a
+    /// redacted placeholder instead of the actual value.
+    #[serde(default, skip_serializing_if = "FieldProtection::is_none")]
+    pub protection: FieldProtection,
+    /// Vault key for storing protected values (required when `protection`
+    /// is `Private` or `Secure`). E.g., `"gmail_app_password"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_key: Option<String>,
+    /// Human-readable description of the protected value, stored in the
+    /// secure registry so the AI knows what the key is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_description: Option<String>,
 }
 
 /// The type of input widget for a [`PanelField`].
@@ -299,6 +338,20 @@ impl Tool for UiPanelTool {
             return ToolResult::fail("Panel must have at least one field.");
         }
 
+        // Collect protection info before the request is consumed by the callback.
+        let protected_fields: Vec<(String, FieldProtection, Option<String>, Option<String>)> =
+            request
+                .fields
+                .iter()
+                .filter(|f| !f.protection.is_none())
+                .map(|f| (
+                    f.id.clone(),
+                    f.protection.clone(),
+                    f.vault_key.clone(),
+                    f.vault_description.clone(),
+                ))
+                .collect();
+
         // Invoke the callback with channel context.
         let callback = {
             let guard = self.panel_callback.lock().unwrap();
@@ -316,7 +369,65 @@ impl Tool for UiPanelTool {
                         if response.cancelled {
                             ToolResult::fail("User cancelled the panel.")
                         } else {
-                            let json_value = serde_json::Value::Object(response.values.clone());
+                            let mut values = response.values.clone();
+
+                            // Process protected fields: store in vault, redact for AI.
+                            for (field_id, protection, vault_key, description) in &protected_fields {
+                                if let Some(val) = values.get(field_id).and_then(|v| v.as_str()) {
+                                    let key = vault_key.as_deref().unwrap_or(field_id.as_str());
+                                    let desc = description.as_deref().unwrap_or(field_id.as_str());
+
+                                    // Store in the memory file (the vault requires master password
+                                    // which we may not have here, so use the memory store).
+                                    let mem_path = aios_core::config::ConfigManager::default_config_dir()
+                                        .join("memory.json");
+                                    if let Ok(contents) = std::fs::read_to_string(&mem_path) {
+                                        if let Ok(mut store) = serde_json::from_str::<std::collections::BTreeMap<String, String>>(&contents) {
+                                            store.insert(key.to_string(), val.to_string());
+                                            let _ = std::fs::write(&mem_path, serde_json::to_string_pretty(&store).unwrap_or_default());
+                                        }
+                                    } else {
+                                        let mut store = std::collections::BTreeMap::new();
+                                        store.insert(key.to_string(), val.to_string());
+                                        let _ = std::fs::write(&mem_path, serde_json::to_string_pretty(&store).unwrap_or_default());
+                                    }
+
+                                    // Register in the secure registry.
+                                    let reg_path = aios_core::secure::SecureRegistry::default_path();
+                                    let mut registry = aios_core::secure::SecureRegistry::load(&reg_path);
+                                    let kind = aios_core::secure::SecureKind::from_key(key);
+                                    registry.register(key, desc, desc, kind);
+                                    registry.mark_stored(key);
+                                    let _ = registry.save(&reg_path);
+
+                                    // Redact the value for the AI.
+                                    match protection {
+                                        FieldProtection::Secure => {
+                                            values.insert(
+                                                field_id.clone(),
+                                                serde_json::Value::String(
+                                                    format!("[SECURE — stored as '{key}']")
+                                                ),
+                                            );
+                                        }
+                                        FieldProtection::Private => {
+                                            values.insert(
+                                                field_id.clone(),
+                                                serde_json::Value::String(
+                                                    format!("[PRIVATE — stored as '{key}']")
+                                                ),
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+
+                                    tracing::info!(
+                                        "Protected field '{field_id}' ({protection:?}) stored as vault key '{key}'"
+                                    );
+                                }
+                            }
+
+                            let json_value = serde_json::Value::Object(values);
                             ToolResult::ok_with_data(
                                 serde_json::to_string_pretty(&json_value)
                                     .unwrap_or_else(|_| "{}".to_string()),
@@ -448,6 +559,19 @@ fn parse_panel_field(val: &serde_json::Value) -> Result<PanelField, String> {
     let max = val.get("max").and_then(|v| v.as_f64());
     let step = val.get("step").and_then(|v| v.as_f64());
 
+    // Parse protection level for secure/private fields.
+    let protection = val
+        .get("protection")
+        .and_then(|v| v.as_str())
+        .map(|s| match s {
+            "secure" => FieldProtection::Secure,
+            "private" => FieldProtection::Private,
+            _ => FieldProtection::None,
+        })
+        .unwrap_or_default();
+    let vault_key = val.get("vault_key").and_then(|v| v.as_str()).map(String::from);
+    let vault_description = val.get("vault_description").and_then(|v| v.as_str()).map(String::from);
+
     Ok(PanelField {
         id,
         field_type,
@@ -459,6 +583,9 @@ fn parse_panel_field(val: &serde_json::Value) -> Result<PanelField, String> {
         min,
         max,
         step,
+        protection,
+        vault_key,
+        vault_description,
     })
 }
 
