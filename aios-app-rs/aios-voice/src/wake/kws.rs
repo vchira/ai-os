@@ -33,7 +33,7 @@ const CHUNK_SAMPLES: usize = 1280;
 const MAX_EMBEDDINGS: usize = 16;
 
 /// Default detection threshold.
-const DEFAULT_THRESHOLD: f32 = 0.5;
+const DEFAULT_THRESHOLD: f32 = 0.8;
 
 // ---------------------------------------------------------------------------
 // Type alias for the inference plan used by tract.

@@ -45,7 +45,7 @@ pub const DEFAULTS_JSON: &str = r#"{
         "wake_word": "hey jarvis",
         "wake_enabled": true,
         "wake_word_source": "pretrained",
-        "wake_threshold": 0.5
+        "wake_threshold": 0.8
     },
     "ui": {
         "theme": "dark",
@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn wake_threshold_default() {
         let v = defaults();
-        assert_eq!(v["voice"]["wake_threshold"], 0.5);
+        assert_eq!(v["voice"]["wake_threshold"], 0.8);
     }
 
     #[test]
