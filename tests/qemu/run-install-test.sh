@@ -259,6 +259,26 @@ ssh_cmd "sudo chroot /mnt/aios-install bash -c 'echo aios:aios | chpasswd'" 2>/d
 ssh_cmd "sudo sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /mnt/aios-install/etc/ssh/sshd_config 2>/dev/null || true"
 ssh_cmd "sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /mnt/aios-install/etc/ssh/sshd_config 2>/dev/null || true"
 
+# Configure networking — DHCP on all ethernet interfaces (critical for SSH)
+ssh_cmd "sudo bash -c 'cat > /mnt/aios-install/etc/network/interfaces << NETEOF
+auto lo
+iface lo inet loopback
+
+# DHCP on all ethernet interfaces
+allow-hotplug ens3
+iface ens3 inet dhcp
+
+allow-hotplug eth0
+iface eth0 inet dhcp
+
+allow-hotplug enp0s2
+iface enp0s2 inet dhcp
+NETEOF'"
+ssh_cmd "sudo chroot /mnt/aios-install systemctl enable networking 2>/dev/null || true"
+
+# Ensure the kernel and initramfs are correct for the installed system
+ssh_cmd "sudo chroot /mnt/aios-install update-initramfs -u 2>/dev/null || true"
+
 run_test "Hostname set" "sudo cat /mnt/aios-install/etc/hostname" "aios-install-test"
 run_test "AiOS binary on disk" "sudo test -f /mnt/aios-install/usr/bin/aios && echo ok" "ok"
 run_test "SSH enabled on target" "sudo chroot /mnt/aios-install systemctl is-enabled ssh 2>/dev/null || echo enabled" "enabled"
@@ -338,11 +358,6 @@ else
     fail "Could not SSH into installed system"
 fi
 
-# ─── Cleanup ──────────────────────────────────────────────────
-log "Cleaning up..."
-rm -f "${DISK_IMAGE}" "${TEMP_DIR}/vm.pid" "${TEMP_DIR}/vm2.pid"
-rm -f "${TEMP_DIR}/serial.log" "${TEMP_DIR}/serial2.log"
-
 # ─── Summary ──────────────────────────────────────────────────
 log ""
 log "════════════════════════════════════════"
@@ -353,5 +368,14 @@ log "  ${RED}Failed: ${FAILED}${NC}"
 log "  ${YELLOW}Warned: ${WARNED}${NC}"
 log "════════════════════════════════════════"
 
-[ "${FAILED}" -gt 0 ] && exit 1
+if [ "${FAILED}" -gt 0 ]; then
+    log "Serial logs preserved at: ${TEMP_DIR}/serial*.log"
+    log "Disk image preserved at: ${DISK_IMAGE}"
+    exit 1
+fi
+
+# Clean up on success
+log "Cleaning up..."
+rm -f "${DISK_IMAGE}" "${TEMP_DIR}/vm.pid" "${TEMP_DIR}/vm2.pid"
+rm -f "${TEMP_DIR}/serial.log" "${TEMP_DIR}/serial2.log"
 exit 0
