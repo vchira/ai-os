@@ -30,16 +30,12 @@ use aios_llm::{ClaudeProvider, LlmManager, OpenAIProvider};
 use aios_tools::ToolRegistry;
 use aios_tools::builtin::ui_panel::UiPanelTool;
 
-use crate::boot_status;
 use crate::command_handler;
 use crate::first_boot_flow;
 use crate::llm_handler;
 use crate::ui::channel_overlay::ChannelOverlay;
 use crate::ui::chat_view::ChatView;
-use crate::ui::main_window;
 use crate::ui::panel_renderer::PanelRenderer;
-use crate::ui::prompt_input::PromptInput;
-use crate::voice_setup;
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -147,141 +143,25 @@ impl AiosApp {
     // -----------------------------------------------------------------------
 
     /// Normal application startup -- builds the UI and wires up all signals.
+    ///
+    /// Uses the shared `boot_context` functions to avoid duplicating logic
+    /// that's common with the first-boot and autoconfig paths.
     fn activate_main(app: &adw::Application, rt: tokio::runtime::Handle, queue: SharedQueue) {
-        let mut config = first_boot_flow::load_config();
+        let config = first_boot_flow::load_config();
         first_boot_flow::init_i18n(&config);
 
-        // Migrate legacy "auto" summary provider to explicit values.
-        {
-            let summary_prov = config.get_str("llm.tts_summary_provider", "");
-            if summary_prov == "auto" || summary_prov.is_empty() {
-                let main = config.get_str("llm.provider", "claude");
-                let main_model_key = format!("llm.{main}_model");
-                let main_model = config.get_str(&main_model_key, "");
-                let _ = config.set("llm.tts_summary_provider", serde_json::json!(main));
-                if !main_model.is_empty() {
-                    let _ = config.set("llm.tts_summary_model", serde_json::json!(main_model));
-                }
-            }
-        }
+        let providers = Self::available_providers(&config);
+        let provider_refs: Vec<&str> = providers.iter().map(|s| s.as_str()).collect();
+        let active = crate::providers::find_by_id(&config.get_str("llm.provider", "claude"))
+            .map(|p| p.display_name)
+            .unwrap_or("Claude");
 
-        // Initialize tools and LLM.
-        let mut tools = ToolRegistry::new();
-        tools.load_builtins();
-        tools.register_queue_tools(queue.clone());
-        info!("Loaded {} built-in tools", tools.len());
+        let ui = crate::boot_context::build_ui(app, &provider_refs, active);
+        let boot_status_text = crate::boot_context::show_boot_status(&config, &ui.chat_view, &queue);
+        ui.chat_view.add_message("system", &t("setup.type_message"));
 
-        let mut llm = LlmManager::new();
-        Self::init_llm(&config, &mut llm);
-
-        // Build the UI.
-        let chat_view = ChatView::new();
-        let prompt_input = PromptInput::new();
-        let channel_overlay = ChannelOverlay::new();
-
-        let available_providers = Self::available_providers(&config);
-        let provider_refs: Vec<&str> = available_providers.iter().map(|s| s.as_str()).collect();
-
-        let active_provider = crate::providers::find_by_id(
-            &config.get_str("llm.provider", "claude")
-        )
-        .map(|p| p.display_name)
-        .unwrap_or("Claude");
-        let mw = main_window::build_main_window(
-            app, &chat_view, &prompt_input, &channel_overlay, &provider_refs, active_provider,
-        );
-        let window = mw.window;
-        let vu_meter_widget = mw.vu_meter;
-        main_window::set_settings_button_visible(&window, true);
-
-        // Wire UiPanelTool and tool executor into LLM.
-        Self::wire_tool_executor(&mut llm, &window, queue.clone());
-
-        // Read channel config.
-        let signal_enabled = config.get_bool("channels.signal.enabled", false);
-        let signal_phone = config.get_str("channels.signal.phone", "");
-
-        // Boot status.
-        let boot_status_text = boot_status::build_boot_status(&config);
-        chat_view.add_level_message(aios_core::types::MessageLevel::Info, &boot_status_text);
-        {
-            let mut q = queue.lock().unwrap();
-            q.push(aios_core::queue::QueuedMessage {
-                role: aios_core::types::Role::System,
-                channel: aios_core::channel::ChannelKind::System,
-                source: Some("system".into()),
-                content: Some(boot_status_text.clone()),
-                level: Some(aios_core::types::MessageLevel::Info),
-                ..Default::default()
-            });
-        }
-
-        Self::apply_theme(&config.get_str("ui.theme", "dark"));
-        first_boot_flow::show_hostname_conflict_card(&chat_view);
-        chat_view.add_message("system", &t("setup.type_message"));
-
-        let assistant_name = config.get_str("assistant.name", "Assistant");
-        crate::ui::chat_view::set_assistant_display_name(&assistant_name);
-
-        // --- Channel infrastructure ---
-        let runtime = aios_core::channel::AppRuntime::new();
-        runtime.switcher.register_channel(
-            aios_core::channel::ChannelKind::Desktop,
-            aios_core::channel::ChannelContext::desktop(),
-        );
-
-        let web_server =
-            Self::start_web_server(&mut config, &runtime, Some(boot_status_text.clone()));
-
-        let signal_sender = Self::start_signal_listener(
-            &config, signal_enabled, &signal_phone, &runtime,
-        );
-
-        // Wire channel switcher to overlay.
-        Self::wire_channel_overlay(&runtime, &channel_overlay);
-
-        // Warn if no API key.
-        Self::warn_if_no_api_key(&config, &chat_view);
-
-        // Create shared application state.
-        let llm_arc = Arc::new(tokio::sync::Mutex::new(llm));
-        // KWS models can be in the system path (ISO) or user path.
-        let system_kws = std::path::PathBuf::from("/opt/aios-app/models/kws");
-        let user_kws = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("/home/aios"))
-            .join(".aios/models/kws");
-        let kws_models_dir = if system_kws.join("infrastructure/melspectrogram.onnx").exists() {
-            system_kws
-        } else {
-            user_kws
-        };
-        let state = Rc::new(RefCell::new(AiosApp {
-            config,
-            llm: llm_arc,
-            tools,
-            conversation: Vec::new(),
-            rt: rt.clone(),
-            kws_engine: None,
-            wake_training_in_progress: None,
-            wake_enabled: None,
-            kws_models_dir: kws_models_dir.clone(),
-            queue: Some(queue),
-        }));
-
-        // Remote channel message loop.
-        voice_setup::start_remote_channel_loop(
-            &rt, &runtime, &state, &chat_view, web_server, signal_sender,
-        );
-
-        // Connect GTK signals (provider dropdown, settings, prompt submit).
-        first_boot_flow::connect_common_signals(&state, &chat_view, &prompt_input, &window);
-
-        // KWS + voice setup.
-        voice_setup::setup_kws_and_voice(
-            &state, &chat_view, &prompt_input, &window, vu_meter_widget, &kws_models_dir,
-        );
-
-        window.present();
+        crate::boot_context::finalize_boot(config, rt, queue, &ui, Some(boot_status_text));
+        ui.window.present();
     }
 
     // -----------------------------------------------------------------------
@@ -479,7 +359,7 @@ impl AiosApp {
     }
 
     /// Wire UiPanelTool and tool executor into the LLM manager.
-    fn wire_tool_executor(
+    pub(crate) fn wire_tool_executor(
         llm: &mut LlmManager,
         window: &adw::ApplicationWindow,
         queue: SharedQueue,
@@ -519,7 +399,7 @@ impl AiosApp {
     }
 
     /// Start the Signal listener if enabled.
-    fn start_signal_listener(
+    pub(crate) fn start_signal_listener(
         config: &ConfigManager,
         signal_enabled: bool,
         signal_phone: &str,
@@ -550,7 +430,7 @@ impl AiosApp {
     }
 
     /// Wire channel switcher to the overlay widget.
-    fn wire_channel_overlay(
+    pub(crate) fn wire_channel_overlay(
         runtime: &Arc<aios_core::channel::AppRuntime>,
         channel_overlay: &ChannelOverlay,
     ) {
@@ -580,7 +460,7 @@ impl AiosApp {
     }
 
     /// Show a warning if no API key is configured for the active provider.
-    fn warn_if_no_api_key(config: &ConfigManager, chat_view: &ChatView) {
+    pub(crate) fn warn_if_no_api_key(config: &ConfigManager, chat_view: &ChatView) {
         let provider_id = config.get_str("llm.provider", "claude");
         let has_key = crate::providers::find_by_id(&provider_id)
             .map(|p| crate::providers::is_configured(p, config))

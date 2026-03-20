@@ -3,14 +3,12 @@
 //! Extracted from `app.rs`. Contains the first-boot wizard (card-based
 //! setup conversation) and the unattended autoconfig path.
 //!
-//! After either path completes, [`transition_to_normal_mode`] wires up the
-//! prompt input for real chat, connects voice, and shows the ready message.
+//! After either path completes, [`crate::boot_context::finalize_boot`] wires up
+//! the prompt input, connects voice, and shows the ready message.
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use gtk4::glib;
 use gtk4::prelude::*;
 use libadwaita as adw;
 use tracing::{error, info, warn};
@@ -19,10 +17,8 @@ use aios_core::config::ConfigManager;
 use aios_core::i18n::{t, t_fmt};
 use aios_core::secure::Vault;
 use aios_core::secure::vault::{SecretEntry, SecretKind};
-use aios_llm::LlmManager;
-use aios_tools::ToolRegistry;
 
-use crate::app::{AiosApp, SharedQueue, UiPanelToolWrapper};
+use crate::app::{AiosApp, SharedQueue};
 use crate::boot_status;
 use crate::llm_handler;
 use crate::tts::stop_tts;
@@ -32,7 +28,6 @@ use crate::ui::first_boot::SetupConversation;
 use crate::ui::main_window;
 use crate::ui::prompt_input::PromptInput;
 use crate::ui::settings_dialog;
-use crate::voice_listener::start_voice_listener;
 
 // ---------------------------------------------------------------------------
 // First-boot interactive setup
@@ -118,12 +113,12 @@ pub(crate) fn run_first_boot_setup(
     // Create the setup conversation with config for pre-filling API keys.
     let setup = SetupConversation::new(chat_view.clone(), Some(config));
 
-    // On completion: create vault, store secrets, transition to normal mode.
-    let app_ref = app.clone();
+    // On completion: create vault, store secrets, finalize boot.
     let rt_ref = rt.clone();
     let chat_view_ref = chat_view.clone();
     let prompt_ref = prompt_input.clone();
     let window_ref = window.clone();
+    let channel_overlay_ref = channel_overlay.clone();
     let vu_meter_for_transition = vu_meter_ref.clone();
     let queue_for_transition = queue.clone();
     setup.on_complete(move |result| {
@@ -253,16 +248,17 @@ pub(crate) fn run_first_boot_setup(
             return;
         }
 
-        // Transition to normal mode.
-        transition_to_normal_mode(
-            &app_ref,
-            rt_ref.clone(),
-            &chat_view_ref,
-            &prompt_ref,
-            &window_ref,
-            Some(vu_meter_for_transition.clone()),
-            queue_for_transition.clone(),
-        );
+        // Finalize boot — init LLM, tools, channels, voice.
+        let config = load_config();
+        let ui = crate::boot_context::BootUi {
+            chat_view: chat_view_ref.clone(),
+            prompt_input: prompt_ref.clone(),
+            channel_overlay: channel_overlay_ref.clone(),
+            window: window_ref.clone(),
+            vu_meter: vu_meter_for_transition.clone(),
+        };
+        crate::boot_context::finalize_boot(config, rt_ref.clone(), queue_for_transition.clone(), &ui, None);
+        chat_view_ref.add_message("system", &t("setup.type_message"));
     });
 
     // During setup, prompt feeds into the setup conversation.
@@ -515,128 +511,35 @@ pub(crate) fn apply_autoconfig(
         ),
     );
 
-    info!("Autoconfig applied -- transitioning to normal mode");
+    info!("Autoconfig applied -- finalizing boot");
 
-    // 5. Transition to normal chat mode.
-    let app_clone = app.clone();
-    let chat_view_clone = chat_view.clone();
-    let prompt_clone = prompt_input.clone();
-    let window_clone = window.clone();
+    // 5. Finalize boot — init LLM, tools, channels, voice.
     // Present window first so the user sees boot status immediately,
-    // then run transition in idle to wire up the prompt and tools.
+    // then finalize in idle to wire up the prompt and tools.
     window.present();
 
+    let ui = crate::boot_context::BootUi {
+        chat_view,
+        prompt_input,
+        channel_overlay,
+        window: window.clone(),
+        vu_meter: vu_meter_autoconfig,
+    };
+
     gtk4::glib::idle_add_local_once(move || {
-        transition_to_normal_mode(
-            &app_clone,
-            rt,
-            &chat_view_clone,
-            &prompt_clone,
-            &window_clone,
-            Some(vu_meter_autoconfig),
-            queue,
-        );
-        // Force layout recompute after showing prompt.
-        window_clone.queue_draw();
+        let config = load_config();
+        crate::boot_context::finalize_boot(config, rt, queue, &ui, None);
+        ui.chat_view.add_message("system", &t("setup.type_message"));
+        ui.window.queue_draw();
     });
-}
-
-// ---------------------------------------------------------------------------
-// Transition to normal mode (post-setup)
-// ---------------------------------------------------------------------------
-
-/// After first-boot setup completes, configure the app for normal chat mode.
-///
-/// This initializes the LLM manager, creates the shared application state,
-/// and re-wires the prompt input for real chat.
-pub(crate) fn transition_to_normal_mode(
-    _app: &adw::Application,
-    rt: tokio::runtime::Handle,
-    chat_view: &ChatView,
-    prompt_input: &PromptInput,
-    window: &adw::ApplicationWindow,
-    vu_meter_widget: Option<gtk4::LevelBar>,
-    queue: SharedQueue,
-) {
-    let mut config = load_config();
-
-    // Start web server (needs Tokio runtime context).
-    {
-        let _guard = rt.enter();
-        let runtime = aios_core::channel::AppRuntime::new();
-        let _web = AiosApp::start_web_server(&mut config, &runtime, None);
-        info!("Web server started in transition_to_normal_mode");
-    }
-
-    // Initialize tool registry.
-    let mut tools = ToolRegistry::new();
-    tools.load_builtins();
-    tools.register_queue_tools(queue.clone());
-    info!("Loaded {} built-in tools", tools.len());
-
-    // Initialize LLM providers.
-    let mut llm = LlmManager::new();
-    AiosApp::init_llm(&config, &mut llm);
-
-    // Create a UiPanelTool with the GTK panel renderer callback.
-    let ui_panel_tool = AiosApp::create_ui_panel_tool(window);
-
-    // Wire tool executor into LLM manager.
-    let tool_registry = Arc::new(std::sync::Mutex::new(ToolRegistry::new()));
-    {
-        let mut tr = tool_registry.lock().unwrap();
-        tr.load_builtins();
-        tr.register_queue_tools(queue.clone());
-        let _ = tr.unregister("ui_panel");
-        let _ = tr.register(Box::new(UiPanelToolWrapper(ui_panel_tool.clone())));
-    }
-    let tr_for_executor = tool_registry.clone();
-    llm.set_tool_executor(Arc::new(move |name, args, channel| {
-        let registry = tr_for_executor.lock().unwrap();
-        let result = registry.execute_on_channel(&name, args, &channel);
-        if result.success {
-            result.output
-        } else {
-            format!("Tool error: {}", result.output)
-        }
-    }));
-
-    // Collect configured providers before config is moved.
-    let configured_names = crate::providers::configured_display_names(&config);
-    let configured_providers: Vec<&str> = configured_names.iter().map(|s| s.as_str()).collect();
-
-    // Create shared application state.
-    let state = Rc::new(RefCell::new(AiosApp::new(config, llm, tools, rt, Some(queue))));
-
-    // Show the settings button, info button, and prompt input FIRST.
-    main_window::set_settings_button_visible(window, true);
-    prompt_input.widget().set_visible(true);
-    prompt_input.widget().set_sensitive(true);
-    // Ensure the prompt widget is allocated and laid out.
-    prompt_input.widget().set_hexpand(true);
-
-    // Show the transition message.
-    chat_view.add_message("system", &t("setup.transition"));
-    chat_view.add_message("system", &t("setup.type_message"));
-
-    info!("Settings button and prompt input set to visible");
-
-    // Update the provider dropdown.
-    main_window::update_provider_dropdown(window, &configured_providers);
-
-    // --- Connect signals ---
-    connect_common_signals(&state, chat_view, prompt_input, window);
-
-    // --- Voice listener + VU meter ---
-    setup_voice(&state, chat_view, prompt_input, window, vu_meter_widget);
 }
 
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-/// Connect signal handlers that are common to both `transition_to_normal_mode`
-/// and `activate_main` (provider dropdown, settings, mic, speaker, prompt submit).
+/// Connect signal handlers shared by all boot paths
+/// (provider dropdown, settings, mic, speaker, prompt submit).
 pub(crate) fn connect_common_signals(
     state: &Rc<RefCell<AiosApp>>,
     chat_view: &ChatView,
@@ -712,117 +615,6 @@ pub(crate) fn connect_common_signals(
         chat_view_ref.add_message("user", &text);
         while gtk4::glib::MainContext::default().iteration(false) {}
         llm_handler::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
-    });
-}
-
-/// Set up voice listener, KWS engine, and VU meter.
-pub(crate) fn setup_voice(
-    state: &Rc<RefCell<AiosApp>>,
-    chat_view: &ChatView,
-    prompt_input: &PromptInput,
-    window: &adw::ApplicationWindow,
-    vu_meter_widget: Option<gtk4::LevelBar>,
-) {
-    let stt_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
-        state.borrow().config.get_bool("voice.stt_enabled", true),
-    ));
-    let stt_flag = stt_enabled.clone();
-    let state_ref = state.clone();
-    main_window::connect_mic_toggle(window, move |active| {
-        let mut s = state_ref.borrow_mut();
-        let _ = s.config.set("voice.stt_enabled", serde_json::json!(active));
-        stt_flag.store(active, std::sync::atomic::Ordering::Relaxed);
-        info!("Mic toggled: {active}");
-    });
-
-    let wake_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
-        state.borrow().config.get_bool("voice.wake_enabled", true),
-    ));
-    let wake_training = Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-    // KWS engine (best-effort). Check system path first, then user path.
-    let system_kws = std::path::PathBuf::from("/opt/aios-app/models/kws");
-    let user_kws = ConfigManager::default_config_dir().join("models/kws");
-    let kws_models_dir = if system_kws.join("infrastructure/melspectrogram.onnx").exists() {
-        system_kws
-    } else {
-        user_kws
-    };
-    // KWS engine — init in background thread to avoid blocking GTK.
-    // The Once guard in kws.rs ensures ort::init_from is only called once.
-    let kws_engine: Arc<std::sync::Mutex<Option<aios_voice::KwsEngine>>> =
-        Arc::new(std::sync::Mutex::new(None));
-    {
-        let kws_ref = kws_engine.clone();
-        let kws_dir = kws_models_dir.clone();
-        let wake_word = state.borrow().config.get_str("voice.wake_word", "hey jarvis");
-        let wake_source = state.borrow().config.get_str("voice.wake_word_source", "pretrained");
-        std::thread::spawn(move || {
-            match aios_voice::KwsEngine::new(&kws_dir) {
-                Ok(mut engine) => {
-                    // Load the wake word model.
-                    if let Some(pretrained) = aios_voice::find_pretrained(&wake_word) {
-                        let model_path = aios_voice::pretrained_model_path(&kws_dir, pretrained);
-                        if model_path.exists() {
-                            match engine.load_wake_model(&model_path, pretrained.display_name) {
-                                Ok(()) => info!("KWS: loaded '{}' model OK", pretrained.display_name),
-                                Err(e) => warn!("KWS: failed to load model: {e}"),
-                            }
-                        } else {
-                            warn!("KWS: model not found at {}", model_path.display());
-                        }
-                    } else {
-                        info!("KWS: no pretrained model for '{wake_word}'");
-                    }
-                    *kws_ref.lock().unwrap() = Some(engine);
-                    info!("KWS engine ready");
-                }
-                Err(e) => {
-                    info!("KWS not available: {e} — using Whisper fallback");
-                }
-            }
-        });
-    }
-
-    let audio_level = Arc::new(std::sync::atomic::AtomicU32::new(0));
-    let (stt_tx, stt_rx) = std::sync::mpsc::channel::<String>();
-    let _voice_handle = start_voice_listener(
-        stt_tx,
-        stt_enabled,
-        wake_enabled,
-        wake_training,
-        kws_engine,
-        audio_level.clone(),
-    );
-
-    // VU meter polling.
-    if let Some(vu) = vu_meter_widget {
-        let vu_level = audio_level.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-            let level = vu_level.load(std::sync::atomic::Ordering::Relaxed);
-            vu.set_value(level as f64 / 5.0);
-            glib::ControlFlow::Continue
-        });
-    }
-
-    // Poll for transcribed text from the voice listener.
-    let state_ref = state.clone();
-    let chat_view_ref = chat_view.clone();
-    let prompt_ref = prompt_input.clone();
-    glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
-        while let Ok(text) = stt_rx.try_recv() {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                continue;
-            }
-            info!(
-                "STT transcription received: {}",
-                &text[..text.len().min(50)]
-            );
-            chat_view_ref.add_message("user", &format!("\u{1f3a4} {text}"));
-            llm_handler::send_to_llm(&state_ref, &chat_view_ref, &prompt_ref, text);
-        }
-        glib::ControlFlow::Continue
     });
 }
 

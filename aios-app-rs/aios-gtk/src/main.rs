@@ -4,6 +4,7 @@
 //! and launches the libadwaita application.
 
 mod app;
+mod boot_context;
 mod boot_status;
 mod command_handler;
 mod first_boot_flow;
