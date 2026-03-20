@@ -133,6 +133,10 @@ pub(crate) fn finalize_boot(
         }
     }
 
+    // Enter the Tokio runtime context — required for spawning async tasks
+    // (web server, signal listener, remote channel loop).
+    let _rt_guard = rt.enter();
+
     // Initialize tools and LLM.
     let mut tools = ToolRegistry::new();
     tools.load_builtins();
